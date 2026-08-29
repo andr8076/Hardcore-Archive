@@ -2,11 +2,11 @@
 
 Hardcore Archive creates aggressively compressed, verified `.7z` archives on Linux and macOS.
 
-The public entry point is `hardcore-archive.sh`. A small launcher resolves the configuration layers and delegates to the tested archive frontend in `hardcore-archive-runner.sh`; the full engine remains in `lib/hardcore-archive-core.sh`.
+The public entry point is `hardcore-archive.sh`. A small launcher resolves the configuration layers, the runtime runner prepares the archive engine, and the strict policy/doctor frontend validates the selected workflow before archive work begins. The large legacy engine remains in `lib/hardcore-archive-core.sh` and receives deterministic runtime engine patches rather than being duplicated.
 
 ## Configuration
 
-The repository now ships a real `config` file. **That file is the installation's actual default configuration.** If you edit it, you change the defaults used by `hardcore-archive.sh`.
+The repository ships a real `config` file. **That file is the installation's actual default configuration.** If you edit it, you change the defaults used by `hardcore-archive.sh`.
 
 Configuration precedence is deliberately simple:
 
@@ -61,6 +61,38 @@ bash hardcore-archive.sh "/data/My folder"
 ```
 
 Temporary generated files are different from source data: AV1/HEVC outputs, optimized images, nested-archive staging, and other working copies are disposable and are cleaned after a successful job unless `--keep-work` is selected. Failed jobs may retain validated resume data.
+
+## Compression lanes
+
+Hardcore Archive still creates **one final `.7z` archive**, but it no longer wastes solid-LZMA2 work on file formats that are already entropy-compressed.
+
+The source inventory is divided by compression strategy:
+
+```text
+ordinary compressible files --> one solid LZMA2 lane
+already-compressed files     --> one 7-Zip Copy lane
+videos                       --> video transform/preserve lane
+JPEG/PNG                     --> image transform/preserve lane
+nested archives              --> nested-repack lane when enabled
+                                      |
+                                      `-- all added to the same final .7z
+```
+
+The LZMA2 lane keeps ordinary data together so cross-file similarity can benefit from one solid dictionary instead of compressing extensions independently.
+
+The Copy lane is used for preserved formats where another LZMA2 pass is normally wasted work, including compressed archives, compressed package/document containers, compressed audio, and additional compressed image formats. Examples include ZIP/7z/RAR, gzip/xz/zstd, DOCX/XLSX/PPTX, EPUB/JAR/APK, DEB/RPM, MP3/FLAC/Opus, WebP/AVIF/HEIC, and similar formats.
+
+Transform lanes always take precedence. For example:
+
+- an MP4 selected for video transcoding goes through the video lane, not the generic Copy lane
+- JPEG/PNG goes through the image lane even when optimization is disabled; preserved originals are then stored with Copy
+- a ZIP goes through nested repacking when `NESTED_REPACK=true`; with repacking disabled, the original ZIP goes directly to the Copy lane
+
+Plain TAR and PDF are deliberately **not** assumed to be incompressible and remain eligible for the solid LZMA2 lane.
+
+The match-cycle tuning sample is also built only from LZMA2-lane files, so already-compressed content no longer distorts the LZMA tuning decision.
+
+The archive plan and success report show both lane counts and byte totals.
 
 ## Strict source-specific dependency policy
 
@@ -135,7 +167,7 @@ Hardware video work runs in parallel with CPU-side archive/image work when appli
 
 ## Nested archives
 
-With `NESTED_REPACK=false`, ZIP/RAR/7z/tar-family files are preserved as original nested files inside the final archive.
+With `NESTED_REPACK=false`, supported compressed nested archives are preserved bit-for-bit and stored through the Copy lane inside the final archive.
 
 With `NESTED_REPACK=true`, supported nested archives are inspected and may be recursively repacked. A generated replacement is used only when it passes the engine's validation and content-selection rules; the user-owned source archive is not modified in place.
 
@@ -164,7 +196,7 @@ Run:
 bash tests/frontend-policy.sh
 ```
 
-This runs both the archive/doctor policy suite and the config-layer suite. The config tests verify shipped defaults, personal overrides, explicit `--config` overrides, CLI precedence, `--no-config`, and missing-config handling.
+This runs the archive/doctor policy suite, config-layer suite, and Copy/LZMA lane suite. The lane test applies the deterministic engine patch to the real legacy core, syntax-checks the resulting runtime engine, verifies patch idempotence, verifies transform precedence, and checks that Copy entries still target the same final archive.
 
 ## Help
 
