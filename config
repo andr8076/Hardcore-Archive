@@ -28,6 +28,11 @@ CROSS_FILESYSTEMS=false
 PROGRESS_INTERVAL=15
 MC_AUTO=true
 
+# Post-run -------------------------------------------------------------------
+# Power off only after a fully successful create/batch job. Diagnostic,
+# read-only, analyze-only, and failed runs never power the machine off.
+POWER_OFF_ON_SUCCESS=false
+
 # Video ----------------------------------------------------------------------
 # Used only when VIDEO_TRANSCODE=true and this source contains relevant video.
 VIDEO_CODEC=av1

@@ -95,13 +95,20 @@ inspect_nested_relevance() {
     add_info "Nested inspection: $NESTED_VIDEO_COUNT video, $NESTED_JPEG_COUNT JPEG, $NESTED_PNG_COUNT PNG, $NESTED_DEEP_ARCHIVE_COUNT deeper archive entries."
 }
 
+# Do not use grep -q in an ffmpeg | ... pipeline here. With `set -o pipefail`,
+# an early grep exit can SIGPIPE ffmpeg/awk and turn a successful match into a
+# false failure. AWK consumes the complete table and decides only at EOF.
+ffmpeg_table_has_name() {
+    local table=$1 wanted=$2
+    command -v ffmpeg >/dev/null 2>&1 || return 1
+    ffmpeg -hide_banner "$table" 2>/dev/null |
+        awk -v wanted="$wanted" 'NF >= 2 && $2 == wanted {found=1} END {exit(found ? 0 : 1)}'
+}
 encoder_available() {
-    local encoder=$1
-    command -v ffmpeg >/dev/null 2>&1 && ffmpeg -hide_banner -encoders 2>/dev/null | awk 'NF >= 2 {print $2}' | grep -Fxq "$encoder"
+    ffmpeg_table_has_name -encoders "$1"
 }
 filter_available() {
-    local filter=$1
-    command -v ffmpeg >/dev/null 2>&1 && ffmpeg -hide_banner -filters 2>/dev/null | awk 'NF >= 2 {print $2}' | grep -Fxq "$filter"
+    ffmpeg_table_has_name -filters "$1"
 }
 linux_has_drm_vendor() {
     local wanted=${1,,} node vendor

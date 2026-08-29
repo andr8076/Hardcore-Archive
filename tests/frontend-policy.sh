@@ -15,4 +15,6 @@ DOCTOR_REPORT="$ROOT/lib/hardcore-archive-doctor-report.sh" \
 
 bash "$ROOT/tests/config-layer.sh"
 bash "$ROOT/tests/copy-lane-policy.sh"
+bash "$ROOT/tests/ffmpeg-detection.sh"
+bash "$ROOT/tests/poweroff-policy.sh"
 printf 'All frontend policy tests passed.\n'

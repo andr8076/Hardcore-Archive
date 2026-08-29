@@ -69,13 +69,13 @@ Hardcore Archive still creates **one final `.7z` archive**, but it no longer was
 The source inventory is divided by compression strategy:
 
 ```text
-ordinary compressible files --> one solid LZMA2 lane
-already-compressed files     --> one 7-Zip Copy lane
-videos                       --> video transform/preserve lane
-JPEG/PNG                     --> image transform/preserve lane
-nested archives              --> nested-repack lane when enabled
-                                      |
-                                      `-- all added to the same final .7z
+ordinary compressible files ──> one solid LZMA2 lane
+already-compressed files     ──> one 7-Zip Copy lane
+videos                       ──> video transform/preserve lane
+JPEG/PNG                     ──> image transform/preserve lane
+nested archives              ──> nested-repack lane when enabled
+                                      │
+                                      └── all added to the same final .7z
 ```
 
 The LZMA2 lane keeps ordinary data together so cross-file similarity can benefit from one solid dictionary instead of compressing extensions independently.
@@ -165,6 +165,8 @@ Missing FFmpeg support, drivers, permissions, broken VA-API/NVENC/QSV/VideoToolb
 
 Hardware video work runs in parallel with CPU-side archive/image work when applicable.
 
+FFmpeg filter and encoder discovery consumes the complete `ffmpeg -filters` / `ffmpeg -encoders` tables before deciding whether a capability exists. This avoids `pipefail`/SIGPIPE false negatives from early-exiting `grep -q` pipelines on large/newer FFmpeg builds.
+
 ## Nested archives
 
 With `NESTED_REPACK=false`, supported compressed nested archives are preserved bit-for-bit and stored through the Copy lane inside the final archive.
@@ -178,6 +180,24 @@ bash hardcore-archive.sh --remove-source "/data/My folder"
 ```
 
 `--remove-source` is the only normal option that authorizes deletion of user-owned source content. Strong archive verification is required before deletion.
+
+## Power off after completion
+
+Use `--poweroff` when a long unattended archive job should shut the computer down after it finishes successfully:
+
+```bash
+bash hardcore-archive.sh --poweroff "/data/My folder" "/archives/My folder.7z"
+```
+
+The same behavior can be made the installation default in `config`:
+
+```text
+POWER_OFF_ON_SUCCESS=true
+```
+
+`--no-poweroff` overrides that config setting for one run. Poweroff is armed only for real create/batch jobs. It is never attempted after an archive failure, `--doctor`, `--inspect`, `--restore`, `--version`, `--help`, or `--analyze-only`.
+
+On Linux the feature deliberately requires `systemctl poweroff`; Hardcore Archive does not silently substitute a different shutdown mechanism. On macOS it uses the system `osascript` shutdown request. The archive is already fully completed and validated before the shutdown request is issued. If shutdown itself fails, the archive remains successful but the launcher exits with a distinct post-run error.
 
 ## Inspect and restore
 
@@ -196,7 +216,7 @@ Run:
 bash tests/frontend-policy.sh
 ```
 
-This runs the archive/doctor policy suite, config-layer suite, and Copy/LZMA lane suite. The lane test applies the deterministic engine patch to the real legacy core, syntax-checks the resulting runtime engine, verifies patch idempotence, verifies transform precedence, and checks that Copy entries still target the same final archive.
+This runs the archive/doctor policy suite, config-layer suite, Copy/LZMA lane suite, FFmpeg capability-detection regression suite, and poweroff-on-success policy suite. The lane test applies the deterministic engine patch to the real legacy core, syntax-checks the resulting runtime engine, verifies patch idempotence, verifies transform precedence, and checks that Copy entries still target the same final archive. The FFmpeg test uses very large fake filter/encoder tables to catch `pipefail`/SIGPIPE false negatives, while the poweroff test verifies success-only shutdown, config/CLI precedence, diagnostic-mode safety, and shutdown-failure reporting.
 
 ## Help
 
