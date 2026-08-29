@@ -1,0 +1,58 @@
+# Hardcore Archive configuration
+#
+# This is the REAL default configuration for this installation.
+# Edit this file if you want to change Hardcore Archive's default behavior.
+#
+# Precedence, lowest to highest:
+#   1. this file
+#   2. ~/.config/hardcore-archive/config
+#      macOS: ~/Library/Application Support/hardcore-archive/config
+#   3. --config FILE
+#   4. command-line options
+#
+# --no-config ignores layers 2 and 3, but this file always remains the base
+# configuration. Hardcore Archive never edits this file automatically.
+
+# Transformations ------------------------------------------------------------
+# Preservation-first defaults. Enable only the transformations you want to run.
+VIDEO_TRANSCODE=false
+IMAGE_OPTIMIZE=false
+NESTED_REPACK=false
+
+# Core archive policy --------------------------------------------------------
+EFFORT=extreme
+VERIFY_MODE=auto
+RESUME=true
+WRITE_REPORT=true
+CROSS_FILESYSTEMS=false
+PROGRESS_INTERVAL=15
+MC_AUTO=true
+
+# Video ----------------------------------------------------------------------
+# Used only when VIDEO_TRANSCODE=true and this source contains relevant video.
+VIDEO_CODEC=av1
+VIDEO_MODE=balanced
+VIDEO_MIN_SAVINGS_PERCENT=3
+VIDEO_PREFLIGHT=true
+VIDEO_SCALE=true
+VIDEO_DENOISE=true
+QUALITY_CHECK=auto
+
+# IMAGE ----------------------------------------------------------------------
+# Used only when IMAGE_OPTIMIZE=true and this source contains relevant images.
+IMAGE_MODE=maximum
+IMAGE_JOBS=auto
+
+# Nested archives ------------------------------------------------------------
+# Used only when NESTED_REPACK=true and nested archives are present.
+NESTED_MAX_DEPTH=3
+
+# Batch ----------------------------------------------------------------------
+BATCH_ROOT_FILES=archive
+BATCH_JOBS=auto
+
+# Manual overrides -----------------------------------------------------------
+# DICTIONARY=1g
+# THREADS=2
+# SEARCH_CYCLES=500
+# WORK_DIR=/path/to/work

@@ -2,16 +2,57 @@
 
 Hardcore Archive creates aggressively compressed, verified `.7z` archives on Linux and macOS.
 
-The public entry point is `hardcore-archive.sh`. The full archive engine lives in `lib/hardcore-archive-core.sh`; the frontend resolves preservation policy, source-specific capabilities, GPU policy, and diagnostics before delegating to the engine.
+The public entry point is `hardcore-archive.sh`. A small launcher resolves the configuration layers and delegates to the tested archive frontend in `hardcore-archive-runner.sh`; the full engine remains in `lib/hardcore-archive-core.sh`.
+
+## Configuration
+
+The repository now ships a real `config` file. **That file is the installation's actual default configuration.** If you edit it, you change the defaults used by `hardcore-archive.sh`.
+
+Configuration precedence is deliberately simple:
+
+```text
+1. ./config                                  shipped installation defaults
+2. ~/.config/hardcore-archive/config         personal overrides
+   macOS: ~/Library/Application Support/hardcore-archive/config
+3. --config FILE                             explicit per-run overrides
+4. command-line options                      highest priority
+```
+
+The files are layered rather than replacing one another. A personal config therefore only needs to contain settings you want to override.
+
+For example, changing the repository `config` to:
+
+```text
+VIDEO_TRANSCODE=true
+IMAGE_OPTIMIZE=true
+```
+
+makes those the defaults for that installation. A personal config can then contain only:
+
+```text
+VIDEO_MODE=maximum
+```
+
+and a command such as:
+
+```bash
+bash hardcore-archive.sh --no-video-transcode "/data/My folder"
+```
+
+still wins over every config file.
+
+`--no-config` ignores the personal and explicit `--config` layers. It does **not** ignore `./config`, because `./config` is the program's shipped base configuration rather than an optional user override.
+
+Hardcore Archive never modifies any config file automatically.
 
 ## Default behavior
 
-A normal run is source-preserving:
+The shipped `config` is preservation-first:
 
-- original videos are archived bit-for-bit; video transcoding is off
-- original JPEG/PNG files are archived bit-for-bit; image optimization is off
-- nested archives are preserved as files; recursive repacking is off
-- the source folder is kept
+- video transcoding is off
+- JPEG/PNG optimization is off
+- nested archive repacking is off
+- source deletion is off unless `--remove-source` is supplied
 - generated staging/work files are cleaned after success
 - archive integrity and completeness are checked
 
@@ -19,84 +60,60 @@ A normal run is source-preserving:
 bash hardcore-archive.sh "/data/My folder"
 ```
 
-The source is deleted only when `--remove-source` is explicitly supplied. In that mode Hardcore Archive requires strong verification before deletion.
-
-Temporary files are different from source files: generated AV1/HEVC files, optimized images, nested-archive staging, and other working copies are disposable and are cleaned after a successful job unless `--keep-work` is selected. Failed jobs may retain validated resume data.
+Temporary generated files are different from source data: AV1/HEVC outputs, optimized images, nested-archive staging, and other working copies are disposable and are cleaned after a successful job unless `--keep-work` is selected. Failed jobs may retain validated resume data.
 
 ## Strict source-specific dependency policy
 
-Hardcore Archive does not have optional dependency fallbacks.
+Hardcore Archive does not have degraded dependency fallbacks.
 
-Before a create job starts, the frontend first inventories the requested source. It then determines which capabilities can actually be used by that source and the selected options, and checks only those capabilities.
+Before a create job starts, the frontend inventories the requested source. It then determines which capabilities can actually be used by that source and the selected configuration, and checks only those capabilities.
 
 Examples:
 
 - FFmpeg is not required when video transcoding is disabled.
-- FFmpeg is also not required when video transcoding is configured on but the selected source contains no videos that can be transformed.
-- JPEG tools are required only when JPEG optimization will run.
-- A PNG optimizer is required only when PNG optimization will run.
-- Nested archives are listed before recursive media requirements are chosen, so a text-only ZIP does not automatically require media libraries.
-- `setsid`, batch storage mapping, GPU support, quality filters, and similar capabilities are required only when the workflow will use them.
+- FFmpeg is not required when transcoding is enabled but the selected source has no relevant videos.
+- JPEG/PNG tools are required only for image types that will actually be optimized.
+- Nested archives are inspected before recursive media requirements are chosen, so a text-only ZIP does not automatically require media libraries.
+- GPU support, quality filters, worker process groups, batch storage mapping, and similar capabilities are required only when the workflow uses them.
 
-The strict doctor distinguishes three failure types:
+The doctor distinguishes:
 
 - **MISSING** — a required program/package is not installed.
-- **UNSUPPORTED** — the program exists, but lacks the exact capability Hardcore Archive needs, such as a required FFmpeg encoder or filter.
-- **BROKEN** — the capability is present or advertised, but a real startup/runtime probe fails.
+- **UNSUPPORTED** — the tool exists but lacks the exact encoder/filter/API required.
+- **BROKEN** — the capability is advertised but a real runtime probe fails.
 
-If any required capability fails, the archive does not start. There is no prompt to continue with reduced functionality and `--yes` does not bypass the doctor.
+If any required capability fails, the archive does not start. `--yes` does not bypass the doctor.
 
 ## Doctor
 
-Run the same source-specific check manually with:
+Run the source-specific check manually with:
 
 ```bash
 bash hardcore-archive.sh --doctor "/data/My folder"
 ```
 
-You can combine `--doctor` with transformation options:
+or include transformations:
 
 ```bash
 bash hardcore-archive.sh --doctor --video-transcode --image-optimize "/data/My folder"
 ```
 
-A normal create job runs this doctor automatically. When everything is ready it prints a short READY message and continues. If anything is wrong, the full doctor report is shown automatically and the job stops.
+Normal create jobs run the same check automatically. On failure the full doctor report is printed automatically together with an exact repair command for common `pacman`, `apt`, `dnf`, `zypper`, or Homebrew systems.
 
-The report contains only capabilities relevant to that source/workflow and prints repair commands for the detected package manager. Repair commands are **never executed** by Hardcore Archive.
+Repair commands are **printed only**. Hardcore Archive never installs software.
 
-Example failure shape:
+## Transformations
 
-```text
-MISSING
-  PNG optimizer                PNG optimization is enabled for this source...
-
-Repair command (not executed):
-  sudo pacman -S --needed oxipng
-
-Result: NOT READY. No dependency fallback will be used.
-```
-
-Package-manager guidance is generated for common `pacman`, `apt`, `dnf`, `zypper`, and Homebrew systems.
-
-## Opt-in transformations
-
-All transformation features remain available:
+Transformations can be enabled in `config`, in a user/custom config, or on the command line:
 
 ```bash
-# Hardware video transcoding (AV1 preferred)
 bash hardcore-archive.sh --video-transcode "/data/My folder"
-
-# Lossless JPEG/PNG optimization
 bash hardcore-archive.sh --image-optimize "/data/My folder"
-
-# Recursive nested-archive repacking
 bash hardcore-archive.sh --nested-repack "/data/My folder"
-
-# Combine them
 bash hardcore-archive.sh --video-transcode --image-optimize --nested-repack "/data/My folder"
 ```
 
-The corresponding negative switches remain available:
+Negative CLI switches remain available and override config:
 
 ```text
 --no-video-transcode
@@ -104,46 +121,23 @@ The corresponding negative switches remain available:
 --no-nested-repack
 ```
 
-Transformations can also be enabled in the config file:
-
-```text
-VIDEO_TRANSCODE=true
-IMAGE_OPTIMIZE=true
-NESTED_REPACK=true
-```
-
-See `config.example` for common settings.
-
 ## Hardware video policy
 
-Video transcoding is hardware-only. CPU encoders such as `libsvtav1` and `libx265` are not accepted as fallbacks.
+Video transcoding is hardware-only. CPU encoders such as `libsvtav1` and `libx265` are not accepted as dependency fallbacks.
 
-The doctor checks that:
+The doctor verifies FFmpeg/FFprobe, the requested hardware encoder, required quality filters, a real short hardware encode, and the codec of the produced probe.
 
-1. FFmpeg and FFprobe are installed and working.
-2. the required hardware encoder is exposed by FFmpeg.
-3. required quality validation is present (`libvmaf` when video preflight quality checking is active).
-4. a real short hardware encode succeeds.
-5. FFprobe confirms that the probe produced the requested codec.
+AV1 is preferred. The **only automatic codec fallback** is AV1 → HEVC when the AV1 hardware probe specifically proves that the GPU itself cannot encode AV1 and a real HEVC hardware encode succeeds.
 
-AV1 is preferred. The **only automatic codec fallback** is AV1 → HEVC when the AV1 hardware probe specifically indicates that the GPU itself cannot encode AV1 and a real HEVC hardware encode succeeds.
+Missing FFmpeg support, drivers, permissions, broken VA-API/NVENC/QSV/VideoToolbox, or missing required quality filters are hard failures rather than fallback triggers.
 
-Missing FFmpeg support, missing drivers, device permissions, broken VA-API/NVENC/QSV/VideoToolbox, or missing quality filters do not trigger codec fallback; they are doctor failures.
+Hardware video work runs in parallel with CPU-side archive/image work when applicable.
 
-Hardware video work is forced into parallel mode so the GPU encoder can operate while CPU-side 7-Zip/image work proceeds.
+## Nested archives
 
-## No degraded dependency behavior
+With `NESTED_REPACK=false`, ZIP/RAR/7z/tar-family files are preserved as original nested files inside the final archive.
 
-If a selected capability is required, it must work. Examples:
-
-- missing `oxipng`/`optipng` while PNG optimization is needed → fail
-- missing `jpegtran` or `djpeg` while JPEG optimization is needed → fail
-- missing ACL support used by archive metadata capture → fail
-- missing `setsid` when worker process groups are needed → fail
-- missing `libvmaf` when video preflight quality validation is enabled → fail
-- hardware encoder advertised but unable to encode → fail
-
-Preserving an original because a **successful transformation** is not smaller or does not satisfy validation remains part of archive-content policy; that is not a missing-dependency fallback.
+With `NESTED_REPACK=true`, supported nested archives are inspected and may be recursively repacked. A generated replacement is used only when it passes the engine's validation and content-selection rules; the user-owned source archive is not modified in place.
 
 ## Source deletion
 
@@ -151,7 +145,7 @@ Preserving an original because a **successful transformation** is not smaller or
 bash hardcore-archive.sh --remove-source "/data/My folder"
 ```
 
-`--remove-source` is the only normal option that authorizes deletion of user-owned source content. The engine verifies the archive before deleting anything and refuses weak integrity-only verification for this mode.
+`--remove-source` is the only normal option that authorizes deletion of user-owned source content. Strong archive verification is required before deletion.
 
 ## Inspect and restore
 
@@ -164,18 +158,16 @@ Restore validates archive paths, extracts into a temporary destination, verifies
 
 ## Tests
 
-The frontend/doctor policy can be tested without creating a real archive:
+Run:
 
 ```bash
 bash tests/frontend-policy.sh
 ```
 
-The tests cover preservation defaults, source-specific dependency suppression, hard failures for missing/unsupported/broken capabilities, exact repair-command output, hardware AV1 enforcement, the permitted AV1→HEVC hardware fallback, doctor-only mode, config precedence, and the video resume-cache compatibility value.
+This runs both the archive/doctor policy suite and the config-layer suite. The config tests verify shipped defaults, personal overrides, explicit `--config` overrides, CLI precedence, `--no-config`, and missing-config handling.
 
 ## Help
 
 ```bash
 bash hardcore-archive.sh --help
 ```
-
-The frontend passes the existing archive, compression, batch, verification, restore, reporting, media-quality, and resource-tuning options through to the engine.
