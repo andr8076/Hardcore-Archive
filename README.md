@@ -2,7 +2,36 @@
 
 Hardcore Archive creates aggressively compressed, verified `.7z` archives on Linux and macOS.
 
-The public entry point is `hardcore-archive.sh`. The launcher resolves layered configuration, the runtime runner applies deterministic fail-closed policy/engine patches, and the source-specific doctor verifies the capabilities actually required before archive work begins. The stable legacy engine remains in `lib/hardcore-archive-core.sh`.
+The public entry point is now `hardcore-archive`. The historical `hardcore-archive.sh` name remains as a tiny compatibility shim, so existing commands continue to work. Runtime orchestration is split across focused `lib/*.sh` modules. The stable legacy compression engine remains temporarily in `lib/hardcore-archive-core.sh` and is being migrated section-by-section without changing archive behavior.
+
+## Architecture
+
+The shell application is now organized by responsibility:
+
+```text
+hardcore-archive              thin public entrypoint
+hardcore-archive.sh           compatibility shim
+hardcore-archive-runner.sh    thin runtime shim
+
+lib/
+    common.sh                 shared shell helpers
+    platform.sh               Linux/macOS paths and platform actions
+    config.sh                 config layering and launcher policy
+    doctor.sh                 strict doctor wiring
+    inventory.sh              inventory/command-routing boundary
+    planner.sh                runtime component planning
+    scheduler.sh              top-level runtime orchestration
+    archive.sh                archive engine assembly / Copy-LZMA boundary
+    video.sh                  hardware-only video policy
+    images.sh                 image-policy boundary
+    containers.sh             format-preserving application containers
+    nested.sh                 recursive nested-archive policy
+    verify.sh                 inspect/verification command boundary
+    restore.sh                restore command boundary
+    reporting.sh              persistent run logs and diagnostics
+```
+
+This is an incremental migration. New policy should go into the matching module rather than into the giant legacy core or the thin runner. The legacy core is deliberately left behaviorally unchanged while functions are moved out mechanically and covered by tests. The transitional Python engine patchers still exist for the sections not yet migrated; they can be retired as those sections move into native modules.
 
 ## Configuration
 
@@ -20,7 +49,7 @@ The repository ships a real `config` file. **That file is the installation's act
 
 ## Default behavior
 
-Validated transforms are now **on by default**:
+Validated transforms are **on by default**:
 
 ```text
 VIDEO_TRANSCODE=true
@@ -88,34 +117,17 @@ report.docx
 
 Extracting the final Hardcore Archive does **not** turn a DOCX into a `word/`, `_rels/`, and `docProps/` directory tree.
 
-For each candidate, the helper:
-
-1. validates that the source is a structurally plausible container for its extension;
-2. refuses encrypted entries, unsafe paths, duplicate entry names, and known signed containers;
-3. streams the original payload into a new container using maximum broadly compatible ZIP Deflate, while storing already-compressed inner media instead of wasting Deflate work;
-4. preserves ZIP entry metadata where compatible;
-5. preserves special format requirements such as EPUB/ODF `mimetype` being first and uncompressed;
-6. verifies the rebuilt archive, format structure, and SHA-256 of every internal payload entry;
-7. accepts the candidate only when it is smaller than the original.
+For each candidate, the helper validates the source container, refuses unsafe/encrypted/signed layouts, rebuilds it with compatible ZIP compression, preserves format requirements such as EPUB/ODF `mimetype`, verifies SHA-256 of every internal payload entry, and accepts the candidate only when it is smaller.
 
 Signed OOXML/ODF/JAR/WAR containers are preserved unchanged because repacking could invalidate their signatures. APK is deliberately **not** in this lane because modern APK signatures can be invalidated by changing ZIP layout even when every payload byte is unchanged. Unsupported package/container formats continue through the safe Copy lane.
 
-Every decision is reported in `.hardcore-archive-container-manifest.txt` and the normal success report:
-
-```text
-action    original path    archived path    original bytes    candidate bytes    archived bytes    reason
-repacked  report.docx      report.docx      18432000          16724011           16724011          candidate-smaller
-original  signed.docx      signed.docx      9211000           0                  9211000           signed-container-preserved
-original  book.epub        book.epub        8421991           8510042            8421991           candidate-not-smaller
-```
+Every decision is recorded in the container manifest and normal report.
 
 ## Nested archives
 
-`NESTED_REPACK` still has a separate purpose and remains enabled by default.
+`NESTED_REPACK` remains enabled by default and has a separate purpose from application-container repacking.
 
 It handles **true archives** such as ZIP/RAR/7z/TAR-compressed files. These may be unpacked recursively, have their contents processed by Hardcore Archive, and be replaced by a validated smaller `.7z` archive.
-
-That is different from application-container repack:
 
 ```text
 photos.zip   → may become photos.7z
@@ -148,7 +160,19 @@ Video transcoding is hardware-only. CPU encoders are not accepted as dependency 
 
 AV1 is preferred. The only automatic codec fallback is AV1 → HEVC when a real hardware probe proves that the GPU itself cannot encode AV1 and a real HEVC hardware encode succeeds.
 
-On FFmpeg 9 VA-API, Hardcore Archive explicitly uses CQP/global-quality rate control and treats warnings that the requested encoder option was ignored as a broken configuration. VMAF extraction reads `pooled_metrics.vmaf.mean` specifically, avoiding the old 0..1 feature-metric/0..100 VMAF mix-up.
+On FFmpeg 9 VA-API, Hardcore Archive explicitly uses CQP/global-quality rate control and treats warnings that the requested encoder option was ignored as a broken configuration. VMAF extraction reads `pooled_metrics.vmaf.mean` specifically.
+
+Video encoder selection belongs exclusively to `lib/video.sh` and the transitional hardware-video engine patch. Nested recursive jobs inherit the already-resolved hardware encoder; CPU fallback is forbidden at the engine level.
+
+## Persistent diagnostics
+
+Every create run starts a persistent transcript before runtime patching or dependency checks. On Linux it is stored under:
+
+```text
+~/.local/state/hardcore-archive/runs/<timestamp>-<pid>/run.log
+```
+
+On interruption or failure, component logs and state are preserved beside it when available (`video.log`, `image.log`, `7zip.log`, `match-cycle.log`, `state.txt`). The video log records the exact FFmpeg command used for full transcodes.
 
 ## Image optimization
 
@@ -197,7 +221,7 @@ Run:
 bash tests/frontend-policy.sh
 ```
 
-The suite covers source-specific doctor/frontend behavior, configuration layering, LZMA/Copy routing, FFmpeg capability detection, FFmpeg 9/VMAF regressions, format-preserving container repack, nested-decision reporting, and poweroff-on-success behavior. Runtime patch tests apply the deterministic patches to the real legacy core and syntax-check the generated engine.
+The suite now also enforces the modular architecture: public entrypoints must remain thin, required modules must exist and syntax-check, config/poweroff fixtures must work through the modular launcher, and hardware-video policy must remain isolated from the runner. Existing tests continue covering source-specific doctor/frontend behavior, LZMA/Copy routing, FFmpeg capability detection, FFmpeg 9/VMAF regressions, format-preserving container repack, nested-decision reporting, and poweroff-on-success behavior.
 
 ## Help
 

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 
-# Compatibility runtime entrypoint. Runtime orchestration now lives in
-# lib/scheduler.sh and feature-specific modules.
+# Hardcore Archive public entrypoint.
 if [[ -z ${BASH_VERSION:-} || ${BASH_VERSINFO[0]:-0} -lt 4 || ( ${BASH_VERSINFO[0]:-0} -eq 4 && ${BASH_VERSINFO[1]:-0} -lt 2 ) ]]; then
     printf 'Error: hardcore-archive requires Bash 4.2 or newer.\n' >&2
     exit 1
@@ -12,5 +11,9 @@ IFS=$'\n\t'
 HARDCORE_ARCHIVE_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 export HARDCORE_ARCHIVE_ROOT
 # shellcheck source=/dev/null
-source "$HARDCORE_ARCHIVE_ROOT/lib/scheduler.sh"
-hardcore_runtime_main "$@"
+source "$HARDCORE_ARCHIVE_ROOT/lib/common.sh"
+# shellcheck source=/dev/null
+source "$HARDCORE_ARCHIVE_ROOT/lib/platform.sh"
+# shellcheck source=/dev/null
+source "$HARDCORE_ARCHIVE_ROOT/lib/config.sh"
+hardcore_config_main "$@"

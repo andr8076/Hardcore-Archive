@@ -48,10 +48,12 @@ assert_lacks 'VIDEO_ENCODER=libx265'
 assert_lacks 'then apply_encoder libsvtav1'
 assert_lacks 'then apply_encoder libx265'
 
-# The public runtime runner must establish the persistent transcript before the
-# create engine starts and must apply the hardware enforcement patch.
-grep -Fq 'Persistent run log:' "$ROOT/hardcore-archive-runner.sh"
-grep -Fq 'HARDWARE_VIDEO_PATCHER=' "$ROOT/hardcore-archive-runner.sh"
-grep -Fq 'refusing to start with a video engine that can fall back to CPU encoding' "$ROOT/hardcore-archive-runner.sh"
+# The modular runtime must establish diagnostics before create work and route the
+# hardware patch only through video.sh.
+grep -Fq 'hardcore_reporting_start' "$ROOT/lib/reporting.sh"
+grep -Fq 'HARDCORE_HARDWARE_VIDEO_PATCHER=' "$ROOT/lib/planner.sh"
+grep -Fq 'refusing to start with a video engine that can fall back to CPU encoding' "$ROOT/lib/video.sh"
+grep -Fq 'hardcore_video_apply_runtime_patch' "$ROOT/lib/archive.sh"
+grep -Fq 'source "$HARDCORE_ARCHIVE_ROOT/lib/scheduler.sh"' "$ROOT/hardcore-archive-runner.sh"
 
 printf 'Hardware-only video + persistent diagnostics tests passed.\n'
