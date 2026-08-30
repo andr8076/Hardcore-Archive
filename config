@@ -14,10 +14,13 @@
 # configuration. Hardcore Archive never edits this file automatically.
 
 # Transformations ------------------------------------------------------------
-# Preservation-first defaults. Enable only the transformations you want to run.
-VIDEO_TRANSCODE=false
-IMAGE_OPTIMIZE=false
-NESTED_REPACK=false
+# Safe transformations are ON by default. Each lane has its own validation and
+# keeps the original whenever a candidate is invalid, unsafe, or not smaller
+# where a size win is required. Source deletion remains explicit/opt-in.
+VIDEO_TRANSCODE=true
+IMAGE_OPTIMIZE=true
+NESTED_REPACK=true
+CONTAINER_REPACK=true
 
 # Core archive policy --------------------------------------------------------
 EFFORT=extreme
@@ -43,14 +46,20 @@ VIDEO_SCALE=true
 VIDEO_DENOISE=true
 QUALITY_CHECK=auto
 
-# IMAGE ----------------------------------------------------------------------
+# Image ----------------------------------------------------------------------
 # Used only when IMAGE_OPTIMIZE=true and this source contains relevant images.
 IMAGE_MODE=maximum
 IMAGE_JOBS=auto
 
 # Nested archives ------------------------------------------------------------
-# Used only when NESTED_REPACK=true and nested archives are present.
+# True archive files (.zip/.7z/.rar/etc.) may be recursively unpacked and
+# rebuilt as a smaller validated .7z replacement.
 NESTED_MAX_DEPTH=3
+
+# Format-preserving application containers ----------------------------------
+# DOCX/XLSX/PPTX, ODF, EPUB, NPZ, WHL, JAR, and WAR keep the SAME filename and
+# file type after extraction. Rebuilt candidates are payload-validated and are
+# used only when smaller. Signed containers are preserved unchanged.
 
 # Batch ----------------------------------------------------------------------
 BATCH_ROOT_FILES=archive

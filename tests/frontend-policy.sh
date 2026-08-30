@@ -4,8 +4,7 @@ IFS=$'\n\t'
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 
-# The runtime wrapper prepares the patched engine; the policy suite intentionally
-# exercises the preserved doctor/frontend directly with its fake core fixture.
+# Stable frontend baseline + doctor regression suite.
 FRONTEND="$ROOT/hardcore-archive-runner-policy.sh" \
 DOCTOR_LOADER="$ROOT/lib/hardcore-archive-doctor.sh" \
 DOCTOR_BASE="$ROOT/lib/hardcore-archive-doctor-base.sh" \
@@ -17,5 +16,6 @@ bash "$ROOT/tests/config-layer.sh"
 bash "$ROOT/tests/copy-lane-policy.sh"
 bash "$ROOT/tests/ffmpeg-detection.sh"
 bash "$ROOT/tests/video-quality-nested-policy.sh"
+bash "$ROOT/tests/container-repack-policy.sh"
 bash "$ROOT/tests/poweroff-policy.sh"
 printf 'All frontend policy tests passed.\n'

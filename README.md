@@ -2,13 +2,11 @@
 
 Hardcore Archive creates aggressively compressed, verified `.7z` archives on Linux and macOS.
 
-The public entry point is `hardcore-archive.sh`. A small launcher resolves the configuration layers, the runtime runner prepares the archive engine, and the strict policy/doctor frontend validates the selected workflow before archive work begins. The large legacy engine remains in `lib/hardcore-archive-core.sh` and receives deterministic runtime engine patches rather than being duplicated.
+The public entry point is `hardcore-archive.sh`. The launcher resolves layered configuration, the runtime runner applies deterministic fail-closed policy/engine patches, and the source-specific doctor verifies the capabilities actually required before archive work begins. The stable legacy engine remains in `lib/hardcore-archive-core.sh`.
 
 ## Configuration
 
-The repository ships a real `config` file. **That file is the installation's actual default configuration.** If you edit it, you change the defaults used by `hardcore-archive.sh`.
-
-Configuration precedence is deliberately simple:
+The repository ships a real `config` file. **That file is the installation's actual base configuration.**
 
 ```text
 1. ./config                                  shipped installation defaults
@@ -18,186 +16,169 @@ Configuration precedence is deliberately simple:
 4. command-line options                      highest priority
 ```
 
-The files are layered rather than replacing one another. A personal config therefore only needs to contain settings you want to override.
+`--no-config` ignores personal and explicit config layers, but it does not ignore `./config`. Hardcore Archive never edits config files automatically.
 
-For example, changing the repository `config` to:
+## Default behavior
+
+Validated transforms are now **on by default**:
 
 ```text
 VIDEO_TRANSCODE=true
 IMAGE_OPTIMIZE=true
+NESTED_REPACK=true
+CONTAINER_REPACK=true
 ```
 
-makes those the defaults for that installation. A personal config can then contain only:
+This does **not** mean “replace everything regardless of result.” Each lane retains its own safety gate:
 
-```text
-VIDEO_MODE=maximum
-```
+- video candidates must pass hardware/quality/decode checks and the configured minimum size saving;
+- JPEG/PNG replacements are lossless, validated, and must be smaller;
+- nested archive replacements must validate and beat the original archive;
+- application-container replacements preserve their original file type and internal payload, validate successfully, and must be smaller;
+- source deletion remains off unless `--remove-source` is explicitly supplied.
 
-and a command such as:
-
-```bash
-bash hardcore-archive.sh --no-video-transcode "/data/My folder"
-```
-
-still wins over every config file.
-
-`--no-config` ignores the personal and explicit `--config` layers. It does **not** ignore `./config`, because `./config` is the program's shipped base configuration rather than an optional user override.
-
-Hardcore Archive never modifies any config file automatically.
-
-## Default behavior
-
-The shipped `config` is preservation-first:
-
-- video transcoding is off
-- JPEG/PNG optimization is off
-- nested archive repacking is off
-- source deletion is off unless `--remove-source` is supplied
-- generated staging/work files are cleaned after success
-- archive integrity and completeness are checked
-
-```bash
-bash hardcore-archive.sh "/data/My folder"
-```
-
-Temporary generated files are different from source data: AV1/HEVC outputs, optimized images, nested-archive staging, and other working copies are disposable and are cleaned after a successful job unless `--keep-work` is selected. Failed jobs may retain validated resume data.
-
-## Compression lanes
-
-Hardcore Archive still creates **one final `.7z` archive**, but it no longer wastes solid-LZMA2 work on file formats that are already entropy-compressed.
-
-The source inventory is divided by compression strategy:
-
-```text
-ordinary compressible files ──> one solid LZMA2 lane
-already-compressed files     ──> one 7-Zip Copy lane
-videos                       ──> video transform/preserve lane
-JPEG/PNG                     ──> image transform/preserve lane
-nested archives              ──> nested-repack lane when enabled
-                                      │
-                                      └── all added to the same final .7z
-```
-
-The LZMA2 lane keeps ordinary data together so cross-file similarity can benefit from one solid dictionary instead of compressing extensions independently.
-
-The Copy lane is used for preserved formats where another LZMA2 pass is normally wasted work, including compressed archives, compressed package/document containers, compressed audio, and additional compressed image formats. Examples include ZIP/7z/RAR, gzip/xz/zstd, DOCX/XLSX/PPTX, EPUB/JAR/APK, DEB/RPM, MP3/FLAC/Opus, WebP/AVIF/HEIC, and similar formats.
-
-Transform lanes always take precedence. For example:
-
-- an MP4 selected for video transcoding goes through the video lane, not the generic Copy lane
-- JPEG/PNG goes through the image lane even when optimization is disabled; preserved originals are then stored with Copy
-- a ZIP goes through nested repacking when `NESTED_REPACK=true`; with repacking disabled, the original ZIP goes directly to the Copy lane
-
-Plain TAR and PDF are deliberately **not** assumed to be incompressible and remain eligible for the solid LZMA2 lane.
-
-The match-cycle tuning sample is also built only from LZMA2-lane files, so already-compressed content no longer distorts the LZMA tuning decision.
-
-The archive plan and success report show both lane counts and byte totals.
-
-## Strict source-specific dependency policy
-
-Hardcore Archive does not have degraded dependency fallbacks.
-
-Before a create job starts, the frontend inventories the requested source. It then determines which capabilities can actually be used by that source and the selected configuration, and checks only those capabilities.
-
-Examples:
-
-- FFmpeg is not required when video transcoding is disabled.
-- FFmpeg is not required when transcoding is enabled but the selected source has no relevant videos.
-- JPEG/PNG tools are required only for image types that will actually be optimized.
-- Nested archives are inspected before recursive media requirements are chosen, so a text-only ZIP does not automatically require media libraries.
-- GPU support, quality filters, worker process groups, batch storage mapping, and similar capabilities are required only when the workflow uses them.
-
-The doctor distinguishes:
-
-- **MISSING** — a required program/package is not installed.
-- **UNSUPPORTED** — the tool exists but lacks the exact encoder/filter/API required.
-- **BROKEN** — the capability is advertised but a real runtime probe fails.
-
-If any required capability fails, the archive does not start. `--yes` does not bypass the doctor.
-
-## Doctor
-
-Run the source-specific check manually with:
-
-```bash
-bash hardcore-archive.sh --doctor "/data/My folder"
-```
-
-or include transformations:
-
-```bash
-bash hardcore-archive.sh --doctor --video-transcode --image-optimize "/data/My folder"
-```
-
-Normal create jobs run the same check automatically. On failure the full doctor report is printed automatically together with an exact repair command for common `pacman`, `apt`, `dnf`, `zypper`, or Homebrew systems.
-
-Repair commands are **printed only**. Hardcore Archive never installs software.
-
-## Transformations
-
-Transformations can be enabled in `config`, in a user/custom config, or on the command line:
-
-```bash
-bash hardcore-archive.sh --video-transcode "/data/My folder"
-bash hardcore-archive.sh --image-optimize "/data/My folder"
-bash hardcore-archive.sh --nested-repack "/data/My folder"
-bash hardcore-archive.sh --video-transcode --image-optimize --nested-repack "/data/My folder"
-```
-
-Negative CLI switches remain available and override config:
+Any transform can be disabled for one run:
 
 ```text
 --no-video-transcode
 --no-image-optimize
 --no-nested-repack
+--no-container-repack
 ```
 
-## Hardware video policy
+## Compression lanes
 
-Video transcoding is hardware-only. CPU encoders such as `libsvtav1` and `libx265` are not accepted as dependency fallbacks.
+Hardcore Archive produces **one final `.7z`** while routing files according to what can actually improve them:
 
-The doctor verifies FFmpeg/FFprobe, the requested hardware encoder, required quality filters, a real short hardware encode, and the codec of the produced probe.
+```text
+ordinary compressible files ──> solid LZMA2 lane
+true nested archives         ──> recursive nested-repack lane
+application ZIP containers   ──> format-preserving repack lane
+videos                       ──> hardware video transform/preserve lane
+JPEG/PNG                     ──> lossless image transform/preserve lane
+other compressed files       ──> 7-Zip Copy lane
+                                      │
+                                      └── same final .7z
+```
 
-AV1 is preferred. The **only automatic codec fallback** is AV1 → HEVC when the AV1 hardware probe specifically proves that the GPU itself cannot encode AV1 and a real HEVC hardware encode succeeds.
+The Copy lane avoids wasting LZMA2 on entropy-compressed data such as compressed audio, WebP/AVIF/HEIC, package files that are unsafe to rewrite, and compressed streams. Plain TAR and PDF are deliberately not assumed to be incompressible and remain eligible for LZMA2.
 
-Missing FFmpeg support, drivers, permissions, broken VA-API/NVENC/QSV/VideoToolbox, or missing required quality filters are hard failures rather than fallback triggers.
+Transform lanes have priority over the generic Copy lane.
 
-Hardware video work runs in parallel with CPU-side archive/image work when applicable.
+## Format-preserving application-container repack
 
-FFmpeg filter and encoder discovery consumes the complete `ffmpeg -filters` / `ffmpeg -encoders` tables before deciding whether a capability exists. This avoids `pipefail`/SIGPIPE false negatives from early-exiting `grep -q` pipelines on large/newer FFmpeg builds.
+`CONTAINER_REPACK=true` is enabled by default.
+
+Supported safe ZIP-based application containers currently include:
+
+```text
+.docx  .xlsx  .pptx
+.odt   .ods   .odp
+.epub  .npz   .whl
+.jar   .war
+```
+
+The important invariant is that the restored file stays the same kind of file:
+
+```text
+report.docx
+    ↓ temporary inspection/repack
+report.docx
+```
+
+Extracting the final Hardcore Archive does **not** turn a DOCX into a `word/`, `_rels/`, and `docProps/` directory tree.
+
+For each candidate, the helper:
+
+1. validates that the source is a structurally plausible container for its extension;
+2. refuses encrypted entries, unsafe paths, duplicate entry names, and known signed containers;
+3. streams the original payload into a new container using maximum broadly compatible ZIP Deflate, while storing already-compressed inner media instead of wasting Deflate work;
+4. preserves ZIP entry metadata where compatible;
+5. preserves special format requirements such as EPUB/ODF `mimetype` being first and uncompressed;
+6. verifies the rebuilt archive, format structure, and SHA-256 of every internal payload entry;
+7. accepts the candidate only when it is smaller than the original.
+
+Signed OOXML/ODF/JAR/WAR containers are preserved unchanged because repacking could invalidate their signatures. APK is deliberately **not** in this lane because modern APK signatures can be invalidated by changing ZIP layout even when every payload byte is unchanged. Unsupported package/container formats continue through the safe Copy lane.
+
+Every decision is reported in `.hardcore-archive-container-manifest.txt` and the normal success report:
+
+```text
+action    original path    archived path    original bytes    candidate bytes    archived bytes    reason
+repacked  report.docx      report.docx      18432000          16724011           16724011          candidate-smaller
+original  signed.docx      signed.docx      9211000           0                  9211000           signed-container-preserved
+original  book.epub        book.epub        8421991           8510042            8421991           candidate-not-smaller
+```
 
 ## Nested archives
 
-With `NESTED_REPACK=false`, supported compressed nested archives are preserved bit-for-bit and stored through the Copy lane inside the final archive.
+`NESTED_REPACK` still has a separate purpose and remains enabled by default.
 
-With `NESTED_REPACK=true`, supported nested archives are inspected and may be recursively repacked. A generated replacement is used only when it passes the engine's validation and content-selection rules; the user-owned source archive is not modified in place.
+It handles **true archives** such as ZIP/RAR/7z/TAR-compressed files. These may be unpacked recursively, have their contents processed by Hardcore Archive, and be replaced by a validated smaller `.7z` archive.
+
+That is different from application-container repack:
+
+```text
+photos.zip   → may become photos.7z
+report.docx  → always remains report.docx
+```
+
+If nested repacking cannot beat the original archive, the original is preserved. The report records original size, candidate size, archived size, and the exact rejection/acceptance reason for every nested archive.
+
+## Strict source-specific dependency policy
+
+Hardcore Archive does not silently degrade because a required capability is missing.
+
+Before a create job starts, the frontend inventories the requested source, determines which enabled transforms are actually relevant, and checks only the capabilities those files require. The doctor distinguishes:
+
+- **MISSING** — executable/package absent;
+- **UNSUPPORTED** — tool exists but lacks the exact required capability;
+- **BROKEN** — capability is advertised but a real runtime probe fails.
+
+Run it manually with:
+
+```bash
+bash hardcore-archive.sh --doctor "/data/My folder"
+```
+
+Normal create jobs perform the same check automatically. Repair commands are printed, never executed automatically.
+
+## Hardware video policy
+
+Video transcoding is hardware-only. CPU encoders are not accepted as dependency fallbacks.
+
+AV1 is preferred. The only automatic codec fallback is AV1 → HEVC when a real hardware probe proves that the GPU itself cannot encode AV1 and a real HEVC hardware encode succeeds.
+
+On FFmpeg 9 VA-API, Hardcore Archive explicitly uses CQP/global-quality rate control and treats warnings that the requested encoder option was ignored as a broken configuration. VMAF extraction reads `pooled_metrics.vmaf.mean` specifically, avoiding the old 0..1 feature-metric/0..100 VMAF mix-up.
+
+## Image optimization
+
+JPEG/PNG optimization is enabled by default. Originals remain untouched on disk; only validated smaller lossless candidates are written into the final archive. If no safe size win exists, the original image is stored.
 
 ## Source deletion
+
+Source deletion remains explicit:
 
 ```bash
 bash hardcore-archive.sh --remove-source "/data/My folder"
 ```
 
-`--remove-source` is the only normal option that authorizes deletion of user-owned source content. Strong archive verification is required before deletion.
+Deletion is authorized only after the strong verification path completes successfully.
 
 ## Power off after completion
 
-Use `--poweroff` when a long unattended archive job should shut the computer down after it finishes successfully:
+For unattended runs:
 
 ```bash
 bash hardcore-archive.sh --poweroff "/data/My folder" "/archives/My folder.7z"
 ```
 
-The same behavior can be made the installation default in `config`:
+or set:
 
 ```text
 POWER_OFF_ON_SUCCESS=true
 ```
 
-`--no-poweroff` overrides that config setting for one run. Poweroff is armed only for real create/batch jobs. It is never attempted after an archive failure, `--doctor`, `--inspect`, `--restore`, `--version`, `--help`, or `--analyze-only`.
-
-On Linux the feature deliberately requires `systemctl poweroff`; Hardcore Archive does not silently substitute a different shutdown mechanism. On macOS it uses the system `osascript` shutdown request. The archive is already fully completed and validated before the shutdown request is issued. If shutdown itself fails, the archive remains successful but the launcher exits with a distinct post-run error.
+`--no-poweroff` overrides it for one run. Poweroff is never attempted after failure or for help/doctor/inspect/restore/version/analyze-only modes.
 
 ## Inspect and restore
 
@@ -216,7 +197,7 @@ Run:
 bash tests/frontend-policy.sh
 ```
 
-This runs the archive/doctor policy suite, config-layer suite, Copy/LZMA lane suite, FFmpeg capability-detection regression suite, and poweroff-on-success policy suite. The lane test applies the deterministic engine patch to the real legacy core, syntax-checks the resulting runtime engine, verifies patch idempotence, verifies transform precedence, and checks that Copy entries still target the same final archive. The FFmpeg test uses very large fake filter/encoder tables to catch `pipefail`/SIGPIPE false negatives, while the poweroff test verifies success-only shutdown, config/CLI precedence, diagnostic-mode safety, and shutdown-failure reporting.
+The suite covers source-specific doctor/frontend behavior, configuration layering, LZMA/Copy routing, FFmpeg capability detection, FFmpeg 9/VMAF regressions, format-preserving container repack, nested-decision reporting, and poweroff-on-success behavior. Runtime patch tests apply the deterministic patches to the real legacy core and syntax-check the generated engine.
 
 ## Help
 

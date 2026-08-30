@@ -18,10 +18,7 @@ cfg=''
 args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
     case ${args[i]} in
-        --config)
-            cfg=${args[i+1]}
-            i=$((i+1))
-            ;;
+        --config) cfg=${args[i+1]}; i=$((i+1)) ;;
         --config=*) cfg=${args[i]#*=} ;;
     esac
 done
@@ -37,64 +34,67 @@ value() {
 }
 printf 'VIDEO_TRANSCODE=%s\n' "$(value VIDEO_TRANSCODE)"
 printf 'IMAGE_OPTIMIZE=%s\n' "$(value IMAGE_OPTIMIZE)"
+printf 'NESTED_REPACK=%s\n' "$(value NESTED_REPACK)"
+printf 'CONTAINER_REPACK=%s\n' "$(value CONTAINER_REPACK)"
 printf 'VIDEO_MODE=%s\n' "$(value VIDEO_MODE)"
 printf 'ARG=%s\n' "$@"
 FAKE_RUNNER
 chmod +x "$TMP/app/hardcore-archive.sh" "$TMP/app/hardcore-archive-runner.sh"
 
 run_launcher() {
-    HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/home/.config" \
-        bash "$TMP/app/hardcore-archive.sh" "$@"
+    HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/home/.config" bash "$TMP/app/hardcore-archive.sh" "$@"
 }
-assert_contains() {
-    local out=$1 text=$2
-    grep -Fq -- "$text" <<< "$out" || { printf 'Expected: %s\nOutput:\n%s\n' "$text" "$out" >&2; exit 1; }
-}
-assert_lacks() {
-    local out=$1 text=$2
-    ! grep -Fq -- "$text" <<< "$out" || { printf 'Unexpected: %s\nOutput:\n%s\n' "$text" "$out" >&2; exit 1; }
-}
+assert_contains() { local out=$1 text=$2; grep -Fq -- "$text" <<< "$out" || { printf 'Expected: %s\nOutput:\n%s\n' "$text" "$out" >&2; exit 1; }; }
+assert_lacks() { local out=$1 text=$2; ! grep -Fq -- "$text" <<< "$out" || { printf 'Unexpected: %s\nOutput:\n%s\n' "$text" "$out" >&2; exit 1; }; }
 
-# Shipped config is the real base defaults.
+# Shipped config is the real base defaults and safe transforms are on.
 out=$(run_launcher source)
-assert_contains "$out" 'VIDEO_TRANSCODE=false'
-assert_contains "$out" 'IMAGE_OPTIMIZE=false'
+assert_contains "$out" 'VIDEO_TRANSCODE=true'
+assert_contains "$out" 'IMAGE_OPTIMIZE=true'
+assert_contains "$out" 'NESTED_REPACK=true'
+assert_contains "$out" 'CONTAINER_REPACK=true'
 assert_contains "$out" 'VIDEO_MODE=balanced'
 
 # Editing ./config changes the installation defaults.
-sed -i 's/^VIDEO_TRANSCODE=false$/VIDEO_TRANSCODE=true/' "$TMP/app/config"
+sed -i 's/^VIDEO_TRANSCODE=true$/VIDEO_TRANSCODE=false/' "$TMP/app/config"
+sed -i 's/^CONTAINER_REPACK=true$/CONTAINER_REPACK=false/' "$TMP/app/config"
 sed -i 's/^VIDEO_MODE=balanced$/VIDEO_MODE=maximum/' "$TMP/app/config"
 out=$(run_launcher source)
-assert_contains "$out" 'VIDEO_TRANSCODE=true'
+assert_contains "$out" 'VIDEO_TRANSCODE=false'
+assert_contains "$out" 'CONTAINER_REPACK=false'
 assert_contains "$out" 'VIDEO_MODE=maximum'
 
 # User config overrides shipped defaults.
-printf 'VIDEO_TRANSCODE=false\nIMAGE_OPTIMIZE=true\n' > "$TMP/home/.config/hardcore-archive/config"
+printf 'VIDEO_TRANSCODE=true\nIMAGE_OPTIMIZE=false\nCONTAINER_REPACK=true\n' > "$TMP/home/.config/hardcore-archive/config"
 out=$(run_launcher source)
-assert_contains "$out" 'VIDEO_TRANSCODE=false'
-assert_contains "$out" 'IMAGE_OPTIMIZE=true'
+assert_contains "$out" 'VIDEO_TRANSCODE=true'
+assert_contains "$out" 'IMAGE_OPTIMIZE=false'
+assert_contains "$out" 'CONTAINER_REPACK=true'
 
 # Explicit --config overrides user config.
-printf 'VIDEO_TRANSCODE=true\nVIDEO_MODE=fast\n' > "$TMP/custom.conf"
+printf 'VIDEO_TRANSCODE=false\nIMAGE_OPTIMIZE=true\nVIDEO_MODE=fast\n' > "$TMP/custom.conf"
 out=$(run_launcher --config "$TMP/custom.conf" source)
-assert_contains "$out" 'VIDEO_TRANSCODE=true'
+assert_contains "$out" 'VIDEO_TRANSCODE=false'
 assert_contains "$out" 'IMAGE_OPTIMIZE=true'
+assert_contains "$out" 'CONTAINER_REPACK=true'
 assert_contains "$out" 'VIDEO_MODE=fast'
 assert_lacks "$out" "ARG=$TMP/custom.conf"
 
-# CLI is forwarded unchanged and therefore remains highest precedence in the
-# real runner. The external config selector itself is consumed by this layer.
-out=$(run_launcher --config "$TMP/custom.conf" --no-video-transcode source)
-assert_contains "$out" 'ARG=--no-video-transcode'
+# CLI transformation switches are forwarded unchanged and remain highest
+# precedence in the runtime policy layer.
+out=$(run_launcher --config "$TMP/custom.conf" --video-transcode --no-container-repack source)
+assert_contains "$out" 'ARG=--video-transcode'
+assert_contains "$out" 'ARG=--no-container-repack'
 assert_contains "$out" 'ARG=source'
 
 # --no-config ignores user/custom layers but never disables shipped defaults.
 out=$(run_launcher --no-config --config "$TMP/custom.conf" source)
-assert_contains "$out" 'VIDEO_TRANSCODE=true'
-assert_contains "$out" 'IMAGE_OPTIMIZE=false'
+assert_contains "$out" 'VIDEO_TRANSCODE=false'
+assert_contains "$out" 'IMAGE_OPTIMIZE=true'
+assert_contains "$out" 'NESTED_REPACK=true'
+assert_contains "$out" 'CONTAINER_REPACK=false'
 assert_contains "$out" 'VIDEO_MODE=maximum'
 
-# Missing explicit config is reported, never silently ignored.
 set +e
 out=$(run_launcher --config "$TMP/missing.conf" source 2>&1); rc=$?
 set -e
