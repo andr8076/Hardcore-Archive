@@ -38,7 +38,10 @@ POWER_OFF_ON_SUCCESS=false
 
 # Video ----------------------------------------------------------------------
 # Used only when VIDEO_TRANSCODE=true and this source contains relevant video.
-VIDEO_CODEC=av1
+# auto compares every working hardware AV1/HEVC candidate per video and keeps
+# the smallest one that meets the same VMAF and minimum-savings requirements.
+# Set av1 or hevc to force a codec globally.
+VIDEO_CODEC=auto
 VIDEO_MODE=balanced
 VIDEO_MIN_SAVINGS_PERCENT=3
 VIDEO_PREFLIGHT=true

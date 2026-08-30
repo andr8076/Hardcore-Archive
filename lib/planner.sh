@@ -10,6 +10,7 @@ hardcore_planner_init_runtime_paths() {
     HARDCORE_POLICY_RUNNER="$HARDCORE_ROOT/hardcore-archive-runner-policy.sh"
     HARDCORE_CORE_SOURCE="$HARDCORE_ROOT/lib/hardcore-archive-core.sh"
     HARDCORE_POLICY_PATCHER="$HARDCORE_ROOT/lib/hardcore-archive-policy-updates.py"
+    HARDCORE_VIDEO_AUTO_POLICY_PATCHER="$HARDCORE_ROOT/lib/hardcore-archive-video-auto-policy.py"
     HARDCORE_COPY_LANE_PATCHER="$HARDCORE_ROOT/lib/hardcore-archive-copy-lane.py"
     HARDCORE_MEDIA_FIX_PATCHER="$HARDCORE_ROOT/lib/hardcore-archive-media-fixes.py"
     HARDCORE_HARDWARE_VIDEO_PATCHER="$HARDCORE_ROOT/lib/hardcore-archive-hardware-video.py"
@@ -21,10 +22,10 @@ hardcore_planner_init_runtime_paths() {
     local required
     for required in \
         "$HARDCORE_POLICY_RUNNER" "$HARDCORE_CORE_SOURCE" "$HARDCORE_POLICY_PATCHER" \
-        "$HARDCORE_COPY_LANE_PATCHER" "$HARDCORE_MEDIA_FIX_PATCHER" \
-        "$HARDCORE_HARDWARE_VIDEO_PATCHER" "$HARDCORE_VIDEO_CALIBRATION_PATCHER" \
-        "$HARDCORE_NESTED_DIAGNOSTICS_PATCHER" "$HARDCORE_CONTAINER_PATCHER" \
-        "$HARDCORE_CONTAINER_HELPER"
+        "$HARDCORE_VIDEO_AUTO_POLICY_PATCHER" "$HARDCORE_COPY_LANE_PATCHER" \
+        "$HARDCORE_MEDIA_FIX_PATCHER" "$HARDCORE_HARDWARE_VIDEO_PATCHER" \
+        "$HARDCORE_VIDEO_CALIBRATION_PATCHER" "$HARDCORE_NESTED_DIAGNOSTICS_PATCHER" \
+        "$HARDCORE_CONTAINER_PATCHER" "$HARDCORE_CONTAINER_HELPER"
     do
         hardcore_require_file "$required" || return 1
     done

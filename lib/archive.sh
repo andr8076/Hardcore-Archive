@@ -12,11 +12,19 @@ hardcore_archive_prepare_runtime_dir() {
 }
 
 hardcore_archive_patch_policy() {
+    local base_policy="$HARDCORE_RUNTIME_DIR/.hardcore-archive-policy.base.sh"
     HARDCORE_RUNTIME_POLICY="$HARDCORE_RUNTIME_DIR/hardcore-archive-runner-policy.sh"
-    python3 "$HARDCORE_POLICY_PATCHER" "$HARDCORE_POLICY_RUNNER" "$HARDCORE_RUNTIME_POLICY" || {
+    python3 "$HARDCORE_POLICY_PATCHER" "$HARDCORE_POLICY_RUNNER" "$base_policy" || {
+        rm -f -- "$base_policy"
         printf 'Error: refusing to start with stale archive policy.\n' >&2
         return 3
     }
+    python3 "$HARDCORE_VIDEO_AUTO_POLICY_PATCHER" "$base_policy" "$HARDCORE_RUNTIME_POLICY" || {
+        rm -f -- "$base_policy" "$HARDCORE_RUNTIME_POLICY"
+        printf 'Error: refusing to start with stale automatic video-codec policy.\n' >&2
+        return 3
+    }
+    rm -f -- "$base_policy"
 }
 
 hardcore_archive_link_stable_core() {

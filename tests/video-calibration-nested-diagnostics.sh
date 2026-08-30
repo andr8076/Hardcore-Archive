@@ -28,7 +28,7 @@ bash -n "$TMP/final.sh"
 
 python3 "$CALIBRATION" "$TMP/calibrated.sh" "$TMP/calibrated-twice.sh"
 cmp -s "$TMP/calibrated.sh" "$TMP/calibrated-twice.sh" || {
-    printf 'AV1 calibration patch is not idempotent.\n' >&2
+    printf 'Video codec competition patch is not idempotent.\n' >&2
     exit 1
 }
 python3 "$NESTED_DIAG" "$TMP/final.sh" "$TMP/final-twice.sh"
@@ -52,17 +52,21 @@ assert_lacks() {
     }
 }
 
-assert_has '# HARDCORE_AV1_VAAPI_CALIBRATION_V1'
-assert_has 'local low=1 high=255 mid best_qidx=0 best_video_bps=0'
-assert_has 'Searching q_idx 1..255 for worst-sample VMAF >= %s.'
-assert_has 'Highest quality-valid q_idx: %s; predicted saving: %s%%.'
-assert_has 'Selected AV1 VAAPI q_idx %s.'
-assert_has 'video_crf="CQP q_idx ${best_qidx} (calibrated)"'
+assert_has '# HARDCORE_VIDEO_CODEC_COMPETITION_V2'
+assert_has "av1_vaapi) printf '1 255 q_idx'"
+assert_has "hevc_vaapi) printf '1 51 QP'"
+assert_has 'calibrate_hardware_candidate()'
+assert_has 'Automatic codec competition'
+assert_has 'Winner: AV1, because its quality-valid candidate is predicted smaller.'
+assert_has 'Winner: HEVC, because its quality-valid candidate is predicted smaller.'
+assert_has 'HARDCORE_ARCHIVE_AUTO_AV1_ENCODER'
+assert_has 'HARDCORE_ARCHIVE_AUTO_HEVC_ENCODER'
 assert_has 'predicted<=-20'
 assert_has 'Preflight predicts severe expansion'
 assert_has 'out_range=tv,format=yuv420p[ref]'
 assert_has 'out_range=tv,format=yuv420p[dist]'
 assert_lacks 'video_crf="CQP ${AV1_CRF}"; video_preset='"'"'N/A'"'"'; video_pix_fmt='"'"'vaapi'"'"''
+assert_lacks 'video_crf="CQP ${HEVC_CRF}"; video_preset='"'"'N/A'"'"'; video_pix_fmt='"'"'vaapi'"'"''
 
 assert_has '# HARDCORE_NESTED_CHILD_DIAGNOSTICS_V1'
 assert_has 'HARDCORE_ARCHIVE_NESTED_CHILD=1'
@@ -84,4 +88,4 @@ grep -Fq 'HARDCORE_NESTED_DIAGNOSTICS_PATCHER=' "$ROOT/lib/planner.sh"
 grep -Fq 'HARDCORE_VIDEO_CALIBRATION_PATCHER' "$ROOT/lib/video.sh"
 grep -Fq 'hardcore_nested_apply_diagnostics_patch' "$ROOT/lib/archive.sh"
 
-printf 'AV1 calibration + nested child diagnostics tests passed.\n'
+printf 'Video codec competition + nested child diagnostics tests passed.\n'

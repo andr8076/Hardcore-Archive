@@ -11,6 +11,7 @@ hardcore_doctor_link_runtime_modules() {
         hardcore-archive-doctor-base.sh \
         hardcore-archive-doctor-checks.sh \
         hardcore-archive-doctor-video-fix.sh \
+        hardcore-archive-doctor-video-auto.sh \
         hardcore-archive-doctor-report.sh
     do
         hardcore_require_file "$HARDCORE_ROOT/lib/$module" 'doctor module' || return 1

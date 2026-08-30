@@ -15,7 +15,7 @@ hardcore_video_apply_runtime_patch() {
     fi
     if ! python3 "$HARDCORE_VIDEO_CALIBRATION_PATCHER" "$hardware_core" "$output_core"; then
         rm -f -- "$hardware_core" "$output_core"
-        printf 'Error: refusing to start with stale AV1 VAAPI calibration/preflight policy.\n' >&2
+        printf 'Error: refusing to start with stale hardware video calibration/codec-selection policy.\n' >&2
         return 3
     fi
     rm -f -- "$hardware_core"
