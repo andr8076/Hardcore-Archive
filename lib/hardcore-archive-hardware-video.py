@@ -61,22 +61,17 @@ probe_parent_video_encoder() {''', "hardware encoder predicate")
         '''            *_vaapi) command+=( -vf 'format=nv12,hwupload' -c:v "$candidate" -rc_mode CQP -global_quality:v 33 ) ;;''',
         "parent VAAPI probe quality")
 
-    # The integrated helper must reject forced software encoders.
-    old_forced = '''        apply_encoder "$force_encoder"
-        if [[ "$force_encoder" != libsvtav1 && "$force_encoder" != libx265 ]]; then
-            test_real_encode "$force_encoder" "$expected_codec" "${encoder_args[@]}" || die "Forced encoder '$force_encoder' crashed on the real file test."
-        else
-            has_encoder "$force_encoder" || die "Software encoder '$force_encoder' is missing."
-            printf "  Forced software encoder %s accepted.\\
-" "$force_encoder"
-        fi'''
-    new_forced = '''        case "$force_encoder" in
+    # Reject software/non-hardware encoders before the legacy helper's existing
+    # forced-encoder branch can accept them. Keeping the remainder of that old
+    # branch intact makes this anchor independent of its multiline printf style.
+    text = repl(text,
+        '''        apply_encoder "$force_encoder"''',
+        '''        case "$force_encoder" in
             av1_vaapi|av1_nvenc|av1_qsv|hevc_videotoolbox|hevc_vaapi|hevc_nvenc|hevc_qsv) ;;
             *) die "Software/non-hardware video encoder '$force_encoder' is forbidden. Hardware encoding is mandatory." ;;
         esac
-        apply_encoder "$force_encoder"
-        test_real_encode "$force_encoder" "$expected_codec" "${encoder_args[@]}" || die "Forced hardware encoder '$force_encoder' crashed on the real file test."'''
-    text = repl(text, old_forced, new_forced, "forced hardware encoder")
+        apply_encoder "$force_encoder"''',
+        "forced hardware encoder guard")
 
     # Even the helper's autonomous path may never fall through to CPU encoders.
     text = repl(text,
