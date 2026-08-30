@@ -19,8 +19,9 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 POLICY_RUNNER="$SCRIPT_DIR/hardcore-archive-runner-policy.sh"
 CORE_SOURCE="$SCRIPT_DIR/lib/hardcore-archive-core.sh"
 COPY_LANE_PATCHER="$SCRIPT_DIR/lib/hardcore-archive-copy-lane.py"
+MEDIA_FIX_PATCHER="$SCRIPT_DIR/lib/hardcore-archive-media-fixes.py"
 
-for required in "$POLICY_RUNNER" "$CORE_SOURCE" "$COPY_LANE_PATCHER"; do
+for required in "$POLICY_RUNNER" "$CORE_SOURCE" "$COPY_LANE_PATCHER" "$MEDIA_FIX_PATCHER"; do
     [[ -f $required ]] || {
         printf 'Error: Hardcore Archive runtime component is missing: %s\n' "$required" >&2
         exit 1
@@ -65,18 +66,25 @@ trap cleanup_runtime EXIT HUP INT TERM
 mkdir -p -- "$RUNTIME_DIR/lib"
 cp -- "$POLICY_RUNNER" "$RUNTIME_DIR/hardcore-archive-runner-policy.sh"
 
-# The patcher is deliberately fail-closed: every expected legacy-core anchor
+# Both patchers are deliberately fail-closed: every expected legacy-core anchor
 # must match exactly once. A changed/incompatible engine is therefore reported
-# instead of silently reverting to recompressing already-compressed files.
-if ! python3 "$COPY_LANE_PATCHER" "$CORE_SOURCE" "$RUNTIME_DIR/lib/hardcore-archive-core.sh"; then
+# instead of silently reverting to stale compression or media behavior.
+COPY_PATCHED_CORE="$RUNTIME_DIR/lib/.hardcore-archive-core.copy-lane.sh"
+if ! python3 "$COPY_LANE_PATCHER" "$CORE_SOURCE" "$COPY_PATCHED_CORE"; then
     printf 'Error: refusing to start with an unpatched archive engine.\n' >&2
     exit 3
 fi
+if ! python3 "$MEDIA_FIX_PATCHER" "$COPY_PATCHED_CORE" "$RUNTIME_DIR/lib/hardcore-archive-core.sh"; then
+    printf 'Error: refusing to start with a stale video/nested archive engine.\n' >&2
+    exit 3
+fi
+rm -f -- "$COPY_PATCHED_CORE"
 
 for module in \
     hardcore-archive-doctor.sh \
     hardcore-archive-doctor-base.sh \
     hardcore-archive-doctor-checks.sh \
+    hardcore-archive-doctor-video-fix.sh \
     hardcore-archive-doctor-report.sh
 do
     [[ -f $SCRIPT_DIR/lib/$module ]] || {
