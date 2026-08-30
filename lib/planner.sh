@@ -13,6 +13,8 @@ hardcore_planner_init_runtime_paths() {
     HARDCORE_COPY_LANE_PATCHER="$HARDCORE_ROOT/lib/hardcore-archive-copy-lane.py"
     HARDCORE_MEDIA_FIX_PATCHER="$HARDCORE_ROOT/lib/hardcore-archive-media-fixes.py"
     HARDCORE_HARDWARE_VIDEO_PATCHER="$HARDCORE_ROOT/lib/hardcore-archive-hardware-video.py"
+    HARDCORE_VIDEO_CALIBRATION_PATCHER="$HARDCORE_ROOT/lib/hardcore-archive-video-calibration.py"
+    HARDCORE_NESTED_DIAGNOSTICS_PATCHER="$HARDCORE_ROOT/lib/hardcore-archive-nested-diagnostics.py"
     HARDCORE_CONTAINER_PATCHER="$HARDCORE_ROOT/lib/hardcore-archive-container-lane.py"
     HARDCORE_CONTAINER_HELPER="$HARDCORE_ROOT/lib/hardcore-archive-container-repack.py"
 
@@ -20,7 +22,8 @@ hardcore_planner_init_runtime_paths() {
     for required in \
         "$HARDCORE_POLICY_RUNNER" "$HARDCORE_CORE_SOURCE" "$HARDCORE_POLICY_PATCHER" \
         "$HARDCORE_COPY_LANE_PATCHER" "$HARDCORE_MEDIA_FIX_PATCHER" \
-        "$HARDCORE_HARDWARE_VIDEO_PATCHER" "$HARDCORE_CONTAINER_PATCHER" \
+        "$HARDCORE_HARDWARE_VIDEO_PATCHER" "$HARDCORE_VIDEO_CALIBRATION_PATCHER" \
+        "$HARDCORE_NESTED_DIAGNOSTICS_PATCHER" "$HARDCORE_CONTAINER_PATCHER" \
         "$HARDCORE_CONTAINER_HELPER"
     do
         hardcore_require_file "$required" || return 1

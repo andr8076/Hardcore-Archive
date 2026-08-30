@@ -26,7 +26,8 @@ hardcore_archive_link_stable_core() {
 hardcore_archive_build_runtime_core() {
     local copy_core="$HARDCORE_RUNTIME_DIR/lib/.hardcore-archive-core.copy-lane.sh"
     local media_core="$HARDCORE_RUNTIME_DIR/lib/.hardcore-archive-core.media.sh"
-    local hardware_core="$HARDCORE_RUNTIME_DIR/lib/.hardcore-archive-core.hardware.sh"
+    local video_core="$HARDCORE_RUNTIME_DIR/lib/.hardcore-archive-core.video.sh"
+    local nested_core="$HARDCORE_RUNTIME_DIR/lib/.hardcore-archive-core.nested.sh"
     local final_core="$HARDCORE_RUNTIME_DIR/lib/hardcore-archive-core.sh"
 
     python3 "$HARDCORE_COPY_LANE_PATCHER" "$HARDCORE_CORE_SOURCE" "$copy_core" || {
@@ -34,9 +35,10 @@ hardcore_archive_build_runtime_core() {
         return 3
     }
     hardcore_nested_apply_runtime_patch "$copy_core" "$media_core" || return $?
-    hardcore_video_apply_runtime_patch "$media_core" "$hardware_core" || return $?
-    hardcore_containers_apply_runtime_patch "$hardware_core" "$final_core" || return $?
-    rm -f -- "$copy_core" "$media_core" "$hardware_core"
+    hardcore_video_apply_runtime_patch "$media_core" "$video_core" || return $?
+    hardcore_nested_apply_diagnostics_patch "$video_core" "$nested_core" || return $?
+    hardcore_containers_apply_runtime_patch "$nested_core" "$final_core" || return $?
+    rm -f -- "$copy_core" "$media_core" "$video_core" "$nested_core"
 }
 
 hardcore_archive_cleanup_runtime_dir() {
