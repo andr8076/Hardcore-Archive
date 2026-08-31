@@ -16,4 +16,6 @@ source "$HARDCORE_ARCHIVE_ROOT/lib/common.sh"
 source "$HARDCORE_ARCHIVE_ROOT/lib/platform.sh"
 # shellcheck source=/dev/null
 source "$HARDCORE_ARCHIVE_ROOT/lib/config.sh"
-hardcore_config_main "$@"
+# shellcheck source=/dev/null
+source "$HARDCORE_ARCHIVE_ROOT/lib/visual.sh"
+hardcore_visual_launcher_main "$@"

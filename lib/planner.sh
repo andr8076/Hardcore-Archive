@@ -19,6 +19,7 @@ hardcore_planner_init_runtime_paths() {
     HARDCORE_NESTED_DIAGNOSTICS_PATCHER="$HARDCORE_ROOT/lib/hardcore-archive-nested-diagnostics.py"
     HARDCORE_CONTAINER_PATCHER="$HARDCORE_ROOT/lib/hardcore-archive-container-lane.py"
     HARDCORE_CONTAINER_HELPER="$HARDCORE_ROOT/lib/hardcore-archive-container-repack.py"
+    HARDCORE_VISUAL_PATCHER="$HARDCORE_ROOT/lib/hardcore-archive-visual.py"
 
     local required
     for required in \
@@ -27,7 +28,7 @@ hardcore_planner_init_runtime_paths() {
         "$HARDCORE_MEDIA_FIX_PATCHER" "$HARDCORE_HARDWARE_VIDEO_PATCHER" \
         "$HARDCORE_VIDEO_CALIBRATION_PATCHER" "$HARDCORE_VAAPI_DEVICE_PATCHER" \
         "$HARDCORE_NESTED_DIAGNOSTICS_PATCHER" "$HARDCORE_CONTAINER_PATCHER" \
-        "$HARDCORE_CONTAINER_HELPER"
+        "$HARDCORE_CONTAINER_HELPER" "$HARDCORE_VISUAL_PATCHER"
     do
         hardcore_require_file "$required" || return 1
     done

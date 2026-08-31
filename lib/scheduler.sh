@@ -6,7 +6,7 @@
 HARDCORE_SCHEDULER_SH_LOADED=1
 
 HARDCORE_LIB_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-for module in common platform reporting inventory verify restore planner doctor images video nested containers archive; do
+for module in common platform reporting inventory verify restore planner doctor images video nested containers visual archive; do
     # shellcheck source=/dev/null
     source "$HARDCORE_LIB_DIR/$module.sh"
 done
