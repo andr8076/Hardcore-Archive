@@ -26,7 +26,7 @@ def repl(text: str, old: str, new: str, label: str) -> str:
 
 
 def regex_repl(text: str, pattern: str, replacement: str, label: str) -> str:
-    new, count = re.subn(pattern, replacement, text, count=1, flags=re.MULTILINE)
+    new, count = re.subn(pattern, lambda _match: replacement, text, count=1, flags=re.MULTILINE)
     if count != 1:
         fail(label, count)
     return new
@@ -96,25 +96,17 @@ def main() -> int:
         "trusted nested hardware encoder",
     )
 
-    old_video_failure = r'''            if (( rc == 3 )); then
-                ((unchanged++))
-            else
-                ((failed++))
-                printf 'Batch item failed with exit code %s; continuing.\
-' "$rc" >&2
-            fi'''
+    video_failure_pattern = r'''^            if \(\( rc == 3 \)\); then\n                \(\(unchanged\+\+\)\)\n            else\n                \(\(failed\+\+\)\)\n                printf 'Batch item failed with exit code %s; continuing\.\\n' "\$rc" >&2\n            fi$'''
     new_video_failure = r'''            if (( rc == 3 )); then
                 ((unchanged++))
             elif [[ ${HARDCORE_ARCHIVE_NESTED_CHILD:-0} == 1 ]]; then
                 ((unchanged++))
-                printf 'Nested child video item failed with exit code %s; original preserved and recursion continues.\
-' "$rc" >&2
+                printf 'Nested child video item failed with exit code %s; original preserved and recursion continues.\n' "$rc" >&2
             else
                 ((failed++))
-                printf 'Batch item failed with exit code %s; continuing.\
-' "$rc" >&2
+                printf 'Batch item failed with exit code %s; continuing.\n' "$rc" >&2
             fi'''
-    text = repl(text, old_video_failure, new_video_failure, "nested child video preservation")
+    text = regex_repl(text, video_failure_pattern, new_video_failure, "nested child video preservation")
 
     dst.write_text(text, encoding="utf-8")
     os.chmod(dst, 0o700)
