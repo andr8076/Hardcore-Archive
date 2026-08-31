@@ -417,7 +417,9 @@ calibrate_and_choose_video_codec() {
 
     text = repl(
         text,
-        "run_video_preflight\n\nprintf '\\\nRecommended encoding plan\\\n'",
+        """run_video_preflight
+
+printf '\\nRecommended encoding plan\\n'""",
         '''calibrate_and_choose_video_codec
 calibration_rc=$?
 if (( calibration_rc == 3 )); then
@@ -428,9 +430,7 @@ fi
 
 run_video_preflight
 
-printf '\\
-Recommended encoding plan\\
-' ''',
+printf '\\nRecommended encoding plan\\n' ''',
         "codec competition invocation",
     )
 
