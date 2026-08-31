@@ -14,5 +14,8 @@ fi
 if [[ -f $DOCTOR_LIB_DIR/hardcore-archive-doctor-encoder-menu.sh ]]; then
     source "$DOCTOR_LIB_DIR/hardcore-archive-doctor-encoder-menu.sh"
 fi
+if [[ -f $DOCTOR_LIB_DIR/hardcore-archive-doctor-encoder-runtime.sh ]]; then
+    source "$DOCTOR_LIB_DIR/hardcore-archive-doctor-encoder-runtime.sh"
+fi
 source "$DOCTOR_LIB_DIR/hardcore-archive-doctor-report.sh"
 unset DOCTOR_LIB_DIR
