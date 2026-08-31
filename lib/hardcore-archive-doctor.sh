@@ -11,5 +11,8 @@ fi
 if [[ -f $DOCTOR_LIB_DIR/hardcore-archive-doctor-video-auto.sh ]]; then
     source "$DOCTOR_LIB_DIR/hardcore-archive-doctor-video-auto.sh"
 fi
+if [[ -f $DOCTOR_LIB_DIR/hardcore-archive-doctor-encoder-menu.sh ]]; then
+    source "$DOCTOR_LIB_DIR/hardcore-archive-doctor-encoder-menu.sh"
+fi
 source "$DOCTOR_LIB_DIR/hardcore-archive-doctor-report.sh"
 unset DOCTOR_LIB_DIR

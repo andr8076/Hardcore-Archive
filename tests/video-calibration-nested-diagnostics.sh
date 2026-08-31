@@ -12,23 +12,30 @@ COPY="$ROOT/lib/hardcore-archive-copy-lane.py"
 MEDIA="$ROOT/lib/hardcore-archive-media-fixes.py"
 HARDWARE="$ROOT/lib/hardcore-archive-hardware-video.py"
 CALIBRATION="$ROOT/lib/hardcore-archive-video-calibration.py"
+VAAPI_DEVICE="$ROOT/lib/hardcore-archive-vaapi-device.py"
 NESTED_DIAG="$ROOT/lib/hardcore-archive-nested-diagnostics.py"
 
-for required in "$CORE" "$COPY" "$MEDIA" "$HARDWARE" "$CALIBRATION" "$NESTED_DIAG"; do
+for required in "$CORE" "$COPY" "$MEDIA" "$HARDWARE" "$CALIBRATION" "$VAAPI_DEVICE" "$NESTED_DIAG"; do
     [[ -f $required ]] || { printf 'Missing test dependency: %s\n' "$required" >&2; exit 1; }
 done
 
-python3 -m py_compile "$CALIBRATION" "$NESTED_DIAG"
+python3 -m py_compile "$CALIBRATION" "$VAAPI_DEVICE" "$NESTED_DIAG"
 python3 "$COPY" "$CORE" "$TMP/copy.sh"
 python3 "$MEDIA" "$TMP/copy.sh" "$TMP/media.sh"
 python3 "$HARDWARE" "$TMP/media.sh" "$TMP/hardware.sh"
 python3 "$CALIBRATION" "$TMP/hardware.sh" "$TMP/calibrated.sh"
-python3 "$NESTED_DIAG" "$TMP/calibrated.sh" "$TMP/final.sh"
+python3 "$VAAPI_DEVICE" "$TMP/calibrated.sh" "$TMP/device-bound.sh"
+python3 "$NESTED_DIAG" "$TMP/device-bound.sh" "$TMP/final.sh"
 bash -n "$TMP/final.sh"
 
 python3 "$CALIBRATION" "$TMP/calibrated.sh" "$TMP/calibrated-twice.sh"
 cmp -s "$TMP/calibrated.sh" "$TMP/calibrated-twice.sh" || {
     printf 'Video codec competition patch is not idempotent.\n' >&2
+    exit 1
+}
+python3 "$VAAPI_DEVICE" "$TMP/device-bound.sh" "$TMP/device-bound-twice.sh"
+cmp -s "$TMP/device-bound.sh" "$TMP/device-bound-twice.sh" || {
+    printf 'VAAPI device patch is not idempotent.\n' >&2
     exit 1
 }
 python3 "$NESTED_DIAG" "$TMP/final.sh" "$TMP/final-twice.sh"
@@ -68,6 +75,12 @@ assert_has 'out_range=tv,format=yuv420p[dist]'
 assert_lacks 'video_crf="CQP ${AV1_CRF}"; video_preset='"'"'N/A'"'"'; video_pix_fmt='"'"'vaapi'"'"''
 assert_lacks 'video_crf="CQP ${HEVC_CRF}"; video_preset='"'"'N/A'"'"'; video_pix_fmt='"'"'vaapi'"'"''
 
+assert_has '# HARDCORE_EXPLICIT_VAAPI_DEVICE_V1'
+assert_has 'vaapi=va:${HARDCORE_ARCHIVE_VAAPI_DEVICE:-}'
+assert_lacks '"vaapi=va:"'
+assert_lacks "'vaapi=va:'"
+assert_has 'video_vaapi_device=%s'
+
 assert_has '# HARDCORE_NESTED_CHILD_DIAGNOSTICS_V1'
 assert_has 'HARDCORE_ARCHIVE_NESTED_CHILD=1'
 assert_has 'HARDCORE_ARCHIVE_HARDWARE_ENCODER_LOCKED="${VIDEO_ENCODER:-}"'
@@ -84,8 +97,9 @@ for predicted in -70 -150 -267; do
 done
 
 grep -Fq 'HARDCORE_VIDEO_CALIBRATION_PATCHER=' "$ROOT/lib/planner.sh"
+grep -Fq 'HARDCORE_VAAPI_DEVICE_PATCHER=' "$ROOT/lib/planner.sh"
 grep -Fq 'HARDCORE_NESTED_DIAGNOSTICS_PATCHER=' "$ROOT/lib/planner.sh"
-grep -Fq 'HARDCORE_VIDEO_CALIBRATION_PATCHER' "$ROOT/lib/video.sh"
+grep -Fq 'HARDCORE_VAAPI_DEVICE_PATCHER' "$ROOT/lib/video.sh"
 grep -Fq 'hardcore_nested_apply_diagnostics_patch' "$ROOT/lib/archive.sh"
 
-printf 'Video codec competition + nested child diagnostics tests passed.\n'
+printf 'Video codec competition + explicit VAAPI device + nested child diagnostics tests passed.\n'

@@ -156,13 +156,24 @@ Normal create jobs perform the same check automatically. Repair commands are pri
 
 ## Hardware video policy
 
-Video transcoding is hardware-only. CPU encoders are not accepted as dependency fallbacks.
+Video transcoding is hardware-only. CPU encoders are never accepted as dependency fallbacks.
 
-AV1 is preferred. The only automatic codec fallback is AV1 → HEVC when a real hardware probe proves that the GPU itself cannot encode AV1 and a real HEVC hardware encode succeeds.
+`VIDEO_CODEC=auto` is the default. When both working AV1 and HEVC hardware encoders are available, Hardcore Archive calibrates them against the same VMAF floor and minimum-savings target for each video, then uses the smaller quality-valid candidate. `--video-codec av1` and `--video-codec hevc` remain explicit overrides.
+
+Before an interactive create run starts, Hardcore Archive prints the available AV1/HEVC FFmpeg encoders in two groups:
+
+```text
+GPU / hardware encoders (selectable)
+CPU / software encoders (informational only; GPU encoding is mandatory)
+```
+
+Working hardware entries are real encode probes, not just names returned by `ffmpeg -encoders`. On Linux/VAAPI, entries are expanded per `/dev/dri/renderD*` device and include the GPU/device label when available. Choosing a VAAPI entry exports that exact render node through calibration, preflight, nested child work, and the final FFmpeg command, so selecting a GPU does not merely select the generic `av1_vaapi`/`hevc_vaapi` backend.
+
+`[0] AUTO` keeps automatic AV1/HEVC competition. Selecting a numbered GPU entry locks that exact encoder (and, for VAAPI, render node). An explicit `--video-encoder NAME` also bypasses the prompt. `--yes`, non-interactive runs, and nested child runs do not block waiting for input.
 
 On FFmpeg 9 VA-API, Hardcore Archive explicitly uses CQP/global-quality rate control and treats warnings that the requested encoder option was ignored as a broken configuration. VMAF extraction reads `pooled_metrics.vmaf.mean` specifically.
 
-Video encoder selection belongs exclusively to `lib/video.sh` and the transitional hardware-video engine patch. Nested recursive jobs inherit the already-resolved hardware encoder; CPU fallback is forbidden at the engine level.
+Video encoder selection belongs exclusively to the video/doctor policy modules and the transitional hardware-video engine patches. CPU fallback is forbidden at the engine level.
 
 ## Persistent diagnostics
 
@@ -172,7 +183,7 @@ Every create run starts a persistent transcript before runtime patching or depen
 ~/.local/state/hardcore-archive/runs/<timestamp>-<pid>/run.log
 ```
 
-On interruption or failure, component logs and state are preserved beside it when available (`video.log`, `image.log`, `7zip.log`, `match-cycle.log`, `state.txt`). The video log records the exact FFmpeg command used for full transcodes.
+On interruption or failure, component logs and state are preserved beside it when available (`video.log`, `image.log`, `7zip.log`, `match-cycle.log`, `state.txt`). The video log records the exact FFmpeg command used for full transcodes, including the selected VAAPI render node when one is locked.
 
 ## Image optimization
 
@@ -219,12 +230,4 @@ Run:
 
 ```bash
 bash tests/frontend-policy.sh
-```
-
-The suite now also enforces the modular architecture: public entrypoints must remain thin, required modules must exist and syntax-check, config/poweroff fixtures must work through the modular launcher, and hardware-video policy must remain isolated from the runner. Existing tests continue covering source-specific doctor/frontend behavior, LZMA/Copy routing, FFmpeg capability detection, FFmpeg 9/VMAF regressions, format-preserving container repack, nested-decision reporting, and poweroff-on-success behavior.
-
-## Help
-
-```bash
-bash hardcore-archive.sh --help
 ```
