@@ -208,15 +208,19 @@ hardcore_visual_validate() {
         "visual runtime insertion",
     )
 
+    # The Copy-lane patch runs before visual mode and renames the legacy
+    # nonvideo-compression failure context to lzma-compression. Anchor against
+    # the post-patch runtime text so visual mode follows the same engine that
+    # will actually execute.
     text = repl(
         text,
         '''        : > "$SEVEN_ZIP_LOG"
 
-        FAILURE_CONTEXT="nonvideo-compression"''',
+        FAILURE_CONTEXT="lzma-compression"''',
         '''        : > "$SEVEN_ZIP_LOG"
         hardcore_visual_open_log "Hardcore Archive - 7-Zip / archive" "$SEVEN_ZIP_LOG" pid "$$"
 
-        FAILURE_CONTEXT="nonvideo-compression"''',
+        FAILURE_CONTEXT="lzma-compression"''',
         "7-Zip visual viewer",
     )
 
