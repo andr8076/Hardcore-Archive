@@ -37,6 +37,7 @@ hardcore_runtime_main() {
 
     export HARDCORE_ARCHIVE_CONTAINER_HELPER="$HARDCORE_CONTAINER_HELPER"
     export HARDCORE_ARCHIVE_METADATA_HELPER="$HARDCORE_METADATA_HELPER"
+    hardcore_enable_adaptive_hash_verifier
 
     set +e
     hardcore_run_sourced "$HARDCORE_POLICY_RUNNER" "$@"
