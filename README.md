@@ -177,13 +177,13 @@ On FFmpeg 9 VA-API, Hardcore Archive explicitly uses CQP/global-quality rate con
 
 Video encoder selection belongs exclusively to the video/doctor policy modules and the checked-in engine. CPU fallback is forbidden at the engine level.
 
-Video transcoding is intentionally perceptually lossy, not bit-exact. The loss budget is configurable rather than tied to a mode-specific constant:
+Video transcoding is intentionally perceptually lossy, not bit-exact. The loss budget is now one direct quality-check value rather than a separate hardcoded VMAF constant:
 
 ```text
-VIDEO_MIN_VMAF=92
+QUALITY_CHECK=92
 ```
 
-Override it per run with `--video-min-vmaf V`. Values from 0 through 100 are accepted; a higher value preserves more visual fidelity but usually reduces the compression opportunity. Batch and nested jobs inherit the same value. With the default quality policy, short/small videos are checked too; a missing measurement or a candidate below the floor preserves the original instead of accepting an unchecked transcode.
+Set it to any value from 0 through 100. A higher value preserves more visual fidelity but usually reduces the compression opportunity. Override it per run with `--quality-check V`, or use `QUALITY_CHECK=off` / `--quality-check off` to disable sample quality checks. Batch and nested jobs inherit the same value. The launcher translates this user-facing setting into the engine's internal VMAF threshold, so the acceptance score is no longer fixed in normal configuration.
 
 ## Persistent diagnostics
 
