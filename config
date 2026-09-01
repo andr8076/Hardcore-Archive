@@ -41,17 +41,18 @@ POWER_OFF_ON_SUCCESS=false
 # Video ----------------------------------------------------------------------
 # Used only when VIDEO_TRANSCODE=true and this source contains relevant video.
 # auto compares every working hardware AV1/HEVC candidate per video and keeps
-# the smallest one that meets the same VMAF and minimum-savings requirements.
+# the smallest one that meets the same quality and minimum-savings requirements.
 # Set av1 or hevc to force a codec globally.
 VIDEO_CODEC=auto
 VIDEO_MODE=balanced
-# Minimum accepted VMAF score for calibrated video candidates.
-VIDEO_MIN_VMAF=92
+# Minimum accepted VMAF score for video candidates. Range: 0..100.
+# Higher values preserve more visual quality but usually reduce compression.
+# Set QUALITY_CHECK=off to disable sample quality checks.
+QUALITY_CHECK=92
 VIDEO_MIN_SAVINGS_PERCENT=3
 VIDEO_PREFLIGHT=true
 VIDEO_SCALE=true
 VIDEO_DENOISE=true
-QUALITY_CHECK=auto
 
 # Image ----------------------------------------------------------------------
 # Used only when IMAGE_OPTIMIZE=true and this source contains relevant images.

@@ -48,6 +48,37 @@ hardcore_config_bool_value() {
     esac
 }
 
+hardcore_quality_value_is_score() {
+    local value=$1
+    [[ $value =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+    LC_NUMERIC=C awk -v v="$value" 'BEGIN {exit !(v >= 0 && v <= 100)}'
+}
+
+hardcore_normalize_quality_config() {
+    local value
+    value=$(hardcore_config_value QUALITY_CHECK "$HARDCORE_MERGED_CONFIG" || true)
+    [[ -n $value ]] || return 0
+
+    case ${value,,} in
+        auto|off|required)
+            # Legacy policy values remain accepted for existing user configs.
+            return 0
+            ;;
+    esac
+
+    if ! hardcore_quality_value_is_score "$value"; then
+        printf 'Error: QUALITY_CHECK must be a VMAF score from 0 to 100, or off.\n' >&2
+        return 2
+    fi
+
+    # The checked-in engine still separates the quality policy from its VMAF
+    # threshold. Keep that internal interface private while exposing one simple
+    # numeric QUALITY_CHECK value in the real configuration.
+    printf '# ---- normalized quality check ----\n' >> "$HARDCORE_MERGED_CONFIG"
+    printf 'VIDEO_MIN_VMAF=%s\n' "$value" >> "$HARDCORE_MERGED_CONFIG"
+    printf 'QUALITY_CHECK=auto\n\n' >> "$HARDCORE_MERGED_CONFIG"
+}
+
 hardcore_append_config() {
     local file=$1 label=$2
     printf '# ---- %s: %s ----\n' "$label" "$file" >> "$HARDCORE_MERGED_CONFIG"
@@ -76,7 +107,7 @@ hardcore_config_main() {
     local ignore_external_config=false custom_config=''
     local power_off_state=auto power_off_explicit=false power_off_eligible=true
     local show_launcher_help=false after_dash_dash=false
-    local arg config_power_off power_off_enabled=false rc power_rc
+    local arg config_power_off power_off_enabled=false rc power_rc quality_value
     local i
 
     for ((i=0; i<${#original_args[@]}; i++)); do
@@ -144,6 +175,8 @@ hardcore_config_main() {
         [[ -n $custom_config ]] && hardcore_append_config "$custom_config" 'explicit overrides'
     fi
 
+    hardcore_normalize_quality_config || return $?
+
     config_power_off=$(hardcore_config_bool_value POWER_OFF_ON_SUCCESS "$HARDCORE_MERGED_CONFIG" || true)
     if [[ $power_off_state == auto ]]; then
         [[ $config_power_off == true || $config_power_off == false ]] && power_off_enabled=$config_power_off || power_off_enabled=false
@@ -184,6 +217,27 @@ hardcore_config_main() {
                 ;;
             --config=*)
                 ;;
+            --quality-check)
+                if (( i + 1 >= ${#original_args[@]} )); then
+                    printf 'Error: --quality-check requires a VMAF score from 0 to 100, or off.\n' >&2
+                    return 2
+                fi
+                quality_value=${original_args[i+1]}
+                if hardcore_quality_value_is_score "$quality_value"; then
+                    forwarded+=(--quality-check auto --video-min-vmaf "$quality_value")
+                else
+                    forwarded+=(--quality-check "$quality_value")
+                fi
+                i=$((i + 1))
+                ;;
+            --quality-check=*)
+                quality_value=${arg#*=}
+                if hardcore_quality_value_is_score "$quality_value"; then
+                    forwarded+=(--quality-check auto --video-min-vmaf "$quality_value")
+                else
+                    forwarded+=("$arg")
+                fi
+                ;;
             *)
                 forwarded+=("$arg")
                 ;;
@@ -204,6 +258,10 @@ Post-run launcher options:
   --poweroff               Power off the computer after a successful create/batch job.
   --no-poweroff            Override POWER_OFF_ON_SUCCESS=true for this run.
                            Poweroff is never attempted after failure or read-only/diagnostic modes.
+
+Quality setting:
+  --quality-check V        Set the VMAF quality floor from 0 to 100.
+                           Use --quality-check off to disable sample quality checks.
 EOF_HELP
     fi
 
