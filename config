@@ -24,9 +24,10 @@ CONTAINER_REPACK=true
 
 # Core archive policy --------------------------------------------------------
 EFFORT=extreme
-# auto performs one extraction pass and compares every archived file with the
-# SHA-256 manifest built from the selected source/transformed candidates.
-VERIFY_MODE=auto
+# Default verification checks the 7-Zip streams/CRC and exact archive-path
+# completeness without extracting payloads again or comparing content hashes.
+# Use VERIFY_MODE=hashes or VERIFY_MODE=extract for explicit SHA-256 verification.
+VERIFY_MODE=integrity
 RESUME=true
 WRITE_REPORT=true
 CROSS_FILESYSTEMS=false

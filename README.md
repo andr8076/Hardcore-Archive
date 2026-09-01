@@ -211,15 +211,16 @@ Deletion is authorized only after the strong verification path completes success
 
 ## Verification
 
-`VERIFY_MODE=auto` is the default and now always means content verification: Hardcore Archive extracts the completed archive once, then checks every archived regular file against the SHA-256 manifest built from the exact selected inputs and accepted transformation candidates. It no longer starts one `7z x -so` process per file, which was especially expensive for solid archives.
+`VERIFY_MODE=integrity` is the shipped default. It runs the 7-Zip stream/CRC integrity test and checks that the archive contains exactly the expected paths. It does **not** extract every payload again and does **not** compare payload SHA-256 hashes, so normal archive creation avoids the expensive content-hash verification pass.
 
 The modes are:
 
-- `auto` / `hashes` — one extraction pass plus SHA-256 comparison;
+- `integrity` — default; 7-Zip stream/CRC integrity plus exact path-completeness checking, without payload hash comparison;
+- `hashes` — one extraction pass plus SHA-256 comparison of every archived regular file;
 - `extract` — the same strong extraction-and-hash path, retained as an explicit name;
-- `integrity` — 7-Zip stream/CRC integrity and completeness only;
+- `auto` — legacy strong-verification alias that currently resolves to `hashes` when explicitly selected.
 
-Strong verification needs temporary space roughly equal to the extracted archive. `--remove-source` still refuses any verification mode weaker than hashes.
+Strong verification needs temporary space roughly equal to the extracted archive. Because the default is now integrity-only, `--remove-source` requires an explicit `--verify hashes` or `--verify extract`; the program refuses to delete a source after integrity-only verification.
 
 ## Power off after completion
 
@@ -265,4 +266,4 @@ Run:
 bash tests/frontend-policy.sh
 ```
 
-The suite includes default/single-pass hash policy checks, metadata round trips and hostile ACL paths, deterministic corpus generation, static-module wiring, and the existing compression/video/container policies.
+The suite includes default integrity/no-content-hash policy checks, explicit single-pass hash verification checks, metadata round trips and hostile ACL paths, deterministic corpus generation, static-module wiring, and the existing compression/video/container policies.
