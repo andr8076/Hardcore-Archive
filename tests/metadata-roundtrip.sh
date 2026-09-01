@@ -54,23 +54,73 @@ if [[ $xattr_expected == yes ]]; then
     [[ $(python3 -c 'import os,sys; print(os.getxattr(sys.argv[1], "user.hardcore_test").decode())' "$RESTORE/tree/file.txt") == restored-value ]]
 fi
 
-# Parent traversal and leaf symlinks must be rejected before setfacl is called.
+# An extended ACL must be sanitized before setfacl is invoked. Use a fake
+# setfacl so this policy test works even on hosts without the ACL package.
+FAKEBIN="$TMP/fakebin"
+mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/setfacl" <<'EOF_FAKE_SETFACL'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ $# == 1 && $1 == --restore=* ]]
+manifest=${1#--restore=}
+cp -- "$manifest" "$ACL_CAPTURE"
+pwd > "$ACL_CWD_CAPTURE"
+EOF_FAKE_SETFACL
+chmod 700 "$FAKEBIN/setfacl"
+cat > "$META/acl.txt" <<'EOF_SANITIZE_ACL'
+# file: tree/file.txt
+# owner: root
+# group: root
+# flags: ---
+user::rw-
+user:12345:r--
+group::r--
+mask::r--
+other::---
+EOF_SANITIZE_ACL
+ACL_CAPTURE="$TMP/acl.capture" ACL_CWD_CAPTURE="$TMP/acl.cwd" \
+    PATH="$FAKEBIN:$PATH" \
+    python3 "$HELPER" --root "$RESTORE" --metadata-dir "$META"
+grep -Fq '# file: tree/file.txt' "$TMP/acl.capture"
+grep -Fq 'user:12345:r--' "$TMP/acl.capture"
+! grep -Eq '^# (owner|group|flags):' "$TMP/acl.capture"
+[[ $(cat "$TMP/acl.cwd") == "$RESTORE" ]]
+
+# Parent traversal and symlinks at either the leaf or any parent component must
+# be rejected before setfacl sees the path.
 printf 'outside\n' > "$TMP/outside"
 ln -s "$TMP/outside" "$RESTORE/tree/outside-link"
 cat > "$META/acl.txt" <<'EOF_BAD_ACL'
 # file: tree/outside-link
 user::rw-
-user:nobody:r--
+user:12345:r--
 group::r--
 mask::r--
 other::---
 EOF_BAD_ACL
-if python3 "$HELPER" --root "$RESTORE" --metadata-dir "$META" >"$TMP/unsafe.out" 2>&1; then
+if PATH="$FAKEBIN:$PATH" python3 "$HELPER" --root "$RESTORE" --metadata-dir "$META" >"$TMP/unsafe.out" 2>&1; then
     printf 'Unsafe ACL symlink was accepted.\n' >&2
     exit 1
 fi
 grep -Fq 'ACL path is a symlink leaf' "$TMP/unsafe.out"
 [[ $(cat "$TMP/outside") == outside ]]
+
+mkdir -p "$RESTORE/tree/real-parent"
+printf 'inside\n' > "$RESTORE/tree/real-parent/child.txt"
+ln -s real-parent "$RESTORE/tree/alias-parent"
+cat > "$META/acl.txt" <<'EOF_PARENT_SYMLINK'
+# file: tree/alias-parent/child.txt
+user::rw-
+user:12345:r--
+group::r--
+mask::r--
+other::---
+EOF_PARENT_SYMLINK
+if PATH="$FAKEBIN:$PATH" python3 "$HELPER" --root "$RESTORE" --metadata-dir "$META" >"$TMP/parent-symlink.out" 2>&1; then
+    printf 'ACL path through a symlinked parent was accepted.\n' >&2
+    exit 1
+fi
+grep -Fq 'ACL path contains a symlink component' "$TMP/parent-symlink.out"
 
 cat > "$META/acl.txt" <<'EOF_TRAVERSAL'
 # file: ../outside
@@ -78,22 +128,47 @@ user::rw-
 group::r--
 other::---
 EOF_TRAVERSAL
-if python3 "$HELPER" --root "$RESTORE" --metadata-dir "$META" >"$TMP/traversal.out" 2>&1; then
+if PATH="$FAKEBIN:$PATH" python3 "$HELPER" --root "$RESTORE" --metadata-dir "$META" >"$TMP/traversal.out" 2>&1; then
     printf 'Traversing ACL path was accepted.\n' >&2
     exit 1
 fi
 grep -Fq 'unsafe metadata path' "$TMP/traversal.out"
 
-grep -Fq 'getfacl -R -p -n' "$CORE"
-grep -Fq 'restore fails closed rather than silently dropping access controls' "$CORE"
+cat > "$META/acl.txt" <<'EOF_UNSUPPORTED_ACL'
+# file: tree/file.txt
+# command: chmod 777 tree/file.txt
+user::rw-
+user:12345:r--
+group::r--
+mask::r--
+other::---
+EOF_UNSUPPORTED_ACL
+if PATH="$FAKEBIN:$PATH" python3 "$HELPER" --root "$RESTORE" --metadata-dir "$META" >"$TMP/unsupported.out" 2>&1; then
+    printf 'Unsupported ACL metadata was accepted.\n' >&2
+    exit 1
+fi
+grep -Fq 'unsafe or unsupported ACL entry' "$TMP/unsupported.out"
 
-# Exercise a real extended-ACL round trip where the host provides ACL tools.
+if [[ -n $CORE ]]; then
+    grep -Fq 'getfacl -R -p -n' "$CORE"
+    grep -Fq 'restore fails closed rather than silently dropping access controls' "$CORE"
+fi
+
+# Exercise real access + default ACL round trips where the host supports them.
 if command -v getfacl >/dev/null 2>&1 && command -v setfacl >/dev/null 2>&1 && id nobody >/dev/null 2>&1; then
-    setfacl -m u:nobody:r-- "$RESTORE/tree/file.txt"
-    (cd "$RESTORE" && getfacl -R -p -- tree/file.txt) > "$META/acl.txt"
+    nobody_uid=$(id -u nobody)
+    mkdir -p "$RESTORE/tree/acl-dir"
+    printf 'acl payload\n' > "$RESTORE/tree/acl-dir/child.txt"
+    setfacl -m "u:${nobody_uid}:r--" "$RESTORE/tree/file.txt"
+    setfacl -m "u:${nobody_uid}:r-x" "$RESTORE/tree/acl-dir"
+    setfacl -m "d:u:${nobody_uid}:r-x" "$RESTORE/tree/acl-dir"
+    (cd "$RESTORE" && getfacl -R -p -n -- tree/file.txt tree/acl-dir) > "$META/acl.txt"
     setfacl -b "$RESTORE/tree/file.txt"
+    setfacl -Rb "$RESTORE/tree/acl-dir"
     python3 "$HELPER" --root "$RESTORE" --metadata-dir "$META"
-    getfacl -cp "$RESTORE/tree/file.txt" | grep -Eq '^user:nobody:r--'
+    getfacl -cpn "$RESTORE/tree/file.txt" | grep -Eq "^user:${nobody_uid}:r--"
+    getfacl -cpn "$RESTORE/tree/acl-dir" | grep -Eq "^user:${nobody_uid}:r-x"
+    getfacl -cpn "$RESTORE/tree/acl-dir" | grep -Eq "^default:user:${nobody_uid}:r-x"
 else
     printf 'Extended ACL round trip skipped: getfacl/setfacl or nobody unavailable.\n'
 fi

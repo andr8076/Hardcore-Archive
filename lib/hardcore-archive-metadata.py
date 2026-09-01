@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely restore trusted metadata data from a Hardcore Archive extraction."""
+"""Safely restore metadata data from a Hardcore Archive extraction."""
 from __future__ import annotations
 
 import argparse
@@ -26,16 +26,37 @@ ACL_COMMENT = re.compile(
 )
 
 
-def safe_existing_path(
-    root: pathlib.Path, relative: str, *, allow_leaf_symlink: bool = True
-) -> pathlib.Path:
+def _metadata_parts(relative: str) -> tuple[str, ...]:
     if not relative or "\x00" in relative or os.path.isabs(relative):
         raise MetadataError(f"unsafe metadata path: {relative!r}")
-    if len(relative) >= 2 and relative[1] == ":":
+    normalized = relative.replace("\\", "/")
+    if len(normalized) >= 2 and normalized[1] == ":":
         raise MetadataError(f"unsafe metadata path: {relative!r}")
-    if ".." in pathlib.PurePosixPath(relative.replace("\\", "/")).parts:
+    parts = pathlib.PurePosixPath(normalized).parts
+    if not parts or ".." in parts or any(part in ("", ".") for part in parts):
         raise MetadataError(f"unsafe metadata path: {relative!r}")
-    candidate = root / relative
+    return tuple(parts)
+
+
+def safe_existing_path(
+    root: pathlib.Path,
+    relative: str,
+    *,
+    allow_leaf_symlink: bool = True,
+    reject_parent_symlinks: bool = False,
+) -> pathlib.Path:
+    parts = _metadata_parts(relative)
+    candidate = root.joinpath(*parts)
+
+    if reject_parent_symlinks:
+        current = root
+        for part in parts[:-1]:
+            current = current / part
+            if current.is_symlink():
+                raise MetadataError(
+                    f"ACL path contains a symlink component: {relative!r}"
+                )
+
     resolved_parent = pathlib.Path(os.path.realpath(candidate.parent))
     try:
         resolved_parent.relative_to(root)
@@ -82,7 +103,9 @@ def restore_file_metadata(root: pathlib.Path, metadata_dir: pathlib.Path) -> int
     return len(rows)
 
 
-def load_xattrs(root: pathlib.Path, metadata_dir: pathlib.Path) -> tuple[int, list[tuple[pathlib.Path, int]]]:
+def load_xattrs(
+    root: pathlib.Path, metadata_dir: pathlib.Path
+) -> tuple[int, list[tuple[pathlib.Path, int]]]:
     manifest = metadata_dir / "xattrs.txt"
     if not manifest.is_file():
         return 0, []
@@ -109,11 +132,24 @@ def load_xattrs(root: pathlib.Path, metadata_dir: pathlib.Path) -> tuple[int, li
                     except (OSError, ValueError, TypeError):
                         pass
             if record.get("flags"):
-                flags.append((path, int(record["flags"])))
+                try:
+                    flags.append((path, int(record["flags"])))
+                except (TypeError, ValueError) as exc:
+                    raise MetadataError(
+                        f"invalid file flags on xattrs.txt row {line_number}"
+                    ) from exc
     return restored, flags
 
 
-def sanitize_acl(root: pathlib.Path, source: pathlib.Path, destination: pathlib.Path) -> tuple[int, bool]:
+def sanitize_acl(
+    root: pathlib.Path, source: pathlib.Path, destination: pathlib.Path
+) -> tuple[int, bool]:
+    """Write a confined ACL-only setfacl restore file.
+
+    Archive-supplied owner/group/flags comments are validated but deliberately
+    omitted. Ownership is restored from files.tsv and flags from xattrs.txt, so
+    ACL restoration cannot gain those additional side effects through setfacl.
+    """
     if not source.is_file():
         destination.write_text("", encoding="utf-8")
         return 0, False
@@ -131,27 +167,34 @@ def sanitize_acl(root: pathlib.Path, source: pathlib.Path, destination: pathlib.
         if len(file_lines) != 1:
             raise MetadataError("ACL block must contain exactly one # file entry")
         relative = file_lines[0][8:]
-        # setfacl implementations may follow the final symlink even when the
-        # surrounding path is confined. ACL restoration therefore rejects a
-        # symlink at the leaf as well as symlinks in parent components.
-        safe_existing_path(root, relative, allow_leaf_symlink=False)
+        # setfacl --restore resolves names itself. Reject every symlink component
+        # so the path sanitized here is the same path setfacl later modifies.
+        safe_existing_path(
+            root,
+            relative,
+            allow_leaf_symlink=False,
+            reject_parent_symlinks=True,
+        )
         output.append(f"# file: {relative}")
         for line in current:
-            if line.startswith("# file: "):
-                continue
-            if not line:
+            if line.startswith("# file: ") or not line:
                 continue
             if line.startswith(("# owner: ", "# group: ", "# flags: ")):
                 if not ACL_COMMENT.fullmatch(line):
                     raise MetadataError(
                         f"unsafe or unsupported ACL comment for {relative!r}: {line!r}"
                     )
-                output.append(line)
+                # Do not pass ownership or flags to setfacl. They have separate,
+                # explicitly bounded restoration paths in this helper.
                 continue
             entry = line.split("\t#effective:", 1)[0].rstrip()
             if not ACL_ENTRY.fullmatch(entry):
-                raise MetadataError(f"unsafe or unsupported ACL entry for {relative!r}: {line!r}")
-            if entry.startswith("default:") or re.match(r"^(?:user|group):[^:]+:", entry):
+                raise MetadataError(
+                    f"unsafe or unsupported ACL entry for {relative!r}: {line!r}"
+                )
+            if entry.startswith("default:") or re.match(
+                r"^(?:user|group):[^:]+:", entry
+            ):
                 extended = True
             output.append(entry)
         output.append("")
@@ -166,7 +209,9 @@ def sanitize_acl(root: pathlib.Path, source: pathlib.Path, destination: pathlib.
             if line or current:
                 current.append(line)
     flush()
-    destination.write_text("\n".join(output), encoding="utf-8", errors="surrogateescape")
+    destination.write_text(
+        "\n".join(output), encoding="utf-8", errors="surrogateescape"
+    )
     return count, extended
 
 
@@ -181,7 +226,9 @@ def restore_acl(root: pathlib.Path, metadata_dir: pathlib.Path) -> int:
             return 0
         setfacl = shutil.which("setfacl")
         if not setfacl:
-            raise MetadataError("the archive contains extended ACLs, but setfacl is unavailable")
+            raise MetadataError(
+                "the archive contains extended ACLs, but setfacl is unavailable"
+            )
         completed = subprocess.run(
             [setfacl, f"--restore={safe_manifest}"], cwd=root, check=False
         )
@@ -219,7 +266,10 @@ def restore(root: pathlib.Path, metadata_dir: pathlib.Path) -> None:
     xattrs, flags = load_xattrs(root, metadata_dir)
     acls = restore_acl(root, metadata_dir)
     flag_count = restore_flags(flags)
-    print(f"Metadata restored: files={files} xattrs={xattrs} acl_paths={acls} flags={flag_count}")
+    print(
+        f"Metadata restored: files={files} xattrs={xattrs} "
+        f"acl_paths={acls} flags={flag_count}"
+    )
 
 
 def main() -> int:
