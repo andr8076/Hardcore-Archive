@@ -14,6 +14,8 @@ done
 bash -n "$ROOT/hardcore-archive"
 bash -n "$ROOT/hardcore-archive.sh"
 bash -n "$ROOT/hardcore-archive-runner.sh"
+bash -n "$ROOT/hardcore-archive-runner-policy.sh"
+bash -n "$ROOT/lib/hardcore-archive-core.sh"
 
 # Public/compatibility entrypoints stay intentionally thin.
 (( $(wc -l < "$ROOT/hardcore-archive") < 40 )) || { printf 'hardcore-archive entrypoint grew too large.\n' >&2; exit 1; }
@@ -23,10 +25,12 @@ bash -n "$ROOT/hardcore-archive-runner.sh"
 grep -Fq 'source "$HARDCORE_ARCHIVE_ROOT/lib/config.sh"' "$ROOT/hardcore-archive"
 grep -Fq 'source "$HARDCORE_ARCHIVE_ROOT/lib/visual.sh"' "$ROOT/hardcore-archive"
 grep -Fq 'source "$HARDCORE_ARCHIVE_ROOT/lib/scheduler.sh"' "$ROOT/hardcore-archive-runner.sh"
-grep -Fq 'hardcore_archive_build_runtime_core' "$ROOT/lib/archive.sh"
-grep -Fq 'hardcore_video_apply_runtime_patch' "$ROOT/lib/video.sh"
-grep -Fq 'hardcore_nested_apply_runtime_patch' "$ROOT/lib/nested.sh"
-grep -Fq 'hardcore_visual_apply_runtime_patch' "$ROOT/lib/visual.sh"
+grep -Fq 'hardcore_archive_static_engine_ready' "$ROOT/lib/archive.sh"
+grep -Fq 'hardcore_archive_static_engine_ready' "$ROOT/lib/scheduler.sh"
+grep -Fq 'hardcore_run_sourced "$HARDCORE_POLICY_RUNNER"' "$ROOT/lib/scheduler.sh"
+! grep -Eq 'apply_runtime_patch|build_runtime_core|HARDCORE_RUNTIME' \
+    "$ROOT/lib/archive.sh" "$ROOT/lib/video.sh" "$ROOT/lib/nested.sh" \
+    "$ROOT/lib/visual.sh" "$ROOT/lib/containers.sh" "$ROOT/lib/scheduler.sh"
 grep -Fq 'hardcore_reporting_start' "$ROOT/lib/reporting.sh"
 
 printf 'Modular layout tests passed.\n'

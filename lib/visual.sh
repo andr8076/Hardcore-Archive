@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 
 # Visual observability mode. The public launcher consumes --visual and exports
-# the mode; runtime patching adds live terminal viewers without handing worker
-# ownership to the terminal emulator.
+# the mode; the static engine owns live terminal viewers and worker lifetime.
 [[ ${HARDCORE_VISUAL_SH_LOADED:-0} == 1 ]] && return 0
 HARDCORE_VISUAL_SH_LOADED=1
 
@@ -51,13 +50,4 @@ Visual observability:
 EOF_VISUAL_HELP
     fi
     return "$rc"
-}
-
-hardcore_visual_apply_runtime_patch() {
-    local input_core=$1 output_core=$2
-    if ! python3 "$HARDCORE_VISUAL_PATCHER" "$input_core" "$output_core"; then
-        rm -f -- "$output_core"
-        printf 'Error: refusing to start with stale --visual runtime hooks.\n' >&2
-        return 3
-    fi
 }

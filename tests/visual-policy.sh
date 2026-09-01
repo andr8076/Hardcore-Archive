@@ -79,8 +79,8 @@ assert_has 'IMAGE_PIPELINE_PID=$!'
 assert_has 'pattern '\''Exit status:'\'''
 assert_has 'konsole|kitty|gnome-terminal|alacritty|wezterm|foot|xterm'
 
-grep -Fq 'HARDCORE_VISUAL_PATCHER=' "$ROOT/lib/planner.sh"
-grep -Fq 'hardcore_visual_apply_runtime_patch' "$ROOT/lib/archive.sh"
+! grep -Eq 'HARDCORE_VISUAL_PATCHER|hardcore_visual_apply_runtime_patch' \
+    "$ROOT/lib/planner.sh" "$ROOT/lib/archive.sh"
 grep -Fq 'source "$HARDCORE_ARCHIVE_ROOT/lib/visual.sh"' "$ROOT/hardcore-archive"
 
 printf 'Visual worker-window policy tests passed.\n'

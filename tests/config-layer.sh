@@ -9,7 +9,7 @@ trap cleanup EXIT
 
 mkdir -p "$TMP/app/lib" "$TMP/home/.config/hardcore-archive"
 cp "$ROOT/hardcore-archive" "$ROOT/hardcore-archive.sh" "$ROOT/config" "$TMP/app/"
-cp "$ROOT/lib/common.sh" "$ROOT/lib/platform.sh" "$ROOT/lib/config.sh" "$TMP/app/lib/"
+cp "$ROOT/lib/common.sh" "$ROOT/lib/platform.sh" "$ROOT/lib/config.sh" "$ROOT/lib/visual.sh" "$TMP/app/lib/"
 
 cat > "$TMP/app/hardcore-archive-runner.sh" <<'FAKE_RUNNER'
 #!/usr/bin/env bash
@@ -37,6 +37,7 @@ printf 'IMAGE_OPTIMIZE=%s\n' "$(value IMAGE_OPTIMIZE)"
 printf 'NESTED_REPACK=%s\n' "$(value NESTED_REPACK)"
 printf 'CONTAINER_REPACK=%s\n' "$(value CONTAINER_REPACK)"
 printf 'VIDEO_MODE=%s\n' "$(value VIDEO_MODE)"
+printf 'VIDEO_MIN_VMAF=%s\n' "$(value VIDEO_MIN_VMAF)"
 printf 'ARG=%s\n' "$@"
 FAKE_RUNNER
 chmod +x "$TMP/app/hardcore-archive" "$TMP/app/hardcore-archive.sh" "$TMP/app/hardcore-archive-runner.sh"
@@ -53,27 +54,32 @@ assert_contains "$out" 'IMAGE_OPTIMIZE=true'
 assert_contains "$out" 'NESTED_REPACK=true'
 assert_contains "$out" 'CONTAINER_REPACK=true'
 assert_contains "$out" 'VIDEO_MODE=balanced'
+assert_contains "$out" 'VIDEO_MIN_VMAF=92'
 
 sed -i 's/^VIDEO_TRANSCODE=true$/VIDEO_TRANSCODE=false/' "$TMP/app/config"
 sed -i 's/^CONTAINER_REPACK=true$/CONTAINER_REPACK=false/' "$TMP/app/config"
 sed -i 's/^VIDEO_MODE=balanced$/VIDEO_MODE=maximum/' "$TMP/app/config"
+sed -i 's/^VIDEO_MIN_VMAF=92$/VIDEO_MIN_VMAF=96/' "$TMP/app/config"
 out=$(run_launcher source)
 assert_contains "$out" 'VIDEO_TRANSCODE=false'
 assert_contains "$out" 'CONTAINER_REPACK=false'
 assert_contains "$out" 'VIDEO_MODE=maximum'
+assert_contains "$out" 'VIDEO_MIN_VMAF=96'
 
-printf 'VIDEO_TRANSCODE=true\nIMAGE_OPTIMIZE=false\nCONTAINER_REPACK=true\n' > "$TMP/home/.config/hardcore-archive/config"
+printf 'VIDEO_TRANSCODE=true\nIMAGE_OPTIMIZE=false\nCONTAINER_REPACK=true\nVIDEO_MIN_VMAF=94\n' > "$TMP/home/.config/hardcore-archive/config"
 out=$(run_launcher source)
 assert_contains "$out" 'VIDEO_TRANSCODE=true'
 assert_contains "$out" 'IMAGE_OPTIMIZE=false'
 assert_contains "$out" 'CONTAINER_REPACK=true'
+assert_contains "$out" 'VIDEO_MIN_VMAF=94'
 
-printf 'VIDEO_TRANSCODE=false\nIMAGE_OPTIMIZE=true\nVIDEO_MODE=fast\n' > "$TMP/custom.conf"
+printf 'VIDEO_TRANSCODE=false\nIMAGE_OPTIMIZE=true\nVIDEO_MODE=fast\nVIDEO_MIN_VMAF=97.5\n' > "$TMP/custom.conf"
 out=$(run_launcher --config "$TMP/custom.conf" source)
 assert_contains "$out" 'VIDEO_TRANSCODE=false'
 assert_contains "$out" 'IMAGE_OPTIMIZE=true'
 assert_contains "$out" 'CONTAINER_REPACK=true'
 assert_contains "$out" 'VIDEO_MODE=fast'
+assert_contains "$out" 'VIDEO_MIN_VMAF=97.5'
 assert_lacks "$out" "ARG=$TMP/custom.conf"
 
 out=$(run_launcher --config "$TMP/custom.conf" --video-transcode --no-container-repack source)

@@ -48,12 +48,11 @@ assert_lacks 'VIDEO_ENCODER=libx265'
 assert_lacks 'then apply_encoder libsvtav1'
 assert_lacks 'then apply_encoder libx265'
 
-# The modular runtime must establish diagnostics before create work and route the
-# hardware patch only through video.sh.
+# The modular runtime establishes diagnostics and invokes the checked-in engine.
 grep -Fq 'hardcore_reporting_start' "$ROOT/lib/reporting.sh"
-grep -Fq 'HARDCORE_HARDWARE_VIDEO_PATCHER=' "$ROOT/lib/planner.sh"
-grep -Fq 'refusing to start with a video engine that can fall back to CPU encoding' "$ROOT/lib/video.sh"
-grep -Fq 'hardcore_video_apply_runtime_patch' "$ROOT/lib/archive.sh"
+! grep -Eq 'PATCHER|apply_runtime_patch|build_runtime_core' \
+    "$ROOT/lib/planner.sh" "$ROOT/lib/video.sh" "$ROOT/lib/archive.sh"
+grep -Fq 'hardcore_archive_static_engine_ready' "$ROOT/lib/archive.sh"
 grep -Fq 'source "$HARDCORE_ARCHIVE_ROOT/lib/scheduler.sh"' "$ROOT/hardcore-archive-runner.sh"
 
 printf 'Hardware-only video + persistent diagnostics tests passed.\n'

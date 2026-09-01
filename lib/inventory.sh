@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# Command/source-inventory routing boundary. The large source classifier still
-# lives in the legacy engine and will migrate here incrementally.
+# Command/source-inventory routing boundary. The source classifier currently
+# lives in the checked-in static engine.
 [[ ${HARDCORE_INVENTORY_SH_LOADED:-0} == 1 ]] && return 0
 HARDCORE_INVENTORY_SH_LOADED=1
 

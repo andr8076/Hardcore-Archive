@@ -2,7 +2,7 @@
 
 Hardcore Archive creates aggressively compressed, verified `.7z` archives on Linux and macOS.
 
-The public entry point is now `hardcore-archive`. The historical `hardcore-archive.sh` name remains as a tiny compatibility shim, so existing commands continue to work. Runtime orchestration is split across focused `lib/*.sh` modules. The stable legacy compression engine remains temporarily in `lib/hardcore-archive-core.sh` and is being migrated section-by-section without changing archive behavior.
+The public entry point is `hardcore-archive`. The historical `hardcore-archive.sh` name remains as a tiny compatibility shim, so existing commands continue to work. Runtime orchestration is split across focused `lib/*.sh` modules, and the complete executable policy and archive engine are checked-in static sources. Startup does not generate or source-patch Python or shell code.
 
 ## Architecture
 
@@ -21,7 +21,7 @@ lib/
     inventory.sh              inventory/command-routing boundary
     planner.sh                runtime component planning
     scheduler.sh              top-level runtime orchestration
-    archive.sh                archive engine assembly / Copy-LZMA boundary
+    archive.sh                static archive-engine boundary
     video.sh                  hardware-only video policy
     images.sh                 image-policy boundary
     containers.sh             format-preserving application containers
@@ -29,9 +29,11 @@ lib/
     verify.sh                 inspect/verification command boundary
     restore.sh                restore command boundary
     reporting.sh              persistent run logs and diagnostics
+    hardcore-archive-core.sh  checked-in archive engine
+    hardcore-archive-metadata.py trusted metadata restore helper
 ```
 
-This is an incremental migration. New policy should go into the matching module rather than into the giant legacy core or the thin runner. The legacy core is deliberately left behaviorally unchanged while functions are moved out mechanically and covered by tests. The transitional Python engine patchers still exist for the sections not yet migrated; they can be retired as those sections move into native modules.
+The old transformation scripts are retained only as development/migration history. No production path invokes them. Changes to the engine are reviewed, syntax-checked, and tested as normal static source changes.
 
 ## Configuration
 
@@ -60,7 +62,7 @@ CONTAINER_REPACK=true
 
 This does **not** mean “replace everything regardless of result.” Each lane retains its own safety gate:
 
-- video candidates must pass hardware/quality/decode checks and the configured minimum size saving;
+- video candidates must pass hardware/decode checks, the configured VMAF floor, and the configured minimum size saving;
 - JPEG/PNG replacements are lossless, validated, and must be smaller;
 - nested archive replacements must validate and beat the original archive;
 - application-container replacements preserve their original file type and internal payload, validate successfully, and must be smaller;
@@ -173,11 +175,19 @@ Working hardware entries are real encode probes, not just names returned by `ffm
 
 On FFmpeg 9 VA-API, Hardcore Archive explicitly uses CQP/global-quality rate control and treats warnings that the requested encoder option was ignored as a broken configuration. VMAF extraction reads `pooled_metrics.vmaf.mean` specifically.
 
-Video encoder selection belongs exclusively to the video/doctor policy modules and the transitional hardware-video engine patches. CPU fallback is forbidden at the engine level.
+Video encoder selection belongs exclusively to the video/doctor policy modules and the checked-in engine. CPU fallback is forbidden at the engine level.
+
+Video transcoding is intentionally perceptually lossy, not bit-exact. The loss budget is configurable rather than tied to a mode-specific constant:
+
+```text
+VIDEO_MIN_VMAF=92
+```
+
+Override it per run with `--video-min-vmaf V`. Values from 0 through 100 are accepted; a higher value preserves more visual fidelity but usually reduces the compression opportunity. Batch and nested jobs inherit the same value. With the default quality policy, short/small videos are checked too; a missing measurement or a candidate below the floor preserves the original instead of accepting an unchecked transcode.
 
 ## Persistent diagnostics
 
-Every create run starts a persistent transcript before runtime patching or dependency checks. On Linux it is stored under:
+Every create run starts a persistent transcript before dependency checks. On Linux it is stored under:
 
 ```text
 ~/.local/state/hardcore-archive/runs/<timestamp>-<pid>/run.log
@@ -198,6 +208,17 @@ bash hardcore-archive.sh --remove-source "/data/My folder"
 ```
 
 Deletion is authorized only after the strong verification path completes successfully.
+
+## Verification
+
+`VERIFY_MODE=auto` is the default and now always means content verification: Hardcore Archive extracts the completed archive once, then checks every archived regular file against the SHA-256 manifest built from the exact selected inputs and accepted transformation candidates. It no longer starts one `7z x -so` process per file, which was especially expensive for solid archives.
+
+The modes are:
+
+- `auto` / `hashes` — one extraction pass plus SHA-256 comparison;
+- `extract` — the same strong extraction-and-hash path, retained as an explicit name;
+- `integrity` — 7-Zip stream/CRC integrity and completeness only;
+Strong verification needs temporary space roughly equal to the extracted archive. `--remove-source` still refuses any verification mode weaker than hashes.
 
 ## Power off after completion
 
@@ -222,7 +243,18 @@ bash hardcore-archive.sh --inspect "/archives/Important.7z"
 bash hardcore-archive.sh --restore "/archives/Important.7z" "/restore/Important"
 ```
 
-Restore validates archive paths, extracts into a temporary destination, verifies embedded hashes when available, reapplies supported metadata, and only then commits the restored tree.
+Restore validates archive paths, extracts into a temporary destination, verifies embedded hashes when available, reconstructs sparse allocation, and reapplies modes, times, ownership where privileged, extended attributes, flags, and ACLs before committing the restored tree. ACL manifests are treated strictly as data: absolute/traversing paths, symlink leaves, malformed blocks, and unsupported entries are rejected before `setfacl` is invoked. If an archive contains extended ACLs and `setfacl` is unavailable, restore fails safely instead of silently dropping them.
+
+## Benchmarks
+
+The deterministic mixed corpus covers repeated text, structured data, incompressible and patterned binary data, many small files, duplicates, sparse files, pre-compressed data, a nested ZIP, and a repackable DOCX. Optional generated media can be included for machine-specific video tests.
+
+```bash
+python3 benchmarks/generate-corpus.py benchmarks/corpus --size-mib 64
+bash benchmarks/run.sh benchmarks/corpus
+```
+
+The harness compares Hardcore Archive with maximum-compression 7-Zip and records archive size/ratio, create time, strong verify time, extraction time, and peak resident memory in `results.tsv`. The verify phase includes both extraction and SHA-256 manifest checking. See `benchmarks/README.md` for details.
 
 ## Tests
 
@@ -231,3 +263,5 @@ Run:
 ```bash
 bash tests/frontend-policy.sh
 ```
+
+The suite includes default/single-pass hash policy checks, metadata round trips and hostile ACL paths, deterministic corpus generation, static-module wiring, and the existing compression/video/container policies.

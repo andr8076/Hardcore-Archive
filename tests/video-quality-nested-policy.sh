@@ -4,42 +4,40 @@ IFS=$'\n\t'
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P || pwd -P)
 CORE=${CORE:-$ROOT/lib/hardcore-archive-core.sh}
-COPY_PATCHER=${COPY_PATCHER:-$ROOT/lib/hardcore-archive-copy-lane.py}
-MEDIA_PATCHER=${MEDIA_PATCHER:-$ROOT/lib/hardcore-archive-media-fixes.py}
 DOCTOR_CHECKS=${DOCTOR_CHECKS:-$ROOT/lib/hardcore-archive-doctor-checks.sh}
 DOCTOR_VIDEO_FIX=${DOCTOR_VIDEO_FIX:-$ROOT/lib/hardcore-archive-doctor-video-fix.sh}
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/hardcore-video-quality-test.XXXXXX")
 cleanup() { rm -rf -- "$TMP"; }
 trap cleanup EXIT
 
-[[ -f $COPY_PATCHER ]] || { printf 'Missing Copy-lane patcher: %s\n' "$COPY_PATCHER" >&2; exit 1; }
-[[ -f $MEDIA_PATCHER ]] || { printf 'Missing media/nested patcher: %s\n' "$MEDIA_PATCHER" >&2; exit 1; }
 [[ -f $DOCTOR_CHECKS ]] || { printf 'Missing doctor checks: %s\n' "$DOCTOR_CHECKS" >&2; exit 1; }
 [[ -f $DOCTOR_VIDEO_FIX ]] || { printf 'Missing doctor video fix: %s\n' "$DOCTOR_VIDEO_FIX" >&2; exit 1; }
 
-# In a repository checkout, transform the real legacy engine and syntax-check
-# the exact runtime core users will execute.
+# Syntax-check and inspect the exact checked-in engine users execute.
 if [[ ${SKIP_CORE_PATCH_TEST:-0} != 1 ]]; then
     [[ -f $CORE ]] || { printf 'Missing core: %s\n' "$CORE" >&2; exit 1; }
-    python3 "$COPY_PATCHER" "$CORE" "$TMP/copy-patched-core.sh"
-    python3 "$MEDIA_PATCHER" "$TMP/copy-patched-core.sh" "$TMP/patched-core.sh"
-    bash -n "$TMP/patched-core.sh"
-    python3 "$MEDIA_PATCHER" "$TMP/patched-core.sh" "$TMP/patched-core-twice.sh"
-    cmp -s "$TMP/patched-core.sh" "$TMP/patched-core-twice.sh" || { printf 'Media/nested patch is not idempotent.\n' >&2; exit 1; }
+    bash -n "$CORE"
 
-    python3 - "$TMP/patched-core.sh" <<'PY'
+    python3 - "$CORE" <<'PY'
 import pathlib, sys
 text = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
 assert '# HARDCORE_COPY_LANE_PATCH_V1' in text
 assert '# HARDCORE_MEDIA_NESTED_FIX_V1' in text
-assert "data['pooled_metrics']['vmaf']['mean']" in text
+assert "json.load(handle)['pooled_metrics']['vmaf']['mean']" in text
 assert 'grep -Eo \'"mean"[[:space:]]*:[[:space:]]*[0-9]+' not in text
-assert 'encoder_args=("-rc_mode" "CQP" "-global_quality:v" "$AV1_CRF")' in text
+assert 'encoder_args=("-rc_mode" "CQP" "-global_quality:v" "$quality")' in text
 assert 'test_real_encode av1_vaapi av1 -rc_mode CQP -global_quality:v "$AV1_CRF"' in text
 assert 'Strict quality policy: VMAF failure is a preflight failure' in text
+assert '[[ "$quality_check" == off && "$duration_is_long" != true ]]' in text
+assert 'elif [[ $quality_check != off ]]; then' in text
+assert 'Sample VMAF quality validation was unavailable. Original preserved unchanged.' in text
 assert 'candidate-not-smaller' in text
 assert 'recursive-archive-failed' in text
 assert 'candidate-integrity-failed' in text
+assert 'quality_vmaf_threshold=\'\'' in text
+assert 'VIDEO_HELPER_ARGS+=(--quality-vmaf "$VIDEO_MIN_VMAF")' in text
+assert 'BATCH_CHILD_ARGS+=(--video-min-vmaf "$VIDEO_MIN_VMAF")' in text
+assert '--quality-check "$QUALITY_CHECK" --video-min-vmaf "$VIDEO_MIN_VMAF"' in text
 assert 'action\\toriginal path\\tarchived path\\toriginal bytes\\tcandidate bytes\\tarchived bytes\\treason' in text
 assert '===== Nested archive decisions =====' in text
 assert "read -r action original archived original_size candidate_size archived_size reason" in text

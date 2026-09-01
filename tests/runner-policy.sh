@@ -16,6 +16,15 @@ cp "$DOCTOR_LOADER" "$TMP/app/lib/hardcore-archive-doctor.sh"
 cp "$DOCTOR_BASE" "$TMP/app/lib/hardcore-archive-doctor-base.sh"
 cp "$DOCTOR_CHECKS" "$TMP/app/lib/hardcore-archive-doctor-checks.sh"
 cp "$DOCTOR_REPORT" "$TMP/app/lib/hardcore-archive-doctor-report.sh"
+for module in \
+    hardcore-archive-doctor-video-fix.sh \
+    hardcore-archive-doctor-video-auto.sh \
+    hardcore-archive-doctor-encoder-menu.sh \
+    hardcore-archive-doctor-encoder-runtime.sh
+do
+    sibling="$(dirname -- "$DOCTOR_LOADER")/$module"
+    [[ -f $sibling ]] && cp "$sibling" "$TMP/app/lib/$module"
+done
 
 cat > "$TMP/app/lib/hardcore-archive-core.sh" <<'FAKE_CORE'
 printf 'VIDEO_AUDIO_COPY=%s\n' "${VIDEO_AUDIO_COPY-unset}"
@@ -114,15 +123,21 @@ assert_has() { local out=$1 text=$2; grep -Fqx -- "$text" <<< "$out" || { printf
 assert_contains() { local out=$1 text=$2; grep -Fq -- "$text" <<< "$out" || { printf 'Expected text not found: %s\n%s\n' "$text" "$out" >&2; exit 1; }; }
 assert_lacks() { local out=$1 text=$2; ! grep -Fqx -- "$text" <<< "$out" || { printf 'Unexpected line: %s\n%s\n' "$text" "$out" >&2; exit 1; }; }
 
-# Transformations remain off by default even when matching files are present,
-# and their libraries are not required at all for this workflow.
+# Explicitly disabled transformations do not require their optional tools.
 for tool in ffmpeg ffprobe jpegtran djpeg oxipng setsid; do mv "$TMP/bin/$tool" "$TMP/bin/$tool.off"; done
-out=$(run_frontend "$TMP/source" 2>&1)
+out=$(run_frontend --no-video-transcode --no-image-optimize --no-nested-repack --no-container-repack "$TMP/source" 2>&1)
 assert_has "$out" 'ARG=--no-video-transcode'
 assert_has "$out" 'ARG=--no-image-optimize'
 assert_has "$out" 'ARG=--no-nested-repack'
 assert_has "$out" 'DEP_APPROVED=1'
 for tool in ffmpeg ffprobe jpegtran djpeg oxipng setsid; do mv "$TMP/bin/$tool.off" "$TMP/bin/$tool"; done
+
+# Safe transformations are enabled by default and are forwarded to the static
+# engine after dependency and hardware validation.
+out=$(run_frontend "$TMP/source" 2>&1)
+assert_has "$out" 'ARG=av1_vaapi'
+assert_contains "$out" 'Automatic video competition: AV1 (av1_vaapi) vs HEVC (hevc_vaapi) per file.'
+assert_contains "$out" 'Self-check: READY for this source'
 
 # A configured feature with no matching content is disabled before dependency checks.
 mv "$TMP/bin/ffmpeg" "$TMP/bin/ffmpeg.off"
@@ -137,10 +152,17 @@ out=$(run_frontend --video-transcode "$TMP/source" 2>&1)
 assert_has "$out" 'ARG=--video-encoder'
 assert_has "$out" 'ARG=av1_vaapi'
 assert_has "$out" 'ARG=--video-parallel'
-assert_contains "$out" 'Hardware video policy: AV1 via av1_vaapi'
+assert_contains "$out" 'Hardware video policy: AUTO; AV1=av1_vaapi; HEVC=hevc_vaapi; primary=AV1 via av1_vaapi'
 
-# The only codec fallback: real AV1 hardware incompatibility -> working HEVC hardware.
-out=$(FAKE_AV1_INCOMPAT=1 run_frontend --video-transcode "$TMP/source" 2>&1)
+# Auto mode fails closed when an advertised candidate is broken; explicitly
+# requesting AV1 retains the one allowed compatibility fallback to working HEVC.
+set +e
+out=$(FAKE_AV1_INCOMPAT=1 run_frontend --video-transcode "$TMP/source" 2>&1); rc=$?
+set -e
+(( rc == 3 )) || { printf 'Broken auto-codec candidate should fail doctor.\n%s\n' "$out" >&2; exit 1; }
+assert_contains "$out" 'BROKEN'
+assert_contains "$out" 'Hardware AV1 encode'
+out=$(FAKE_AV1_INCOMPAT=1 run_frontend --video-transcode --video-codec av1 "$TMP/source" 2>&1)
 assert_has "$out" 'ARG=hevc'
 assert_has "$out" 'ARG=hevc_vaapi'
 assert_contains "$out" 'GPU cannot encode AV1; using the only permitted fallback: HEVC via hevc_vaapi.'
@@ -164,11 +186,11 @@ set -e
 (( rc == 3 )) || { printf 'Expected unsupported failure.\n%s\n' "$out" >&2; exit 1; }
 assert_contains "$out" 'UNSUPPORTED'
 assert_contains "$out" 'FFmpeg libvmaf filter'
-assert_contains "$out" 'SSIM fallback is forbidden.'
+assert_contains "$out" 'comparing codecs without a common quality measurement is forbidden.'
 
 # Advertised hardware encoder that cannot actually run is BROKEN.
 set +e
-out=$(FAKE_HW_BROKEN=1 run_frontend --video-transcode --quality-check off "$TMP/source" 2>&1); rc=$?
+out=$(FAKE_HW_BROKEN=1 run_frontend --video-transcode --video-codec av1 --quality-check off "$TMP/source" 2>&1); rc=$?
 set -e
 (( rc == 3 )) || { printf 'Expected broken hardware failure.\n%s\n' "$out" >&2; exit 1; }
 assert_contains "$out" 'BROKEN'

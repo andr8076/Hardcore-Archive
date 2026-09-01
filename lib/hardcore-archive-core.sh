@@ -65,7 +65,8 @@ fi
 
 PROGRAM_NAME=${0##*/}
 SCRIPT_START_SECONDS=$SECONDS
-SCRIPT_VERSION="2026-07-24"
+SCRIPT_VERSION="2026-09-01"
+METADATA_HELPER=${HARDCORE_ARCHIVE_METADATA_HELPER:-}
 MIB=$((1024 * 1024))
 GIB=$((1024 * MIB))
 
@@ -104,6 +105,7 @@ VIDEO_PARALLEL=true
 VIDEO_NO_SCALE=false
 VIDEO_NO_DENOISE=false
 VIDEO_COPY_AUDIO=false
+VIDEO_MIN_VMAF="92"
 VIDEO_MIN_SAVINGS_PERCENT="3"
 VIDEO_PREFLIGHT=true
 VIDEO_WRITE_MANIFEST=true
@@ -277,7 +279,7 @@ Archive-aware preprocessing:
 
 Safety, recovery, and storage:
   --verify MODE            auto, integrity, hashes, or extract. Default: auto.
-                           auto uses hashes whenever --remove-source is selected.
+                           auto always compares SHA-256 content hashes.
   --work-dir PATH          Override the automatically selected local work area.
   --resume / --no-resume   Reuse validated completed video work. Default: resume.
   --keep-work              Keep work files even after success.
@@ -297,6 +299,7 @@ Video policy:
   --video-no-scale         Never reduce large video resolution.
   --video-no-denoise       Disable automatic mild denoising.
   --video-copy-audio       Copy audio streams instead of Opus optimization.
+  --video-min-vmaf V       Minimum accepted VMAF score. Default: 92.
   --video-min-savings P    Minimum accepted saving. Default: 3 percent.
   --video-no-preflight     Disable representative sample testing.
   --quality-check MODE     auto, off, or required. Default: auto.
@@ -682,11 +685,11 @@ dependency_preflight_create_critical() {
                     dependency_add_critical "FFmpeg encoder: $VIDEO_ENCODER" 'The explicitly selected encoder must be compiled into the installed FFmpeg build.'
             else
                 if [[ $VIDEO_CODEC == av1 ]]; then
-                    for candidate in av1_vaapi av1_nvenc av1_qsv libsvtav1; do
+                    for candidate in av1_vaapi av1_nvenc av1_qsv; do
                         dependency_ffmpeg_has_encoder "$candidate" && encoder_found=true && break
                     done
                 else
-                    for candidate in hevc_videotoolbox hevc_vaapi hevc_nvenc hevc_qsv libx265; do
+                    for candidate in hevc_videotoolbox hevc_vaapi hevc_nvenc hevc_qsv; do
                         dependency_ffmpeg_has_encoder "$candidate" && encoder_found=true && break
                     done
                 fi
@@ -814,15 +817,17 @@ dependency_preflight_restore() {
     dependency_reset
     if [[ -n $archive && -n ${SEVEN_ZIP:-} ]]; then
         if dependency_archive_has_path "$archive" '.hardcore-archive-metadata/acl.txt' && \
-           dependency_archive_manifest_has_data "$archive" '.hardcore-archive-metadata/acl.txt' '^# file:'; then
-            dependency_optional_command setfacl \
-                'Reapplies archived POSIX access-control lists; file contents still restore without it, but ACL permissions will be omitted.'
+           dependency_archive_manifest_has_data "$archive" '.hardcore-archive-metadata/acl.txt' \
+               '^(default:|(user|group):[^:]+:|mask::)'; then
+            dependency_require_command setfacl \
+                'The archive contains extended POSIX ACLs; restore fails closed rather than silently dropping access controls.'
         fi
     fi
     if ! $ALLOW_SLEEP && ! $SLEEP_PROTECTION_ACTIVE && ! platform_sleep_tool_available; then
         dependency_add_optional "$(platform_sleep_tool_label)" \
             'Prevents the operating system from sleeping during archive testing and restoration.'
     fi
+    dependency_abort_if_critical
     dependency_confirm_optional
 }
 
@@ -866,6 +871,7 @@ load_config_file() {
             VIDEO_CODEC) VIDEO_CODEC=${value,,} ;;
             VIDEO_ENCODER) VIDEO_ENCODER=$value ;;
             VIDEO_MODE) VIDEO_MODE=${value,,} ;;
+            VIDEO_MIN_VMAF) VIDEO_MIN_VMAF=$value ;;
             VIDEO_MIN_SAVINGS_PERCENT) VIDEO_MIN_SAVINGS_PERCENT=$value ;;
             VERIFY_MODE) VERIFY_MODE=${value,,} ;;
             WORK_DIR) WORK_DIR_OVERRIDE=$value ;;
@@ -879,6 +885,11 @@ load_config_file() {
                 bool=$(config_bool "$value") || { warn "Invalid NESTED_REPACK value in config: $value"; continue; }
                 NESTED_REPACK=$bool
                 ;;
+            CONTAINER_REPACK)
+                bool=$(config_bool "$value") || { warn "Invalid CONTAINER_REPACK value in config: $value"; continue; }
+                CONTAINER_REPACK=$bool
+                ;;
+            POWER_OFF_ON_SUCCESS) : ;; # handled by the public launcher
             DICTIONARY) DICTIONARY_OVERRIDE=$value ;;
             THREADS) THREADS_OVERRIDE=$value ;;
             SEARCH_CYCLES)
@@ -1330,7 +1341,7 @@ allow_scaling=true
 allow_denoise=true
 video_preflight=true
 quality_check=auto
-quality_vmaf_threshold=92
+quality_vmaf_threshold=''
 quality_ssim_threshold=0.985
 preflight_sample_seconds=12
 preflight_min_duration=60
@@ -1360,6 +1371,7 @@ Options:
   --no-scale        Never reduce resolution.
   --no-denoise      Never apply denoising.
   --min-savings P   Keep the transcode only if it saves at least P percent.
+  --quality-vmaf V  Minimum accepted VMAF score (required).
   --no-preflight    Do not test representative segments before a full encode.
   --quality-check M  Sample-quality policy: auto, off, or required.
   --version         Show the script version.
@@ -1369,8 +1381,9 @@ USAGE
 
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 has_command() { command -v "$1" >/dev/null 2>&1; }
-has_encoder() { ffmpeg -hide_banner -encoders 2>/dev/null | awk 'NF >= 2 {print $2}' | grep -Fxq "$1"; }
-has_filter() { ffmpeg -hide_banner -filters 2>/dev/null | awk 'NF >= 2 {print $2}' | grep -Fxq "$1"; }
+# HARDCORE_MEDIA_NESTED_FIX_V1
+has_encoder() { ffmpeg -hide_banner -encoders 2>/dev/null | awk -v wanted="$1" 'NF >= 2 && $2 == wanted {found=1} END {exit(found ? 0 : 1)}'; }
+has_filter() { ffmpeg -hide_banner -filters 2>/dev/null | awk -v wanted="$1" 'NF >= 2 && $2 == wanted {found=1} END {exit(found ? 0 : 1)}'; }
 human_size() { numfmt --to=iec-i --suffix=B "$1" 2>/dev/null || printf '%s bytes' "$1"; }
 
 prevent_sleep() {
@@ -1399,7 +1412,7 @@ probe_encoder_synthetic() {
     has_encoder "$enc" || return 1
 
     local va_probe=()
-    [[ "$enc" == *_vaapi ]] && va_probe=("-init_hw_device" "vaapi=va:" "-filter_hw_device" "va" "-vf" "format=nv12,hwupload")
+    [[ "$enc" == *_vaapi ]] && va_probe=("-init_hw_device" "vaapi=va:${HARDCORE_ARCHIVE_VAAPI_DEVICE:-}" "-filter_hw_device" "va" "-vf" "format=nv12,hwupload")
 
     ffmpeg -hide_banner -v error "${va_probe[@]}" -f lavfi -i color=c=black:s=1280x720:r=24 -vframes 1 \
         -c:v "$enc" "$@" -f null - >/dev/null 2>&1
@@ -1410,14 +1423,14 @@ do_list_encoders() {
     printf "Probing system for working encoders (Synthetic 720p Test)...\n\n"
 
     printf "AV1 Encoders:\n"
-    probe_encoder_synthetic av1_vaapi -qp 33 && printf "  av1_vaapi          (AMD/Mesa VA-API Linux Hardware)\n"
+    probe_encoder_synthetic av1_vaapi -rc_mode CQP -global_quality:v 33 && printf "  av1_vaapi          (AMD/Mesa VA-API Linux Hardware)\n"
     probe_encoder_synthetic av1_nvenc -cq:v 33 -preset:v p4 && printf "  av1_nvenc          (NVIDIA NVENC)\n"
     probe_encoder_synthetic av1_qsv -global_quality:v 33 -preset:v balanced && printf "  av1_qsv            (Intel QSV)\n"
     has_encoder libsvtav1 && printf "  libsvtav1          (Software SVT-AV1)\n"
 
     printf "\nHEVC / H.265 Encoders:\n"
     probe_encoder_synthetic hevc_videotoolbox -q:v 65 -pix_fmt nv12 && printf "  hevc_videotoolbox  (Apple VideoToolbox Hardware)\n"
-    probe_encoder_synthetic hevc_vaapi -qp 28 && printf "  hevc_vaapi         (AMD/Mesa VA-API Linux Hardware)\n"
+    probe_encoder_synthetic hevc_vaapi -rc_mode CQP -global_quality:v 28 && printf "  hevc_vaapi         (AMD/Mesa VA-API Linux Hardware)\n"
     probe_encoder_synthetic hevc_nvenc -cq:v 28 -preset:v p4 && printf "  hevc_nvenc         (NVIDIA NVENC)\n"
     probe_encoder_synthetic hevc_qsv -global_quality:v 28 -preset:v balanced && printf "  hevc_qsv           (Intel QSV)\n"
     has_encoder libx265 && printf "  libx265            (Software x265)\n"
@@ -1431,8 +1444,9 @@ apply_encoder() {
     case "$enc" in
         av1_vaapi)
             expected_codec='av1'; output_suffix='av1'; video_codec_label='AV1 / VA-API (Hardware)'
-            video_crf="QP ${AV1_CRF}"; video_preset='N/A'; video_pix_fmt='vaapi'
-            encoder_args=("-qp" "$AV1_CRF")
+            # HARDCORE_VIDEO_CODEC_COMPETITION_V2
+            video_crf="CQP q_idx 128 (pre-calibration)"; video_preset='N/A'; video_pix_fmt='vaapi'
+            encoder_args=("-rc_mode" "CQP" "-global_quality:v" "128")
             ;;
         hevc_videotoolbox)
             expected_codec='hevc'; output_suffix='hevc'; video_codec_label='H.265 / Apple VideoToolbox (Hardware)'
@@ -1441,8 +1455,8 @@ apply_encoder() {
             ;;
         hevc_vaapi)
             expected_codec='hevc'; output_suffix='hevc'; video_codec_label='H.265 / VA-API (Hardware)'
-            video_crf="QP ${HEVC_CRF}"; video_preset='N/A'; video_pix_fmt='vaapi'
-            encoder_args=("-qp" "$HEVC_CRF")
+            video_crf="CQP QP 26 (pre-calibration)"; video_preset='N/A'; video_pix_fmt='vaapi'
+            encoder_args=("-rc_mode" "CQP" "-global_quality:v" "26")
             ;;
         av1_nvenc)
             expected_codec='av1'; output_suffix='av1'; video_codec_label='AV1 / NVIDIA NVENC (Hardware)'
@@ -1498,7 +1512,7 @@ determine_encoder() {
 
         local va_args=()
         if [[ "$enc" == *_vaapi ]]; then
-            va_args=("-init_hw_device" "vaapi=va:" "-filter_hw_device" "va" "-vf" "format=nv12,hwupload")
+            va_args=("-init_hw_device" "vaapi=va:${HARDCORE_ARCHIVE_VAAPI_DEVICE:-}" "-filter_hw_device" "va" "-vf" "format=nv12,hwupload")
         fi
 
         if ffmpeg -hide_banner -v error -y -t 2 -i "$sample" "${va_args[@]}" -map '0:V:0' \
@@ -1525,9 +1539,17 @@ determine_encoder() {
     printf '\nValidating encoder against real file constraints:\n  %s\n' "$(basename -- "$sample")"
 
     if [[ -n "$force_encoder" ]]; then
+        case "$force_encoder" in
+            av1_vaapi|av1_nvenc|av1_qsv|hevc_videotoolbox|hevc_vaapi|hevc_nvenc|hevc_qsv) ;;
+            *) die "Software/non-hardware video encoder '$force_encoder' is forbidden. Hardware encoding is mandatory." ;;
+        esac
         apply_encoder "$force_encoder"
         if [[ "$force_encoder" != libsvtav1 && "$force_encoder" != libx265 ]]; then
-            test_real_encode "$force_encoder" "$expected_codec" "${encoder_args[@]}" || die "Forced encoder '$force_encoder' crashed on the real file test."
+            if [[ ${HARDCORE_ARCHIVE_HARDWARE_ENCODER_LOCKED:-} == "$force_encoder" ]]; then
+                printf "  Inherited hardware encoder %s already validated by parent.\n" "$force_encoder"
+            else
+                test_real_encode "$force_encoder" "$expected_codec" "${encoder_args[@]}" || die "Forced encoder '$force_encoder' crashed on the real file test."
+            fi
         else
             has_encoder "$force_encoder" || die "Software encoder '$force_encoder' is missing."
             printf "  Forced software encoder %s accepted.\n" "$force_encoder"
@@ -1535,20 +1557,18 @@ determine_encoder() {
     else
         case "$codec_choice" in
             av1)
-                if test_real_encode av1_vaapi av1 -qp "$AV1_CRF"; then apply_encoder av1_vaapi
+                if test_real_encode av1_vaapi av1 -rc_mode CQP -global_quality:v "$AV1_CRF"; then apply_encoder av1_vaapi
                 elif test_real_encode av1_nvenc av1 -cq:v "$AV1_CRF" -preset:v p4; then apply_encoder av1_nvenc
                 elif test_real_encode av1_qsv av1 -global_quality:v "$AV1_CRF" -preset:v balanced; then apply_encoder av1_qsv
-                elif test_real_encode libsvtav1 av1 -crf:v "$AV1_CRF" -preset:v "$AV1_PRESET"; then apply_encoder libsvtav1
-                else die 'No compatible AV1 encoder successfully processed the sample file.'
+                else die 'No compatible hardware AV1 encoder successfully processed the sample file.'
                 fi
                 ;;
             hevc)
                 if test_real_encode hevc_videotoolbox hevc -q:v 65 -pix_fmt nv12; then apply_encoder hevc_videotoolbox
-                elif test_real_encode hevc_vaapi hevc -qp "$HEVC_CRF"; then apply_encoder hevc_vaapi
+                elif test_real_encode hevc_vaapi hevc -rc_mode CQP -global_quality:v "$HEVC_CRF"; then apply_encoder hevc_vaapi
                 elif test_real_encode hevc_nvenc hevc -cq:v "$HEVC_CRF" -preset:v p4; then apply_encoder hevc_nvenc
                 elif test_real_encode hevc_qsv hevc -global_quality:v "$HEVC_CRF" -preset:v balanced; then apply_encoder hevc_qsv
-                elif test_real_encode libx265 hevc -crf:v "$HEVC_CRF" -preset:v "$HEVC_PRESET"; then apply_encoder libx265
-                else die 'No compatible HEVC encoder successfully processed the sample file.'
+                else die 'No compatible hardware HEVC encoder successfully processed the sample file.'
                 fi
                 ;;
         esac
@@ -1663,6 +1683,7 @@ while (($#)); do
             (($# >= 2)) || die '--quality-vmaf requires a number.'
             quality_vmaf_threshold=$2; shift
             ;;
+        --quality-vmaf=*) quality_vmaf_threshold=${1#*=};;
         --quality-ssim)
             (($# >= 2)) || die '--quality-ssim requires a number.'
             quality_ssim_threshold=$2; shift
@@ -1701,6 +1722,7 @@ for required in ffmpeg ffprobe awk grep sed stat numfmt realpath chmod find; do 
 [[ $min_savings_percent =~ ^[0-9]+([.][0-9]+)?$ ]] || die '--min-savings must be a non-negative number.'
 LC_NUMERIC=C awk -v p="$min_savings_percent" 'BEGIN {exit !(p >= 0 && p <= 100)}' || die '--min-savings must be between 0 and 100.'
 case "$quality_check" in auto|off|required) ;; *) die '--quality-check must be auto, off, or required.' ;; esac
+[[ $quality_vmaf_threshold =~ ^[0-9]+([.][0-9]+)?$ ]] || die '--quality-vmaf must be numeric and explicitly supplied.'
 LC_NUMERIC=C awk -v v="$quality_vmaf_threshold" 'BEGIN {exit !(v >= 0 && v <= 100)}' || die '--quality-vmaf must be 0..100.'
 LC_NUMERIC=C awk -v v="$quality_ssim_threshold" 'BEGIN {exit !(v >= 0 && v <= 1)}' || die '--quality-ssim must be 0..1.'
 
@@ -1771,6 +1793,7 @@ run_batch() {
     [[ "$allow_scaling" != true ]] && child_args+=(--no-scale)
     [[ "$allow_denoise" != true ]] && child_args+=(--no-denoise)
     [[ "$video_preflight" != true ]] && child_args+=(--no-preflight)
+    child_args+=(--quality-check "$quality_check" --quality-vmaf "$quality_vmaf_threshold")
     child_args+=(--min-savings "$min_savings_percent")
 
     for file in "${files[@]}"; do
@@ -1832,6 +1855,9 @@ run_batch() {
             rc=$?
             if (( rc == 3 )); then
                 ((unchanged++))
+            elif [[ ${HARDCORE_ARCHIVE_NESTED_CHILD:-0} == 1 ]]; then
+                ((unchanged++))
+                printf 'Nested child video item failed with exit code %s; original preserved and recursion continues.\n' "$rc" >&2
             else
                 ((failed++))
                 printf 'Batch item failed with exit code %s; continuing.\n' "$rc" >&2
@@ -2064,14 +2090,24 @@ measure_preflight_quality() {
     height=$(ffprobe -v error -select_streams V:0 -show_entries stream=height -of csv=p=0 "$encoded" 2>/dev/null | head -n1)
     [[ $width =~ ^[0-9]+$ && $height =~ ^[0-9]+$ ]] || return 1
 
-    if ffmpeg -hide_banner -filters 2>/dev/null | grep '[[:space:]]libvmaf[[:space:]]' >/dev/null; then
+    if has_filter libvmaf; then
         log_file="${encoded}.vmaf.json"
         preflight_files+=("$log_file")
         if ffmpeg -hide_banner -v error -nostdin \
             -ss "$start" -t "$length" -i "$input" -i "$encoded" \
-            -filter_complex "[0:v:0]setpts=PTS-STARTPTS,scale=${width}:${height}:flags=lanczos,format=yuv420p[ref];[1:v:0]setpts=PTS-STARTPTS,format=yuv420p[dist];[dist][ref]libvmaf=log_fmt=json:log_path=${log_file}" \
+            -filter_complex "[0:v:0]setpts=PTS-STARTPTS,scale=${width}:${height}:flags=lanczos:out_range=tv,format=yuv420p[ref];[1:v:0]setpts=PTS-STARTPTS,scale=${width}:${height}:flags=bilinear:out_range=tv,format=yuv420p[dist];[dist][ref]libvmaf=log_fmt=json:log_path=${log_file}" \
             -an -f null - >/dev/null 2>&1; then
-            score=$(grep -Eo '"mean"[[:space:]]*:[[:space:]]*[0-9]+([.][0-9]+)?' "$log_file" 2>/dev/null | head -n1 | grep -Eo '[0-9]+([.][0-9]+)?' || true)
+            score=$(python3 - "$log_file" <<'PYVMAF'
+import json, math, sys
+try:
+    with open(sys.argv[1], 'r', encoding='utf-8') as handle:
+        value = float(json.load(handle)['pooled_metrics']['vmaf']['mean'])
+    if math.isfinite(value) and 0.0 <= value <= 100.0:
+        print(f'{value:.6f}')
+except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+    pass
+PYVMAF
+)
             if [[ $score =~ ^[0-9]+([.][0-9]+)?$ ]]; then
                 MEASURED_QUALITY_KIND=VMAF
                 MEASURED_QUALITY_SCORE=$score
@@ -2080,17 +2116,328 @@ measure_preflight_quality() {
         fi
     fi
 
-    output=$(ffmpeg -hide_banner -nostdin -v info \
-        -ss "$start" -t "$length" -i "$input" -i "$encoded" \
-        -filter_complex "[0:v:0]setpts=PTS-STARTPTS,scale=${width}:${height}:flags=lanczos,format=yuv420p[ref];[1:v:0]setpts=PTS-STARTPTS,format=yuv420p[dist];[dist][ref]ssim" \
-        -an -f null - 2>&1 || true)
-    score=$(grep -Eo 'All:[0-9]+([.][0-9]+)?' <<< "$output" | tail -n1 | cut -d: -f2 || true)
-    if [[ $score =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-        MEASURED_QUALITY_KIND=SSIM
-        MEASURED_QUALITY_SCORE=$score
+    # Strict quality policy: VMAF failure is a preflight failure; SSIM is not a fallback.
+    return 1
+}
+
+
+HARDCORE_AUTO_CODEC_MODE=${HARDCORE_ARCHIVE_VIDEO_CODEC_AUTO:-0}
+HARDCORE_AUTO_AV1_ENCODER=${HARDCORE_ARCHIVE_AUTO_AV1_ENCODER:-}
+HARDCORE_AUTO_HEVC_ENCODER=${HARDCORE_ARCHIVE_AUTO_HEVC_ENCODER:-}
+CAL_MIN_VMAF=''
+CAL_AVG_VIDEO_BPS=''
+CAL_BEST_QUALITY=''
+CAL_PREDICTED_SAVINGS=''
+CAL_REQUIRED_SAVINGS=''
+CAL_REASON=''
+CAL_QUALITY_LABEL=''
+
+calibration_encoder_supported() {
+    case "$1" in
+        av1_vaapi|hevc_vaapi|av1_nvenc|hevc_nvenc|av1_qsv|hevc_qsv) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+calibration_quality_range() {
+    case "$1" in
+        av1_vaapi) printf '1 255 q_idx' ;;
+        hevc_vaapi) printf '1 51 QP' ;;
+        av1_nvenc|hevc_nvenc) printf '1 51 CQ' ;;
+        av1_qsv|hevc_qsv) printf '1 51 ICQ' ;;
+        *) return 1 ;;
+    esac
+}
+
+calibration_apply_quality() {
+    local encoder=$1 quality=$2
+    case "$encoder" in
+        av1_vaapi|hevc_vaapi)
+            encoder_args=("-rc_mode" "CQP" "-global_quality:v" "$quality") ;;
+        av1_nvenc|hevc_nvenc)
+            encoder_args=("-cq:v" "$quality" "-preset:v" "p4") ;;
+        av1_qsv|hevc_qsv)
+            encoder_args=("-global_quality:v" "$quality" "-preset:v" "balanced") ;;
+        *) return 1 ;;
+    esac
+}
+
+calibration_build_filter_chain() {
+    local encoder=$1
+    local -a filters=()
+    [[ "$apply_denoise" == true ]] && filters+=("$DENOISE_FILTER")
+    [[ "$apply_scaling" == true ]] && filters+=("scale=-2:${TARGET_HEIGHT}:flags=lanczos")
+    if [[ $encoder == *_vaapi ]]; then
+        filters+=("format=nv12" "hwupload")
+    fi
+    CAL_FILTER_CHAIN=''
+    ((${#filters[@]} > 0)) && CAL_FILTER_CHAIN=$(IFS=,; printf '%s' "${filters[*]}")
+}
+
+calibration_candidate_command() {
+    local encoder=$1 quality=$2 start=$3 sample_length=$4 sample_file=$5
+    local CAL_FILTER_CHAIN=''
+    calibration_build_filter_chain "$encoder"
+    CAL_COMMAND=(ffmpeg -hide_banner -v error -nostdin -y)
+    [[ $encoder == *_vaapi ]] && CAL_COMMAND+=(-init_hw_device "vaapi=va:${HARDCORE_ARCHIVE_VAAPI_DEVICE:-}" -filter_hw_device va)
+    CAL_COMMAND+=(
+        -ss "$start" -i "$input" -t "$sample_length"
+        -map '0:V:0' -an -sn -dn
+        -c:v "$encoder"
+    )
+    case "$encoder" in
+        av1_vaapi|hevc_vaapi) CAL_COMMAND+=(-rc_mode CQP -global_quality:v "$quality") ;;
+        av1_nvenc|hevc_nvenc) CAL_COMMAND+=(-cq:v "$quality" -preset:v p4 -pix_fmt:v p010le) ;;
+        av1_qsv|hevc_qsv) CAL_COMMAND+=(-global_quality:v "$quality" -preset:v balanced -pix_fmt:v p010le) ;;
+        *) return 1 ;;
+    esac
+    [[ -n "$CAL_FILTER_CHAIN" ]] && CAL_COMMAND+=(-vf "$CAL_FILTER_CHAIN")
+    CAL_COMMAND+=(-f matroska "$sample_file")
+}
+
+evaluate_hardware_quality() {
+    local codec=$1 encoder=$2 quality=$3
+    local sample_length=3
+    local -a positions=(0.10 0.50 0.90)
+    local position start sample_file actual_length sample_size sample_bps
+    local total_bps=0 sample_count=0 minimum_vmaf=101
+    local -a CAL_COMMAND=()
+
+    if LC_NUMERIC=C awk -v d="$duration" 'BEGIN {exit !(d<9)}'; then
+        positions=(0.50)
+        sample_length=$(LC_NUMERIC=C awk -v d="$duration" 'BEGIN {
+            v=d; if(v>3)v=3; if(v<1)v=1; printf "%.3f",v
+        }')
+    fi
+
+    for position in "${positions[@]}"; do
+        start=$(LC_NUMERIC=C awk -v d="$duration" -v l="$sample_length" -v p="$position" 'BEGIN {
+            room=d-l; if(room<0)room=0; s=room*p; if(s<0)s=0; printf "%.3f",s
+        }')
+        sample_file="${output_dir}/.${output_name}.calibrate-${codec}-${quality}.$$.${sample_count}.mkv"
+        preflight_files+=("$sample_file" "${sample_file}.vmaf.json")
+        rm -f -- "$sample_file" "${sample_file}.vmaf.json"
+
+        calibration_candidate_command "$encoder" "$quality" "$start" "$sample_length" "$sample_file" || return 1
+        if ! "${CAL_COMMAND[@]}"; then
+            printf '%s via %s quality %s: sample encode failed.\n' "${codec^^}" "$encoder" "$quality"
+            rm -f -- "$sample_file" "${sample_file}.vmaf.json"
+            return 1
+        fi
+
+        actual_length=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$sample_file" 2>/dev/null | head -n1)
+        sample_size=$(stat -c '%s' -- "$sample_file" 2>/dev/null || printf 0)
+        if [[ ! $actual_length =~ ^[0-9]+([.][0-9]+)?$ ]] || (( sample_size <= 0 )); then
+            rm -f -- "$sample_file" "${sample_file}.vmaf.json"
+            return 1
+        fi
+        sample_bps=$(LC_NUMERIC=C awk -v bytes="$sample_size" -v seconds="$actual_length" \
+            'BEGIN {if(seconds<=0)print 0; else printf "%.0f",bytes*8/seconds}')
+        total_bps=$((total_bps + sample_bps))
+        sample_count=$((sample_count + 1))
+
+        if ! measure_preflight_quality "$start" "$actual_length" "$sample_file" || \
+           [[ $MEASURED_QUALITY_KIND != VMAF ]]; then
+            rm -f -- "$sample_file" "${sample_file}.vmaf.json"
+            return 1
+        fi
+        if LC_NUMERIC=C awk -v a="$MEASURED_QUALITY_SCORE" -v b="$minimum_vmaf" \
+            'BEGIN {exit !(a<b)}'; then
+            minimum_vmaf=$MEASURED_QUALITY_SCORE
+        fi
+        rm -f -- "$sample_file" "${sample_file}.vmaf.json"
+    done
+
+    (( sample_count > 0 )) || return 1
+    CAL_MIN_VMAF=$minimum_vmaf
+    CAL_AVG_VIDEO_BPS=$((total_bps / sample_count))
+    return 0
+}
+
+calibrate_hardware_candidate() {
+    local codec=$1 encoder=$2
+    local range low high quality_label mid best_quality=0 best_video_bps=0
+    local source_average_bps predicted_output_bps required_savings
+
+    CAL_BEST_QUALITY=''
+    CAL_PREDICTED_SAVINGS=''
+    CAL_REQUIRED_SAVINGS=''
+    CAL_REASON=''
+    CAL_QUALITY_LABEL=''
+
+    calibration_encoder_supported "$encoder" || {
+        CAL_REASON='encoder-family-not-calibrated'
+        return 4
+    }
+    range=$(calibration_quality_range "$encoder") || return 4
+    read -r low high quality_label <<< "$range"
+    CAL_QUALITY_LABEL=$quality_label
+
+    source_average_bps=$(LC_NUMERIC=C awk -v bytes="$original_size" -v seconds="$duration" \
+        'BEGIN {if(seconds<=0)print 0; else printf "%.0f",bytes*8/seconds}')
+    [[ $source_average_bps =~ ^[0-9]+$ ]] && (( source_average_bps > 0 )) || {
+        CAL_REASON='source-bitrate-unavailable'; return 1;
+    }
+
+    required_savings="$min_savings_percent"
+    if [[ "$source_video_codec" == "$codec" && "$apply_scaling" != true && "$apply_denoise" != true ]]; then
+        required_savings=$(LC_NUMERIC=C awk -v minimum="$min_savings_percent" 'BEGIN {
+            candidate=minimum+5; if(candidate<10) candidate=10; printf "%.3f",candidate
+        }')
+    fi
+    CAL_REQUIRED_SAVINGS=$required_savings
+
+    printf '\n%s hardware quality calibration\n' "${codec^^}"
+    printf '%s\n' '────────────────────────────────────────────────────────────'
+    printf 'Encoder: %s | searching %s %s..%s for worst-sample VMAF >= %s.\n' \
+        "$encoder" "$quality_label" "$low" "$high" "$quality_vmaf_threshold"
+
+    while (( low <= high )); do
+        mid=$(((low + high) / 2))
+        if ! evaluate_hardware_quality "$codec" "$encoder" "$mid"; then
+            CAL_REASON="sample-probe-failed-at-${mid}"
+            return 1
+        fi
+        printf '%s %s: worst VMAF %s.\n' "$quality_label" "$mid" "$CAL_MIN_VMAF"
+        if LC_NUMERIC=C awk -v v="$CAL_MIN_VMAF" -v threshold="$quality_vmaf_threshold" \
+            'BEGIN {exit !(v>=threshold)}'; then
+            best_quality=$mid
+            best_video_bps=$CAL_AVG_VIDEO_BPS
+            low=$((mid + 1))
+        else
+            high=$((mid - 1))
+        fi
+    done
+
+    if (( best_quality <= 0 )); then
+        CAL_REASON='quality-floor-not-met'
+        return 2
+    fi
+
+    predicted_output_bps=$(LC_NUMERIC=C awk -v video="$best_video_bps" -v audio="$estimated_output_audio_bps" \
+        'BEGIN {printf "%.0f",(video+audio)*1.015}')
+    CAL_PREDICTED_SAVINGS=$(LC_NUMERIC=C awk -v source="$source_average_bps" -v output="$predicted_output_bps" 'BEGIN {
+        if(source<=0){print 0; exit} printf "%.2f",(source-output)*100/source
+    }')
+    CAL_BEST_QUALITY=$best_quality
+    printf '%s quality-valid boundary: %s %s; predicted saving %s%%; required %s%%.\n' \
+        "${codec^^}" "$quality_label" "$best_quality" "$CAL_PREDICTED_SAVINGS" "$required_savings"
+
+    if ! LC_NUMERIC=C awk -v saving="$CAL_PREDICTED_SAVINGS" -v required="$required_savings" \
+        'BEGIN {exit !(saving>=required)}'; then
+        CAL_REASON='minimum-saving-not-met'
+        return 3
+    fi
+    CAL_REASON='candidate-valid'
+    return 0
+}
+
+apply_calibrated_candidate() {
+    local codec=$1 encoder=$2 quality=$3 label=$4
+    local CAL_FILTER_CHAIN=''
+    apply_encoder "$encoder"
+    calibration_apply_quality "$encoder" "$quality" || return 1
+    calibration_build_filter_chain "$encoder"
+    filter_chain=$CAL_FILTER_CHAIN
+    case "$encoder" in
+        av1_vaapi) video_crf="CQP q_idx ${quality} (calibrated)" ;;
+        hevc_vaapi) video_crf="CQP QP ${quality} (calibrated)" ;;
+        av1_nvenc|hevc_nvenc) video_crf="CQ ${quality} (calibrated)" ;;
+        av1_qsv|hevc_qsv) video_crf="ICQ ${quality} (calibrated)" ;;
+    esac
+    printf 'Selected %s via %s at %s %s.\n' "${codec^^}" "$encoder" "$label" "$quality"
+}
+
+calibrate_and_choose_video_codec() {
+    [[ "$quality_check" != off ]] || {
+        if [[ $HARDCORE_AUTO_CODEC_MODE == 1 ]]; then
+            printf 'Automatic AV1/HEVC comparison requires VMAF; original preserved unchanged.\n'
+            return 3
+        fi
+        return 0
+    }
+    [[ "$duration" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+        printf 'Video quality calibration could not determine duration. Original preserved unchanged.\n'
+        return 3
+    }
+
+    local av1_encoder='' hevc_encoder='' av1_rc=9 hevc_rc=9
+    local av1_quality='' hevc_quality='' av1_saving='' hevc_saving=''
+    local av1_reason='unavailable' hevc_reason='unavailable'
+    local av1_label='' hevc_label=''
+
+    if [[ $HARDCORE_AUTO_CODEC_MODE == 1 ]]; then
+        av1_encoder=$HARDCORE_AUTO_AV1_ENCODER
+        hevc_encoder=$HARDCORE_AUTO_HEVC_ENCODER
+    else
+        case "$expected_codec" in
+            av1) av1_encoder=$video_encoder ;;
+            hevc) hevc_encoder=$video_encoder ;;
+        esac
+    fi
+
+    if [[ -n $av1_encoder ]]; then
+        if calibrate_hardware_candidate av1 "$av1_encoder"; then av1_rc=0; else av1_rc=$?; fi
+        av1_quality=$CAL_BEST_QUALITY; av1_saving=$CAL_PREDICTED_SAVINGS; av1_reason=$CAL_REASON; av1_label=$CAL_QUALITY_LABEL
+    fi
+    if [[ -n $hevc_encoder ]]; then
+        if calibrate_hardware_candidate hevc "$hevc_encoder"; then hevc_rc=0; else hevc_rc=$?; fi
+        hevc_quality=$CAL_BEST_QUALITY; hevc_saving=$CAL_PREDICTED_SAVINGS; hevc_reason=$CAL_REASON; hevc_label=$CAL_QUALITY_LABEL
+    fi
+
+    if [[ $HARDCORE_AUTO_CODEC_MODE != 1 ]]; then
+        local rc quality saving reason label codec encoder
+        if [[ -n $av1_encoder ]]; then rc=$av1_rc; quality=$av1_quality; saving=$av1_saving; reason=$av1_reason; label=$av1_label; codec=av1; encoder=$av1_encoder
+        else rc=$hevc_rc; quality=$hevc_quality; saving=$hevc_saving; reason=$hevc_reason; label=$hevc_label; codec=hevc; encoder=$hevc_encoder; fi
+        if (( rc == 4 )); then
+            printf '%s encoder %s has no calibrated search policy; using its existing validated settings.\n' "${codec^^}" "$encoder"
+            return 0
+        fi
+        if (( rc != 0 )); then
+            printf '%s calibration rejected this file (%s). Original preserved unchanged.\n' "${codec^^}" "$reason"
+            return 3
+        fi
+        apply_calibrated_candidate "$codec" "$encoder" "$quality" "$label"
+        return $?
+    fi
+
+    printf '\nAutomatic codec competition\n'
+    printf '%s\n' '════════════════════════════════════════════════════════════'
+    printf 'AV1:  encoder=%s | result=%s | quality=%s %s | predicted saving=%s%%\n' \
+        "${av1_encoder:-unavailable}" "$av1_reason" "${av1_label:-n/a}" "${av1_quality:-n/a}" "${av1_saving:-n/a}"
+    printf 'HEVC: encoder=%s | result=%s | quality=%s %s | predicted saving=%s%%\n' \
+        "${hevc_encoder:-unavailable}" "$hevc_reason" "${hevc_label:-n/a}" "${hevc_quality:-n/a}" "${hevc_saving:-n/a}"
+
+    if (( av1_rc == 4 )) && [[ -n $av1_encoder && -z $hevc_encoder ]]; then
+        printf 'Only AV1 is available and its encoder family has no calibrated competition policy; keeping existing AV1 settings.\n'
         return 0
     fi
-    return 1
+    if (( hevc_rc == 4 )) && [[ -n $hevc_encoder && -z $av1_encoder ]]; then
+        printf 'Only HEVC is available and its encoder family has no calibrated competition policy; keeping existing HEVC settings.\n'
+        return 0
+    fi
+
+    if (( av1_rc == 0 && hevc_rc == 0 )); then
+        if LC_NUMERIC=C awk -v a="$av1_saving" -v h="$hevc_saving" 'BEGIN {exit !(a>=h)}'; then
+            printf 'Winner: AV1, because its quality-valid candidate is predicted smaller.\n'
+            apply_calibrated_candidate av1 "$av1_encoder" "$av1_quality" "$av1_label"
+        else
+            printf 'Winner: HEVC, because its quality-valid candidate is predicted smaller.\n'
+            apply_calibrated_candidate hevc "$hevc_encoder" "$hevc_quality" "$hevc_label"
+        fi
+        return $?
+    elif (( av1_rc == 0 )); then
+        printf 'Winner: AV1; HEVC did not produce an accepted quality/size candidate.\n'
+        apply_calibrated_candidate av1 "$av1_encoder" "$av1_quality" "$av1_label"
+        return $?
+    elif (( hevc_rc == 0 )); then
+        printf 'Winner: HEVC; AV1 did not produce an accepted quality/size candidate.\n'
+        apply_calibrated_candidate hevc "$hevc_encoder" "$hevc_quality" "$hevc_label"
+        return $?
+    fi
+
+    printf 'Neither AV1 nor HEVC produced a candidate meeting both VMAF and minimum-savings requirements. Original preserved unchanged.\n'
+    return 3
 }
 
 run_video_preflight() {
@@ -2102,7 +2449,7 @@ run_video_preflight() {
         'BEGIN {exit !(d >= minimum)}'; then
         duration_is_long=true
     fi
-    if [[ "$duration_is_long" != true ]] && (( original_size < preflight_min_size )); then
+    if [[ "$quality_check" == off && "$duration_is_long" != true ]] && (( original_size < preflight_min_size )); then
         printf '\nVideo preflight: skipped for this short, small file; direct encoding is cheaper.\n'
         return 0
     fi
@@ -2140,7 +2487,7 @@ run_video_preflight() {
 
         sample_command=(ffmpeg -hide_banner -v error -nostdin -y)
         if [[ "$video_encoder" == *_vaapi ]]; then
-            sample_command+=(-init_hw_device "vaapi=va:" -filter_hw_device va)
+            sample_command+=(-init_hw_device "vaapi=va:${HARDCORE_ARCHIVE_VAAPI_DEVICE:-}" -filter_hw_device va)
         fi
         sample_command+=(
             -ss "$start" -i "$input" -t "$sample_length"
@@ -2155,7 +2502,8 @@ run_video_preflight() {
 
         printf 'Sample %s/3 at %ss: ' "$index" "$start"
         if ! "${sample_command[@]}"; then
-            printf 'failed; full encode will be attempted.\n'
+            printf 'failed.\n'
+            [[ $quality_check != off ]] && quality_failed=true
             rm -f -- "$sample_file"
             continue
         fi
@@ -2164,14 +2512,18 @@ run_video_preflight() {
         actual_length=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 \
             "$sample_file" 2>/dev/null | head -n1)
         if (( sample_size <= 0 )) || ! [[ "$actual_length" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-            printf 'invalid; full encode will be attempted.\n'
+            printf 'invalid.\n'
+            [[ $quality_check != off ]] && quality_failed=true
             rm -f -- "$sample_file"
             continue
         fi
 
         sample_bps=$(LC_NUMERIC=C awk -v bytes="$sample_size" -v seconds="$actual_length" \
             'BEGIN {if(seconds<=0)print 0; else printf "%.0f",bytes*8/seconds}')
-        (( sample_bps > 0 )) || continue
+        if (( sample_bps <= 0 )); then
+            [[ $quality_check != off ]] && quality_failed=true
+            continue
+        fi
         successful=$((successful + 1))
         total_bps=$((total_bps + sample_bps))
         if (( min_bps == 0 || sample_bps < min_bps )); then min_bps=$sample_bps; fi
@@ -2187,7 +2539,7 @@ run_video_preflight() {
                  LC_NUMERIC=C awk -v a="$MEASURED_QUALITY_SCORE" -v b="$minimum_ssim" 'BEGIN {exit !(a<b)}'; then
                 minimum_ssim=$MEASURED_QUALITY_SCORE
             fi
-        elif [[ $quality_check == required ]]; then
+        elif [[ $quality_check != off ]]; then
             printf '; quality measurement failed'
             quality_failed=true
         fi
@@ -2195,8 +2547,11 @@ run_video_preflight() {
         rm -f -- "$sample_file"
     done
 
+    if [[ $quality_check != off ]] && (( quality_samples == 0 )); then
+        quality_failed=true
+    fi
     if [[ $quality_failed == true ]]; then
-        printf 'Required sample-quality measurement was unavailable. Original preserved unchanged.\n'
+        printf 'Sample VMAF quality validation was unavailable. Original preserved unchanged.\n'
         exit 3
     fi
     if (( quality_samples > 0 )); then
@@ -2238,6 +2593,11 @@ run_video_preflight() {
     printf 'Sample variation:      %s%%\n' "$variation"
     printf 'Required saving:       %s%%\n' "$required_savings"
 
+    if LC_NUMERIC=C awk -v predicted="$predicted_savings" 'BEGIN {exit !(predicted<=-20)}'; then
+        printf 'Preflight predicts severe expansion (%s%% saving). Original preserved unchanged.\n' "$predicted_savings"
+        exit 3
+    fi
+
     if LC_NUMERIC=C awk -v predicted="$predicted_savings" -v required="$required_savings" \
         -v margin="$safety_margin" -v variation="$variation" \
         'BEGIN {exit !((predicted+margin)<required && variation<=35)}'; then
@@ -2247,6 +2607,14 @@ run_video_preflight() {
 
     printf 'Preflight supports a full encode, or is uncertain enough that skipping would be unsafe.\n'
 }
+
+calibrate_and_choose_video_codec
+calibration_rc=$?
+if (( calibration_rc == 3 )); then
+    exit 3
+elif (( calibration_rc != 0 )); then
+    die "Video codec calibration/selection failed with exit code $calibration_rc."
+fi
 
 run_video_preflight
 
@@ -2281,7 +2649,7 @@ rm -f -- "$temporary"
 # quality options remain attached to the selected encoder.
 command=(ffmpeg -hide_banner -nostdin -y)
 if [[ "$video_encoder" == *_vaapi ]]; then
-    command+=(-init_hw_device "vaapi=va:" -filter_hw_device va)
+    command+=(-init_hw_device "vaapi=va:${HARDCORE_ARCHIVE_VAAPI_DEVICE:-}" -filter_hw_device va)
 fi
 command+=(
     -i "$input"
@@ -2296,6 +2664,9 @@ command+=(-c:s copy -c:t copy -max_muxing_queue_size 4096)
 
 [[ -n "$filter_chain" ]] && command+=(-vf "$filter_chain")
 command+=("${audio_args[@]}" "$temporary")
+printf 'FFmpeg command:'
+printf ' %q' "${command[@]}"
+printf '\n'
 
 printf '\nStarting FFmpeg\n'
 printf '%s\n' '────────────────────────────────────────────────────────────'
@@ -2544,6 +2915,37 @@ is_nested_archive_path() {
     esac
 }
 
+
+# HARDCORE_COPY_LANE_PATCH_V1
+# HARDCORE_CONTAINER_REPACK_PATCH_V1
+CONTAINER_REPACK=${HARDCORE_ARCHIVE_CONTAINER_REPACK:-true}
+CONTAINER_HELPER=${HARDCORE_ARCHIVE_CONTAINER_HELPER:-}
+is_format_preserving_container_path() {
+    local lower=${1,,}
+    case "$lower" in
+        *.docx|*.xlsx|*.pptx|*.odt|*.ods|*.odp|*.epub|*.npz|*.whl|*.jar|*.war) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+# Files that are already entropy-compressed are preserved byte-for-byte but are
+# stored with 7-Zip's Copy method instead of wasting LZMA2 time. Transform
+# lanes are classified first, so video/image/nested/container processing still
+# takes precedence whenever it is enabled.
+is_already_compressed_path() {
+    local lower=${1,,}
+    case "$lower" in
+        *.7z|*.zip|*.rar|*.cab|*.gz|*.bz2|*.xz|*.zst|*.lz4|*.tgz|*.tbz|*.tbz2|*.txz|*.tzst|\
+        *.docx|*.xlsx|*.pptx|*.odt|*.ods|*.odp|*.epub|*.apk|*.jar|*.war|*.whl|*.npz|*.deb|*.rpm|\
+        *.mp3|*.aac|*.m4a|*.ogg|*.opus|*.flac|*.wma|*.alac|*.ape|\
+        *.webp|*.gif|*.avif|*.heic|*.heif)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 archive_replacement_path() {
     local path=$1 base
     case "${path,,}" in
@@ -2619,7 +3021,7 @@ inspect_existing_archive() {
     if [[ -n $manifest ]]; then
         printf '\n===== Archive information =====\n%s\n' "$manifest"
     fi
-    for path in '.hardcore-archive-video-manifest.txt' '.hardcore-archive-image-manifest.txt' '.hardcore-archive-nested-manifest.txt' '.hardcore-archive-metadata/sparse.tsv'; do
+    for path in '.hardcore-archive-video-manifest.txt' '.hardcore-archive-image-manifest.txt' '.hardcore-archive-container-manifest.txt' '.hardcore-archive-nested-manifest.txt' '.hardcore-archive-metadata/sparse.tsv'; do
         if "$SEVEN_ZIP" l -ba "$archive" "$path" 2>/dev/null | grep -Fq "$path"; then
             printf '%-28s present\n' "$path:"
         fi
@@ -2756,52 +3158,14 @@ if bad:
 
     apply_sparse_manifest "$temp"
 
-    # Apply metadata with trusted local code. Archived scripts are never executed.
-    python3 - "$temp" <<'PYTRUSTEDMETA'
-import base64,json,os,stat,sys
-root=os.path.realpath(sys.argv[1])
-def safe(rel):
-    if not rel or os.path.isabs(rel): return None
-    p=os.path.realpath(os.path.join(root,rel))
-    return p if p==root or p.startswith(root+os.sep) else None
-meta=os.path.join(root,'.hardcore-archive-metadata','files.tsv')
-if os.path.isfile(meta):
-    with open(meta,'r',encoding='utf-8',errors='surrogateescape') as f:
-        next(f,None)
-        rows=[]
-        for line in f:
-            parts=line.rstrip('\n').split('\t',6)
-            if len(parts)!=7: continue
-            typ,mode,uid,gid,mtime,rel,target=parts
-            p=safe(rel)
-            if p and os.path.lexists(p): rows.append((p,mode,uid,gid,mtime))
-    # Files before directories, then directories deepest-first for stable mtimes.
-    rows.sort(key=lambda r:(os.path.isdir(r[0]), -r[0].count(os.sep)))
-    for p,mode,uid,gid,mtime in rows:
-        try: os.chmod(p,int(mode,8),follow_symlinks=False)
-        except (OSError,NotImplementedError,ValueError): pass
-        try: os.utime(p,(int(mtime),int(mtime)),follow_symlinks=False)
-        except (OSError,NotImplementedError,ValueError): pass
-        if os.geteuid()==0:
-            try: os.chown(p,int(uid),int(gid),follow_symlinks=False)
-            except (OSError,NotImplementedError,ValueError): pass
-xfile=os.path.join(root,'.hardcore-archive-metadata','xattrs.txt')
-if os.path.isfile(xfile):
-    with open(xfile,'r',encoding='utf-8',errors='replace') as f:
-        for line in f:
-            if not line.strip() or line.startswith('#'): continue
-            try: rec=json.loads(line)
-            except Exception: continue
-            p=safe(rec.get('path',''))
-            if not p or not os.path.lexists(p): continue
-            if hasattr(os,'setxattr'):
-                for name,value in rec.get('xattrs',{}).items():
-                    try: os.setxattr(p,name,base64.b64decode(value),follow_symlinks=False)
-                    except (OSError,ValueError): pass
-            if rec.get('flags') and hasattr(os,'chflags'):
-                try: os.chflags(p,int(rec['flags']),follow_symlinks=False)
-                except OSError: pass
-PYTRUSTEDMETA
+    # Apply metadata with installed, trusted code. ACL paths are sanitized
+    # before setfacl sees them; no code or path from the archive is trusted.
+    [[ -n $METADATA_HELPER && -f $METADATA_HELPER ]] || \
+        die "Trusted metadata restore helper is missing: ${METADATA_HELPER:-unset}"
+    python3 "$METADATA_HELPER" \
+        --root "$temp" \
+        --metadata-dir "$temp/.hardcore-archive-metadata" || \
+        die "Safe metadata restoration failed. Nothing was committed."
 
     # Sparse reconstruction changes allocation only, not content; verify again.
     if [[ -s $hashfile ]]; then
@@ -3052,6 +3416,15 @@ while (( $# > 0 )); do
             VIDEO_COPY_AUDIO=true
             shift
             ;;
+        --video-min-vmaf)
+            (( $# >= 2 )) || die "--video-min-vmaf requires a VMAF score."
+            VIDEO_MIN_VMAF=$2
+            shift 2
+            ;;
+        --video-min-vmaf=*)
+            VIDEO_MIN_VMAF=${1#*=}
+            shift
+            ;;
         --video-min-savings)
             (( $# >= 2 )) || die "--video-min-savings requires a percentage."
             VIDEO_MIN_SAVINGS_PERCENT=$2
@@ -3261,11 +3634,7 @@ fi
 [[ $NESTED_MAX_DEPTH =~ ^[0-9]+$ ]] || die "Nested maximum depth must be a non-negative integer."
 
 if [[ $VERIFY_MODE == auto ]]; then
-    if $REMOVE_SOURCE; then
-        VERIFY_MODE_EFFECTIVE=hashes
-    else
-        VERIFY_MODE_EFFECTIVE=integrity
-    fi
+    VERIFY_MODE_EFFECTIVE=hashes
 else
     VERIFY_MODE_EFFECTIVE=$VERIFY_MODE
 fi
@@ -3296,6 +3665,8 @@ fi
 (( PROGRESS_INTERVAL <= 86400 )) || die "Progress interval is unreasonably large."
 [[ $VIDEO_MIN_SAVINGS_PERCENT =~ ^[0-9]+([.][0-9]+)?$ ]] ||     die "Video minimum savings must be a non-negative number."
 LC_NUMERIC=C awk -v p="$VIDEO_MIN_SAVINGS_PERCENT" 'BEGIN {exit !(p >= 0 && p <= 100)}' ||     die "Video minimum savings must be between 0 and 100."
+[[ $VIDEO_MIN_VMAF =~ ^[0-9]+([.][0-9]+)?$ ]] || die "Video minimum VMAF must be numeric."
+LC_NUMERIC=C awk -v v="$VIDEO_MIN_VMAF" 'BEGIN {exit !(v >= 0 && v <= 100)}' || die "Video minimum VMAF must be between 0 and 100."
 
 if [[ $COMMAND_MODE == inspect ]]; then
     dependency_preflight_inspect
@@ -3355,6 +3726,7 @@ build_batch_child_arguments() {
     $VIDEO_NO_DENOISE && BATCH_CHILD_ARGS+=(--video-no-denoise)
     $VIDEO_COPY_AUDIO && BATCH_CHILD_ARGS+=(--video-copy-audio)
     BATCH_CHILD_ARGS+=(--video-min-savings "$VIDEO_MIN_SAVINGS_PERCENT")
+    BATCH_CHILD_ARGS+=(--video-min-vmaf "$VIDEO_MIN_VMAF")
     $VIDEO_PREFLIGHT || BATCH_CHILD_ARGS+=(--video-no-preflight)
     $VIDEO_WRITE_MANIFEST || BATCH_CHILD_ARGS+=(--no-video-manifest)
     $IMAGE_OPTIMIZE || BATCH_CHILD_ARGS+=(--no-image-optimize)
@@ -3927,6 +4299,11 @@ REPORT_PATH=$(archive_report_path)
 VIDEO_LIST=$(mktemp)
 IMAGE_LIST=$(mktemp)
 NESTED_LIST=$(mktemp)
+CONTAINER_LIST=$(mktemp)
+CONTAINER_RESULT_MANIFEST=$(mktemp)
+CONTAINER_REPACKED_LIST=$(mktemp)
+CONTAINER_FALLBACK_LIST=$(mktemp)
+COPY_LIST=$(mktemp)
 SNAPSHOT_BEFORE=$(mktemp)
 SNAPSHOT_AFTER=$(mktemp)
 SEVEN_ZIP_LOG=$(mktemp)
@@ -3954,6 +4331,7 @@ ARCHIVE_MANIFEST_STAGE=$(mktemp -d -p "$ARCHIVE_PARENT" ".hardcore-manifest-stag
 ARCHIVE_MANIFEST_FILE="$ARCHIVE_MANIFEST_STAGE/.hardcore-archive-video-manifest.txt"
 IMAGE_MANIFEST_FILE="$ARCHIVE_MANIFEST_STAGE/.hardcore-archive-image-manifest.txt"
 NESTED_MANIFEST_FILE="$ARCHIVE_MANIFEST_STAGE/.hardcore-archive-nested-manifest.txt"
+CONTAINER_MANIFEST_FILE="$ARCHIVE_MANIFEST_STAGE/.hardcore-archive-container-manifest.txt"
 METADATA_DIR="$ARCHIVE_MANIFEST_STAGE/.hardcore-archive-metadata"
 METADATA_MANIFEST="$METADATA_DIR/files.tsv"
 ACL_MANIFEST="$METADATA_DIR/acl.txt"
@@ -4082,10 +4460,33 @@ cleanup() {
         fi
     fi
 
-    rm -f -- "$VIDEO_LIST" "$IMAGE_LIST" "$NESTED_LIST" "$SNAPSHOT_BEFORE" "$SNAPSHOT_AFTER" "$SEVEN_ZIP_LOG" \
+
+    if (( exit_status != 0 )) && [[ -n ${HARDCORE_ARCHIVE_DIAGNOSTIC_DIR:-} ]]; then
+        mkdir -p -- "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR" 2>/dev/null || true
+        [[ -s ${VIDEO_LOG:-} ]] && cp -- "$VIDEO_LOG" "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/video.log" 2>/dev/null || true
+        [[ -s ${IMAGE_LOG:-} ]] && cp -- "$IMAGE_LOG" "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/image.log" 2>/dev/null || true
+        [[ -s ${SEVEN_ZIP_LOG:-} ]] && cp -- "$SEVEN_ZIP_LOG" "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/7zip.log" 2>/dev/null || true
+        [[ -s ${MC_TUNING_LOG:-} ]] && cp -- "$MC_TUNING_LOG" "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/match-cycle.log" 2>/dev/null || true
+        {
+            printf 'exit_status=%s\n' "$exit_status"
+            printf 'failure_context=%s\n' "${FAILURE_CONTEXT:-unknown}"
+            printf 'video_transcode=%s\n' "${VIDEO_TRANSCODE:-unknown}"
+            printf 'video_codec=%s\n' "${VIDEO_CODEC:-unknown}"
+            printf 'video_encoder=%s\n' "${VIDEO_ENCODER:-unset}"
+            printf 'video_vaapi_device=%s\n' "${HARDCORE_ARCHIVE_VAAPI_DEVICE:-auto}"
+            printf 'video_pipeline_pid=%s\n' "${VIDEO_PIPELINE_PID:-none}"
+            printf 'video_completed=%s\n' "${VIDEO_COMPRESSED_COUNT:-0}"
+            printf 'video_preserved=%s\n' "${VIDEO_FALLBACK_COUNT:-0}"
+            printf 'nested_repacked=%s\n' "${NESTED_REPACKED_COUNT:-0}"
+            printf 'nested_preserved=%s\n' "${NESTED_FALLBACK_COUNT:-0}"
+        } > "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/state.txt" 2>/dev/null || true
+    fi
+
+    rm -f -- "$VIDEO_LIST" "$IMAGE_LIST" "$NESTED_LIST" "$CONTAINER_LIST" "$COPY_LIST" "$SNAPSHOT_BEFORE" "$SNAPSHOT_AFTER" "$SEVEN_ZIP_LOG" \
         "$INVENTORY_RAW" "$VIDEO_LOG" "$IMAGE_LOG" "$VIDEO_COMPRESSED_LIST" "$VIDEO_FALLBACK_LIST" \
         "$VIDEO_RESULT_MANIFEST" "$IMAGE_RESULT_MANIFEST" "$IMAGE_OPTIMIZED_LIST" "$IMAGE_FALLBACK_LIST" \
         "$NESTED_RESULT_MANIFEST" "$NESTED_REPACKED_LIST" "$NESTED_FALLBACK_LIST" \
+        "$CONTAINER_RESULT_MANIFEST" "$CONTAINER_REPACKED_LIST" "$CONTAINER_FALLBACK_LIST" \
         "${MC_TUNING_LOG:-}" "$EXPECTED_PATHS" "$ARCHIVE_PATHS" "$HASH_MANIFEST" "$HASH_VERIFY_LOG" \
         "$SPECIAL_FILES_LIST" "$NESTED_MOUNTS_LIST" "$RESUME_MAP"
 
@@ -4099,6 +4500,9 @@ cleanup() {
     fi
     if [[ -n ${IMAGE_STAGE_PARENT:-} && -d $IMAGE_STAGE_PARENT ]]; then
         rm -rf --one-file-system -- "$IMAGE_STAGE_PARENT"
+    fi
+    if [[ -n ${CONTAINER_STAGE_PARENT:-} && -d $CONTAINER_STAGE_PARENT ]]; then
+        rm -rf --one-file-system -- "$CONTAINER_STAGE_PARENT"
     fi
     if [[ -n ${NESTED_STAGE_PARENT:-} && -d $NESTED_STAGE_PARENT ]]; then
         rm -rf --one-file-system -- "$NESTED_STAGE_PARENT"
@@ -4203,6 +4607,16 @@ IMAGE_PNG_COUNT=0
 LARGEST_IMAGE_BYTES=0
 NESTED_COUNT=0
 NESTED_BYTES=0
+CONTAINER_COUNT=0
+CONTAINER_BYTES=0
+CONTAINER_REPACKED_COUNT=0
+CONTAINER_FALLBACK_COUNT=0
+CONTAINER_REPACKED_BYTES=0
+CONTAINER_FALLBACK_BYTES=0
+CONTAINER_SAVED_BYTES=0
+CONTAINER_STAGE_PARENT=''
+COPY_COUNT=0
+COPY_BYTES=0
 NONVIDEO_COUNT=0
 NONVIDEO_BYTES=0
 
@@ -4240,6 +4654,14 @@ while IFS= read -r -d '' file_size && IFS= read -r -d '' relative_path; do
             *) IMAGE_JPEG_COUNT=$((IMAGE_JPEG_COUNT + 1)) ;;
         esac
         printf '%s\n' "$relative_path" >> "$IMAGE_LIST"
+    elif $CONTAINER_REPACK && is_format_preserving_container_path "$relative_path"; then
+        CONTAINER_COUNT=$((CONTAINER_COUNT + 1))
+        CONTAINER_BYTES=$((CONTAINER_BYTES + file_size))
+        printf '%s\n' "$relative_path" >> "$CONTAINER_LIST"
+    elif is_already_compressed_path "$relative_path"; then
+        COPY_COUNT=$((COPY_COUNT + 1))
+        COPY_BYTES=$((COPY_BYTES + file_size))
+        printf '%s\n' "$relative_path" >> "$COPY_LIST"
     else
         NONVIDEO_COUNT=$((NONVIDEO_COUNT + 1))
         NONVIDEO_BYTES=$((NONVIDEO_BYTES + file_size))
@@ -4270,6 +4692,18 @@ if (( IMAGE_COUNT > 0 )); then
     fi
 fi
 
+
+# HARDCORE_HARDWARE_ONLY_VIDEO_V1
+# HARDCORE_EXPLICIT_VAAPI_DEVICE_V1
+video_encoder_is_hardware() {
+    case "$1" in
+        av1_vaapi|av1_nvenc|av1_qsv|hevc_videotoolbox|hevc_vaapi|hevc_nvenc|hevc_qsv)
+            return 0 ;;
+        *)
+            return 1 ;;
+    esac
+}
+
 probe_parent_video_encoder() {
     local relative input probe='' candidate expected actual
     local -a command=() candidates=()
@@ -4287,11 +4721,11 @@ probe_parent_video_encoder() {
     for candidate in "${candidates[@]}"; do
         ffmpeg -hide_banner -encoders 2>/dev/null | grep -w "$candidate" >/dev/null || continue
         command=(ffmpeg -hide_banner -v error -nostdin -y)
-        [[ $candidate == *_vaapi ]] && command+=( -init_hw_device 'vaapi=va:' -filter_hw_device va )
+        [[ $candidate == *_vaapi ]] && command+=( -init_hw_device "vaapi=va:${HARDCORE_ARCHIVE_VAAPI_DEVICE:-}" -filter_hw_device va )
         command+=( -t 1 -i "$input" -map '0:V:0' -an -sn -dn )
         case $candidate in
             *_videotoolbox) command+=( -c:v "$candidate" -q:v 65 -pix_fmt nv12 ) ;;
-            *_vaapi) command+=( -vf 'format=nv12,hwupload' -c:v "$candidate" -qp 33 ) ;;
+            *_vaapi) command+=( -vf 'format=nv12,hwupload' -c:v "$candidate" -rc_mode CQP -global_quality:v 33 ) ;;
             *_nvenc) command+=( -c:v "$candidate" -cq:v 33 -preset:v p4 ) ;;
             *_qsv) command+=( -c:v "$candidate" -global_quality:v 33 -preset:v balanced ) ;;
         esac
@@ -4319,13 +4753,9 @@ if $VIDEO_TRANSCODE && (( VIDEO_COUNT > 0 )); then
     case $VIDEO_MODE in
         maximum)
             if [[ -z $VIDEO_ENCODER ]]; then
-                if [[ $VIDEO_CODEC == av1 ]] && ffmpeg -hide_banner -encoders 2>/dev/null | grep -w libsvtav1 >/dev/null; then
-                    VIDEO_ENCODER=libsvtav1
-                elif [[ $VIDEO_CODEC == hevc ]] && ffmpeg -hide_banner -encoders 2>/dev/null | grep -w libx265 >/dev/null; then
-                    VIDEO_ENCODER=libx265
-                fi
+                probe_parent_video_encoder || die "Hardware video encoding is mandatory, but no compatible hardware encoder passed the real-file probe."
             fi
-            $VIDEO_PARALLEL_EXPLICIT || VIDEO_PARALLEL=false
+            $VIDEO_PARALLEL_EXPLICIT || VIDEO_PARALLEL=true
             [[ $QUALITY_CHECK == auto ]] && QUALITY_CHECK=required
             ;;
         balanced)
@@ -4333,8 +4763,7 @@ if $VIDEO_TRANSCODE && (( VIDEO_COUNT > 0 )); then
                 if probe_parent_video_encoder; then
                     $VIDEO_PARALLEL_EXPLICIT || VIDEO_PARALLEL=true
                 else
-                    [[ $VIDEO_CODEC == av1 ]] && VIDEO_ENCODER=libsvtav1 || VIDEO_ENCODER=libx265
-                    $VIDEO_PARALLEL_EXPLICIT || VIDEO_PARALLEL=false
+                    die "Hardware video encoding is mandatory, but the hardware probe failed."
                 fi
             elif [[ $VIDEO_ENCODER == lib* ]]; then
                 $VIDEO_PARALLEL_EXPLICIT || VIDEO_PARALLEL=false
@@ -4343,11 +4772,15 @@ if $VIDEO_TRANSCODE && (( VIDEO_COUNT > 0 )); then
         fast)
             [[ -z $VIDEO_ENCODER ]] && probe_parent_video_encoder || true
             if [[ -z $VIDEO_ENCODER ]]; then
-                [[ $VIDEO_CODEC == av1 ]] && VIDEO_ENCODER=libsvtav1 || VIDEO_ENCODER=libx265
+                die "Hardware video encoding is mandatory, but the hardware probe failed."
             fi
             $VIDEO_PARALLEL_EXPLICIT || VIDEO_PARALLEL=true
             ;;
     esac
+    [[ -n $VIDEO_ENCODER ]] || die "Hardware video encoding is mandatory, but no hardware encoder could be selected."
+    video_encoder_is_hardware "$VIDEO_ENCODER" || die "Software/non-hardware video encoder '$VIDEO_ENCODER' is forbidden. Hardware encoding is mandatory."
+    $VIDEO_PARALLEL_EXPLICIT || VIDEO_PARALLEL=true
+    printf 'Hardware video encoder locked: %s\n' "$VIDEO_ENCODER"
 fi
 
 # Pick a persistent local working area. It is cleaned after success, but kept
@@ -4359,10 +4792,13 @@ fi
 if (( IMAGE_COUNT > 0 )); then
     MINIMUM_STAGING_BYTES=$((MINIMUM_STAGING_BYTES + IMAGE_BYTES + LARGEST_IMAGE_BYTES))
 fi
+if $CONTAINER_REPACK && (( CONTAINER_COUNT > 0 )); then
+    MINIMUM_STAGING_BYTES=$((MINIMUM_STAGING_BYTES + CONTAINER_BYTES))
+fi
 choose_work_root
 JOB_ID=$(printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' \
     "$SOURCE" "$VIDEO_CODEC" "$VIDEO_ENCODER" "$VIDEO_MODE" \
-    "$VIDEO_MIN_SAVINGS_PERCENT" "$VIDEO_NO_SCALE" "$VIDEO_NO_DENOISE" \
+    "$VIDEO_MIN_VMAF" "$VIDEO_MIN_SAVINGS_PERCENT" "$VIDEO_NO_SCALE" "$VIDEO_NO_DENOISE" \
     "$IMAGE_OPTIMIZE" "$IMAGE_MODE" | \
     sha256sum | awk '{print substr($1,1,24)}')
 JOB_WORK_DIR="$WORK_ROOT/jobs/$JOB_ID"
@@ -4562,6 +4998,9 @@ build_mc_sample() {
     while IFS= read -r -d '' file_size && IFS= read -r -d '' relative_path; do
         is_video_path "$relative_path" && continue
         is_image_path "$relative_path" && continue
+        $NESTED_REPACK && is_nested_archive_path "$relative_path" && continue
+        $CONTAINER_REPACK && is_format_preserving_container_path "$relative_path" && continue
+        is_already_compressed_path "$relative_path" && continue
         remaining=$((target_bytes - $(stat -c '%s' -- "$MC_SAMPLE_FILE")))
         (( remaining > 0 )) || break
 
@@ -4756,7 +5195,7 @@ fi
 if (( IMAGE_COUNT > 0 )); then
     WORK_REQUIRED_BYTES=$((WORK_REQUIRED_BYTES + IMAGE_BYTES + LARGEST_IMAGE_BYTES))
 fi
-if [[ $VERIFY_MODE_EFFECTIVE == extract ]]; then
+if [[ $VERIFY_MODE_EFFECTIVE == hashes || $VERIFY_MODE_EFFECTIVE == extract ]]; then
     WORK_REQUIRED_BYTES=$((WORK_REQUIRED_BYTES + TOTAL_BYTES + 128 * MIB))
 fi
 if same_filesystem "$ARCHIVE_PARENT" "$JOB_WORK_DIR"; then
@@ -4768,7 +5207,7 @@ else
 fi
 
 if [[ -n $MC_SAMPLE_RATIO ]]; then
-    ESTIMATED_ARCHIVE_BYTES=$(LC_NUMERIC=C awk -v nonvideo="$NONVIDEO_BYTES" -v ratio="$MC_SAMPLE_RATIO" -v video="$VIDEO_BYTES" -v image="$IMAGE_BYTES" 'BEGIN {printf "%.0f", nonvideo*ratio+video+image}')
+    ESTIMATED_ARCHIVE_BYTES=$(LC_NUMERIC=C awk -v nonvideo="$NONVIDEO_BYTES" -v ratio="$MC_SAMPLE_RATIO" -v copy="$COPY_BYTES" -v container="$CONTAINER_BYTES" -v video="$VIDEO_BYTES" -v image="$IMAGE_BYTES" -v nested="$NESTED_BYTES" 'BEGIN {printf "%.0f", nonvideo*ratio+copy+container+video+image+nested}')
 fi
 if [[ -n $MC_SAMPLE_SECONDS_PER_MIB ]]; then
     ESTIMATED_SECONDS=$(LC_NUMERIC=C awk -v mib="$NONVIDEO_MIB" -v rate="$MC_SAMPLE_SECONDS_PER_MIB" 'BEGIN {printf "%.0f", mib*rate}')
@@ -4811,6 +5250,7 @@ if (( VIDEO_COUNT > 0 )); then
         printf 'Video denoising:         %s\n' "$($VIDEO_NO_DENOISE && printf 'Disabled' || printf 'Automatic recommendation')"
         printf 'Video audio:             %s\n' "$($VIDEO_COPY_AUDIO && printf 'Copy unchanged' || printf 'Automatic Opus optimization')"
         printf 'Minimum video saving:    %s%%\n' "$VIDEO_MIN_SAVINGS_PERCENT"
+        printf 'Minimum video VMAF:      %s\n' "$VIDEO_MIN_VMAF"
 printf 'Video preflight:         %s\n' "$($VIDEO_PREFLIGHT && printf 'Three representative segments' || printf 'Disabled')"
         printf 'Video manifest:          %s\n' "$($VIDEO_WRITE_MANIFEST && printf 'Included' || printf 'Disabled')"
     else
@@ -4829,8 +5269,12 @@ if (( IMAGE_COUNT > 0 )); then
         printf 'Image execution:         %s\n' "$($IMAGE_PARALLEL && printf 'Parallel with LZMA2' || printf 'Sequential before LZMA2')"
     fi
 fi
-printf 'Files compressed:        %s files / %s\n' \
+printf 'LZMA2 lane:              %s files / %s\n' \
     "$NONVIDEO_COUNT" "$(human_bytes "$NONVIDEO_BYTES")"
+printf 'Container repack lane:   %s files / %s\n' \
+    "$CONTAINER_COUNT" "$(human_bytes "$CONTAINER_BYTES")"
+printf 'Copy lane:               %s files / %s\n' \
+    "$COPY_COUNT" "$(human_bytes "$COPY_BYTES")"
 printf 'Dictionary:              %s MiB\n' "$DICTIONARY_MIB"
 printf 'Estimated compression RAM: %s MiB\n' "$ESTIMATED_COMPRESSION_RAM_MIB"
 printf 'Match finder:            BT4\n'
@@ -4861,7 +5305,7 @@ printf 'Filesystem boundary:     %s\n' "$($ONE_FILE_SYSTEM && printf 'One source
 printf 'Quality preflight:       %s\n' "$QUALITY_CHECK"
 printf 'Video policy:            %s\n' "$VIDEO_MODE"
 if (( ESTIMATED_ARCHIVE_BYTES > 0 )); then
-    printf 'Estimated archive size:  approximately %s before video savings\n' "$(human_bytes "$ESTIMATED_ARCHIVE_BYTES")"
+    printf 'Estimated archive size:  approximately %s before transform savings\n' "$(human_bytes "$ESTIMATED_ARCHIVE_BYTES")"
 fi
 if (( ESTIMATED_SECONDS > 0 )); then
     printf 'Estimated LZMA time:     approximately %s (sample-derived)\n' "$(format_duration "$ESTIMATED_SECONDS")"
@@ -4899,6 +5343,172 @@ if [[ ${HARDCORE_ARCHIVE_INHIBITED:-0} == 1 ]]; then
     printf 'Sleep protection is active for the complete archive operation.\n\n'
 fi
 
+
+# HARDCORE_VISUAL_MODE_V1
+HARDCORE_VISUAL_ENABLED=false
+if [[ ${HARDCORE_ARCHIVE_VISUAL:-0} == 1 && ${HARDCORE_ARCHIVE_NESTED_CHILD:-0} != 1 ]]; then
+    HARDCORE_VISUAL_ENABLED=true
+fi
+HARDCORE_VISUAL_TERMINAL=''
+HARDCORE_VISUAL_VIEWER_SCRIPT=''
+declare -A HARDCORE_VISUAL_OPENED=()
+
+hardcore_visual_detect_terminal() {
+    $HARDCORE_VISUAL_ENABLED || return 0
+    [[ -n $HARDCORE_VISUAL_TERMINAL ]] && return 0
+
+    if [[ ${PLATFORM:-} == Linux && -z ${DISPLAY:-} && -z ${WAYLAND_DISPLAY:-} ]]; then
+        die '--visual requires a graphical Linux session (DISPLAY or WAYLAND_DISPLAY).'
+    fi
+
+    local requested=${HARDCORE_ARCHIVE_VISUAL_TERMINAL:-} candidate
+    if [[ -n $requested && $requested != *[[:space:]]* ]]; then
+        candidate=${requested##*/}
+        case $candidate in
+            konsole|kitty|gnome-terminal|alacritty|wezterm|foot|xterm)
+                command -v -- "$requested" >/dev/null 2>&1 || die "--visual terminal was requested but is unavailable: $requested"
+                HARDCORE_VISUAL_TERMINAL=$candidate
+                HARDCORE_VISUAL_TERMINAL_COMMAND=$requested
+                return 0
+                ;;
+        esac
+    fi
+
+    for candidate in konsole kitty gnome-terminal alacritty wezterm foot xterm; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            HARDCORE_VISUAL_TERMINAL=$candidate
+            HARDCORE_VISUAL_TERMINAL_COMMAND=$(command -v "$candidate")
+            return 0
+        fi
+    done
+
+    die '--visual needs a supported terminal emulator: konsole, kitty, gnome-terminal, alacritty, wezterm, foot, or xterm.'
+}
+
+hardcore_visual_prepare_viewer() {
+    $HARDCORE_VISUAL_ENABLED || return 0
+    [[ -n $HARDCORE_VISUAL_VIEWER_SCRIPT && -x $HARDCORE_VISUAL_VIEWER_SCRIPT ]] && return 0
+    HARDCORE_VISUAL_VIEWER_SCRIPT="$JOB_WORK_DIR/.hardcore-visual-viewer.sh"
+    cat > "$HARDCORE_VISUAL_VIEWER_SCRIPT" <<'__HARDCORE_VISUAL_VIEWER__'
+#!/usr/bin/env bash
+set -u
+IFS=$'\n\t'
+title=$1
+mode=$2
+target=$3
+hold=${4:-8}
+shift 4
+files=("$@")
+
+printf '%s\n' "$title"
+printf '%s\n' '════════════════════════════════════════════════════════════'
+printf 'Live log viewer. Closing this window does NOT stop the archive worker.\n'
+printf 'Files:\n'
+for file in "${files[@]}"; do
+    printf '  %s\n' "$file"
+    touch -- "$file" 2>/dev/null || true
+done
+printf '%s\n\n' '════════════════════════════════════════════════════════════'
+
+tail -n +1 -F -- "${files[@]}" &
+tail_pid=$!
+cleanup() {
+    kill "$tail_pid" 2>/dev/null || true
+    wait "$tail_pid" 2>/dev/null || true
+}
+trap cleanup EXIT HUP INT TERM
+
+case $mode in
+    pid)
+        while kill -0 "$target" 2>/dev/null; do sleep 1; done
+        ;;
+    pattern)
+        while true; do
+            [[ -f ${files[0]} ]] && grep -Fq -- "$target" "${files[0]}" 2>/dev/null && break
+            sleep 1
+        done
+        ;;
+    *)
+        while true; do sleep 3600; done
+        ;;
+esac
+
+sleep 1
+cleanup
+trap - EXIT HUP INT TERM
+printf '\nProcess/log stream finished. This viewer closes in %s seconds.\n' "$hold"
+[[ $hold =~ ^[0-9]+$ ]] || hold=8
+sleep "$hold"
+__HARDCORE_VISUAL_VIEWER__
+    chmod 700 -- "$HARDCORE_VISUAL_VIEWER_SCRIPT"
+}
+
+hardcore_visual_launch_terminal() {
+    local title=$1 mode=$2 target=$3
+    shift 3
+    local hold=${HARDCORE_ARCHIVE_VISUAL_HOLD_SECONDS:-8}
+    hardcore_visual_detect_terminal
+    hardcore_visual_prepare_viewer
+
+    case $HARDCORE_VISUAL_TERMINAL in
+        konsole)
+            "$HARDCORE_VISUAL_TERMINAL_COMMAND" --separate -p "tabtitle=$title" -e \
+                "$HARDCORE_VISUAL_VIEWER_SCRIPT" "$title" "$mode" "$target" "$hold" "$@" >/dev/null 2>&1 &
+            ;;
+        kitty)
+            "$HARDCORE_VISUAL_TERMINAL_COMMAND" --title "$title" \
+                "$HARDCORE_VISUAL_VIEWER_SCRIPT" "$title" "$mode" "$target" "$hold" "$@" >/dev/null 2>&1 &
+            ;;
+        gnome-terminal)
+            "$HARDCORE_VISUAL_TERMINAL_COMMAND" --title="$title" -- \
+                "$HARDCORE_VISUAL_VIEWER_SCRIPT" "$title" "$mode" "$target" "$hold" "$@" >/dev/null 2>&1 &
+            ;;
+        alacritty)
+            "$HARDCORE_VISUAL_TERMINAL_COMMAND" --title "$title" -e \
+                "$HARDCORE_VISUAL_VIEWER_SCRIPT" "$title" "$mode" "$target" "$hold" "$@" >/dev/null 2>&1 &
+            ;;
+        wezterm)
+            "$HARDCORE_VISUAL_TERMINAL_COMMAND" start --always-new-process -- \
+                "$HARDCORE_VISUAL_VIEWER_SCRIPT" "$title" "$mode" "$target" "$hold" "$@" >/dev/null 2>&1 &
+            ;;
+        foot)
+            "$HARDCORE_VISUAL_TERMINAL_COMMAND" --title="$title" \
+                "$HARDCORE_VISUAL_VIEWER_SCRIPT" "$title" "$mode" "$target" "$hold" "$@" >/dev/null 2>&1 &
+            ;;
+        xterm)
+            "$HARDCORE_VISUAL_TERMINAL_COMMAND" -T "$title" -e \
+                "$HARDCORE_VISUAL_VIEWER_SCRIPT" "$title" "$mode" "$target" "$hold" "$@" >/dev/null 2>&1 &
+            ;;
+    esac
+}
+
+hardcore_visual_open_log() {
+    $HARDCORE_VISUAL_ENABLED || return 0
+    local title=$1 log=$2 mode=$3 target=$4 key extra
+    shift 4
+    key="$title|$log"
+    [[ -n ${HARDCORE_VISUAL_OPENED[$key]:-} ]] && return 0
+    HARDCORE_VISUAL_OPENED[$key]=1
+
+    mkdir -p -- "$(dirname -- "$log")"
+    touch -- "$log"
+    for extra in "$@"; do
+        mkdir -p -- "$(dirname -- "$extra")"
+        touch -- "$extra"
+    done
+    hardcore_visual_launch_terminal "$title" "$mode" "$target" "$log" "$@"
+}
+
+hardcore_visual_validate() {
+    $HARDCORE_VISUAL_ENABLED || return 0
+    hardcore_visual_detect_terminal
+    hardcore_visual_prepare_viewer
+    printf 'Visual mode: enabled; live worker windows use %s.\n' "$HARDCORE_VISUAL_TERMINAL"
+    printf 'Visual windows are viewers only; the main process still owns worker PIDs, cancellation, and exit status.\n\n'
+}
+
+hardcore_visual_validate
+
 compress_nonvideo_with_fallback() {
     local initial_dictionary=$1
     local candidate rc
@@ -4920,13 +5530,14 @@ compress_nonvideo_with_fallback() {
 
         rm -f -- "$TEMP_ARCHIVE"
         : > "$SEVEN_ZIP_LOG"
+        hardcore_visual_open_log "Hardcore Archive - 7-Zip / archive" "$SEVEN_ZIP_LOG" pid "$$"
 
-        FAILURE_CONTEXT="nonvideo-compression"
-        printf '\nStage 4/8: Compressing non-video files with a %s MiB dictionary...\n' "$candidate"
+        FAILURE_CONTEXT="lzma-compression"
+        printf '\nStage 4/8: Compressing the LZMA2 lane with a %s MiB dictionary...\n' "$candidate"
         printf '7-Zip percentage output is enabled. A status line will also appear every %s seconds.\n\n' "$PROGRESS_INTERVAL"
 
         set +e
-        run_logged_stage "non-video compression" "$SEVEN_ZIP_LOG" \
+        run_logged_stage "LZMA2 compression" "$SEVEN_ZIP_LOG" \
             "$SEVEN_ZIP" a "$TEMP_ARCHIVE" "$SOURCE_NAME" \
                 -t7z \
                 -mx=9 \
@@ -4944,7 +5555,9 @@ compress_nonvideo_with_fallback() {
                 -y \
                 "-x@${VIDEO_LIST}" \
                 "-x@${IMAGE_LIST}" \
-                "-x@${NESTED_LIST}"
+                "-x@${NESTED_LIST}" \
+                "-x@${CONTAINER_LIST}" \
+                "-x@${COPY_LIST}"
         rc=$?
         set -e
 
@@ -4971,6 +5584,112 @@ compress_nonvideo_with_fallback() {
     die "No usable LZMA2 dictionary could be allocated."
 }
 
+
+
+
+process_format_preserving_containers() {
+    (( CONTAINER_COUNT > 0 )) || return 0
+    $CONTAINER_REPACK || return 0
+    [[ -n $CONTAINER_HELPER && -f $CONTAINER_HELPER ]] || \
+        die "Format-preserving container repack is enabled, but its helper is missing: ${CONTAINER_HELPER:-unset}"
+
+    FAILURE_CONTEXT="container-repack"
+    printf '\nStage 6/8: Repacking format-preserving application containers...\n'
+    printf 'Container candidates: %s files / %s\n' "$CONTAINER_COUNT" "$(human_bytes "$CONTAINER_BYTES")"
+    CONTAINER_STAGE_PARENT=$(mktemp -d -p "$WORK_ROOT" containers.XXXXXX)
+    : > "$CONTAINER_RESULT_MANIFEST"
+    : > "$CONTAINER_REPACKED_LIST"
+    : > "$CONTAINER_FALLBACK_LIST"
+
+    if ! python3 "$CONTAINER_HELPER" \
+        --source-parent "$SOURCE_PARENT" \
+        --stage-parent "$CONTAINER_STAGE_PARENT" \
+        --list "$CONTAINER_LIST" \
+        --result "$CONTAINER_RESULT_MANIFEST"; then
+        die "The format-preserving container helper reported an internal processing failure. Originals were not silently substituted."
+    fi
+
+    local action original archived original_size candidate_size archived_size reason
+    local actual candidate_display accounted=0
+    while IFS=$'\t' read -r action original archived original_size candidate_size archived_size reason; do
+        [[ -n $original ]] || continue
+        accounted=$((accounted + 1))
+        [[ $original_size =~ ^[0-9]+$ && $candidate_size =~ ^[0-9]+$ && $archived_size =~ ^[0-9]+$ ]] || \
+            die "Invalid container-repack result row for: $original"
+        case $action in
+            repacked)
+                [[ $archived == "$original" ]] || die "Container repack changed the restored path: $original -> $archived"
+                [[ -f $CONTAINER_STAGE_PARENT/$archived ]] || die "Validated container candidate disappeared: $archived"
+                actual=$(stat -c '%s' -- "$CONTAINER_STAGE_PARENT/$archived")
+                (( actual == candidate_size && actual == archived_size && actual < original_size )) || \
+                    die "Container candidate size/accounting changed after validation: $original"
+                printf '%s\n' "$archived" >> "$CONTAINER_REPACKED_LIST"
+                CONTAINER_REPACKED_COUNT=$((CONTAINER_REPACKED_COUNT + 1))
+                CONTAINER_REPACKED_BYTES=$((CONTAINER_REPACKED_BYTES + actual))
+                CONTAINER_SAVED_BYTES=$((CONTAINER_SAVED_BYTES + original_size - actual))
+                ;;
+            original)
+                [[ $archived == "$original" && $archived_size == "$original_size" ]] || \
+                    die "Invalid original-container fallback accounting: $original"
+                actual=$(stat -c '%s' -- "$SOURCE_PARENT/$original")
+                (( actual == original_size )) || die "Source container changed during repack: $original"
+                printf '%s\n' "$original" >> "$CONTAINER_FALLBACK_LIST"
+                CONTAINER_FALLBACK_COUNT=$((CONTAINER_FALLBACK_COUNT + 1))
+                CONTAINER_FALLBACK_BYTES=$((CONTAINER_FALLBACK_BYTES + original_size))
+                ;;
+            *) die "Unknown container-repack action '$action' for: $original" ;;
+        esac
+        if (( candidate_size > 0 )); then candidate_display=$(human_bytes "$candidate_size"); else candidate_display='not produced'; fi
+        printf 'Container decision: %s | original %s | candidate %s | %s (%s)\n' \
+            "$original" "$(human_bytes "$original_size")" "$candidate_display" \
+            "$([[ $action == repacked ]] && printf 'REPACKED' || printf 'PRESERVED')" "$reason"
+    done < "$CONTAINER_RESULT_MANIFEST"
+
+    (( accounted == CONTAINER_COUNT )) || \
+        die "Container repack accounted for $accounted of $CONTAINER_COUNT candidate files."
+
+    if [[ -s $CONTAINER_REPACKED_LIST ]]; then
+        ( cd -- "$CONTAINER_STAGE_PARENT" && \
+            run_logged_stage "repacked-container storage" "$SEVEN_ZIP_LOG" \
+                "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
+                    -snl -snh -spd -scsUTF-8 -bsp1 -y "@${CONTAINER_REPACKED_LIST}" )
+    fi
+    if [[ -s $CONTAINER_FALLBACK_LIST ]]; then
+        ( cd -- "$SOURCE_PARENT" && \
+            run_logged_stage "original-container storage" "$SEVEN_ZIP_LOG" \
+                "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
+                    -snl -snh -spd -scsUTF-8 -bsp1 -y "@${CONTAINER_FALLBACK_LIST}" )
+    fi
+
+    {
+        printf 'Hardcore Archive format-preserving container manifest\n'
+        printf 'Script version: %s\n' "$SCRIPT_VERSION"
+        printf 'Original container bytes: %s\n' "$CONTAINER_BYTES"
+        printf 'Saved container bytes: %s\n' "$CONTAINER_SAVED_BYTES"
+        printf '\nColumns: action<TAB>original path<TAB>archived path<TAB>original bytes<TAB>candidate bytes<TAB>archived bytes<TAB>reason\n'
+        cat -- "$CONTAINER_RESULT_MANIFEST"
+    } > "$CONTAINER_MANIFEST_FILE"
+    ( cd -- "$ARCHIVE_MANIFEST_STAGE" && \
+        run_logged_stage "container manifest storage" "$SEVEN_ZIP_LOG" \
+            "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
+                -spd -scsUTF-8 -bsp1 -y '.hardcore-archive-container-manifest.txt' )
+}
+
+add_copy_lane_to_archive() {
+    (( COPY_COUNT > 0 )) || return 0
+    FAILURE_CONTEXT="copy-lane-storage"
+    printf '\nStage 6/8: Storing already-compressed files with Copy mode...\n'
+    printf 'Copy lane: %s files / %s\n\n' "$COPY_COUNT" "$(human_bytes "$COPY_BYTES")"
+    (
+        cd -- "$SOURCE_PARENT"
+        run_logged_stage "already-compressed Copy storage" "$SEVEN_ZIP_LOG" \
+            "$SEVEN_ZIP" a "$TEMP_ARCHIVE" \
+                -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
+                -snl -snh -spd -scsUTF-8 -bsp1 -y \
+                "@${COPY_LIST}"
+    )
+}
+
 video_archived_relative() {
     local relative=$1 lower=${1,,}
     if [[ $lower == *.mkv ]]; then
@@ -4989,7 +5708,7 @@ video_cache_key() {
     stream_signature=$(ffprobe -v error -show_entries stream=index,codec_type,codec_name,profile,width,height,pix_fmt,channels,sample_rate -of compact=p=0:nk=1 -- "$source_path" 2>/dev/null | sha256sum | awk '{print $1}')
     printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' \
         "$SCRIPT_VERSION" "$relative" "$stat_value" "$source_hash" "$stream_signature" \
-        "$VIDEO_CODEC" "$VIDEO_ENCODER" "$VIDEO_MODE" "$VIDEO_MIN_SAVINGS_PERCENT" \
+        "$VIDEO_CODEC" "$VIDEO_ENCODER" "$VIDEO_MODE" "$VIDEO_MIN_VMAF" "$VIDEO_MIN_SAVINGS_PERCENT" \
         "$VIDEO_NO_SCALE" "$VIDEO_NO_DENOISE" "$VIDEO_AUDIO_COPY" "$QUALITY_CHECK" "$ffmpeg_version" | \
         sha256sum | awk '{print $1}'
 }
@@ -5084,11 +5803,7 @@ video_helper_arguments() {
     $VIDEO_COPY_AUDIO && VIDEO_HELPER_ARGS+=(--no-audio)
     $VIDEO_PREFLIGHT || VIDEO_HELPER_ARGS+=(--no-preflight)
     VIDEO_HELPER_ARGS+=(--quality-check "$QUALITY_CHECK")
-    case "$VIDEO_MODE" in
-        maximum) VIDEO_HELPER_ARGS+=(--quality-vmaf 95 --quality-ssim 0.990) ;;
-        balanced) VIDEO_HELPER_ARGS+=(--quality-vmaf 92 --quality-ssim 0.985) ;;
-        fast) VIDEO_HELPER_ARGS+=(--quality-vmaf 90 --quality-ssim 0.980) ;;
-    esac
+    VIDEO_HELPER_ARGS+=(--quality-vmaf "$VIDEO_MIN_VMAF")
     VIDEO_HELPER_ARGS+=(--min-savings "$VIDEO_MIN_SAVINGS_PERCENT")
     VIDEO_HELPER_ARGS+=("$VIDEO_STAGE_ROOT")
 }
@@ -5120,6 +5835,7 @@ start_video_pipeline() {
         VIDEO_PIPELINE_GROUP=false
     fi
     VIDEO_PIPELINE_PID=$!
+    hardcore_visual_open_log "Hardcore Archive - Video / FFmpeg" "$VIDEO_LOG" pid "$VIDEO_PIPELINE_PID"
 }
 
 wait_for_video_pipeline() {
@@ -5222,6 +5938,7 @@ start_image_pipeline() {
         IMAGE_PIPELINE_GROUP=false
     fi
     IMAGE_PIPELINE_PID=$!
+    hardcore_visual_open_log "Hardcore Archive - Images" "$IMAGE_LOG" pid "$IMAGE_PIPELINE_PID" "$IMAGE_RESULT_MANIFEST"
 }
 
 wait_for_image_pipeline() {
@@ -5424,6 +6141,7 @@ write_video_manifest() {
         printf 'Script version: %s\n' "$SCRIPT_VERSION"
         printf 'Source root: %s\n' "$SOURCE_NAME"
         printf 'Video codec target: %s\n' "${VIDEO_CODEC^^}"
+        printf 'Minimum accepted VMAF: %s\n' "$VIDEO_MIN_VMAF"
         printf 'Minimum accepted saving: %s%%\n' "$VIDEO_MIN_SAVINGS_PERCENT"
         printf 'Preflight sampling: %s\n' "$($VIDEO_PREFLIGHT && printf 'enabled' || printf 'disabled')"
         printf 'Original video bytes: %s\n' "$VIDEO_BYTES"
@@ -5479,18 +6197,20 @@ add_video_results_to_archive() {
 }
 
 
+# HARDCORE_NESTED_CHILD_DIAGNOSTICS_V1
 prepare_and_add_nested_archives() {
     (( NESTED_COUNT > 0 )) || return 0
     printf '\nProcessing %s nested archive(s) through bounded recursive content-aware repacking...\n' "$NESTED_COUNT"
     NESTED_STAGE_PARENT=$(mktemp -d -p "$WORK_ROOT" nested-archives.XXXXXX)
     : > "$NESTED_RESULT_MANIFEST"; : > "$NESTED_REPACKED_LIST"; : > "$NESTED_FALLBACK_LIST"
-    local relative input extracted child_archive normalized output_rel full_output original_size output_size depth rc
-    local expanded files encrypted free max_expanded
+    local relative input extracted child_archive normalized output_rel full_output original_size output_size candidate_size depth rc reason child_log
+    local expanded files encrypted free max_expanded candidate_display
     local -a inherited=()
     depth=${HARDCORE_ARCHIVE_NESTED_DEPTH:-0}
     inherited+=(--force --yes --no-report --allow-sleep --nested-max-depth "$NESTED_MAX_DEPTH")
     $VIDEO_TRANSCODE || inherited+=(--no-video-transcode)
-    inherited+=(--video-codec "$VIDEO_CODEC" --video-mode "$VIDEO_MODE" --quality-check "$QUALITY_CHECK")
+    inherited+=(--video-codec "$VIDEO_CODEC" --video-mode "$VIDEO_MODE" --quality-check "$QUALITY_CHECK" --video-min-vmaf "$VIDEO_MIN_VMAF")
+    [[ -n $VIDEO_ENCODER ]] && inherited+=(--video-encoder "$VIDEO_ENCODER")
     $IMAGE_OPTIMIZE || inherited+=(--no-image-optimize)
     inherited+=(--image-mode "$IMAGE_MODE" --verify "$VERIFY_MODE_EFFECTIVE" --effort "$EFFORT")
     $MC_AUTO && inherited+=(--mc-auto) || inherited+=(--no-mc-auto)
@@ -5516,8 +6236,28 @@ prepare_and_add_nested_archives() {
                 rc=92
             elif ! "$SEVEN_ZIP" x -y -spd -o"$extracted" "$input" >>"$SEVEN_ZIP_LOG" 2>&1; then rc=91
             else
-                env HARDCORE_ARCHIVE_INHIBITED=1 HARDCORE_ARCHIVE_DEPENDENCIES_APPROVED=1 HARDCORE_ARCHIVE_NESTED_DEPTH=$((depth + 1)) \
-                    bash "$(resolve_current_script)" "${inherited[@]}" "$extracted" "$child_archive" >>"$SEVEN_ZIP_LOG" 2>&1 || rc=$?
+                if [[ -n ${HARDCORE_ARCHIVE_DIAGNOSTIC_DIR:-} ]]; then
+                    child_log="$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/nested/depth-$((depth + 1))/${relative}.child.log"
+                    mkdir -p -- "$(dirname -- "$child_log")"
+                else
+                    child_log="$NESTED_STAGE_PARENT/.child-$RANDOM-$$.log"
+                fi
+                {
+                    printf 'Nested archive: %s\n' "$relative"
+                    printf 'Depth: %s\n' "$((depth + 1))"
+                    printf 'Started: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
+                    printf 'Hardware encoder inherited: %s\n\n' "${VIDEO_ENCODER:-none}"
+                } > "$child_log"
+                hardcore_visual_open_log "Hardcore Archive - Nested: ${relative}" "$child_log" pattern 'Exit status:'
+                env HARDCORE_ARCHIVE_INHIBITED=1 \
+                    HARDCORE_ARCHIVE_DEPENDENCIES_APPROVED=1 \
+                    HARDCORE_ARCHIVE_NESTED_CHILD=1 \
+                    HARDCORE_ARCHIVE_HARDWARE_ENCODER_LOCKED="${VIDEO_ENCODER:-}" \
+                    HARDCORE_ARCHIVE_NESTED_DEPTH=$((depth + 1)) \
+                    bash "$(resolve_current_script)" "${inherited[@]}" "$extracted" "$child_archive" >>"$child_log" 2>&1 || rc=$?
+                printf '\nFinished: %s\nExit status: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$rc" >> "$child_log" 2>/dev/null || true
+                cat -- "$child_log" >> "$SEVEN_ZIP_LOG" 2>/dev/null || true
+                printf 'Nested child log: %s\n' "$child_log"
                 if (( rc == 0 )); then
                     "$SEVEN_ZIP" x -y -spd -o"$normalized" "$child_archive" >>"$SEVEN_ZIP_LOG" 2>&1 || rc=93
                 fi
@@ -5536,16 +6276,37 @@ prepare_and_add_nested_archives() {
                 fi
             fi
         fi
-        if (( rc == 0 )) && [[ -s $full_output ]]; then output_size=$(stat -c '%s' -- "$full_output"); else output_size=$original_size; fi
-        if (( rc == 0 && output_size < original_size )); then
+        if [[ -s $full_output ]]; then candidate_size=$(stat -c '%s' -- "$full_output"); else candidate_size=0; fi
+        output_size=$original_size
+        case $rc in
+            0)  if (( candidate_size < original_size )); then reason='candidate-smaller'; else reason='candidate-not-smaller'; fi ;;
+            90) reason='max-depth-reached' ;;
+            91) reason='source-extraction-failed' ;;
+            92)
+                if [[ ${encrypted:-0} == 1 ]]; then reason='encrypted-archive'
+                elif (( ${files:-0} > 100000 )); then reason='entry-count-limit'
+                elif (( ${expanded:-0} > ${max_expanded:-0} )); then reason='insufficient-safe-extraction-space'
+                elif (( original_size > 0 && ${expanded:-0}/original_size > 1000 )); then reason='unsafe-expansion-ratio'
+                else reason='unsafe-or-unsupported'; fi ;;
+            93) reason='child-extraction-failed' ;;
+            94) reason='candidate-build-failed' ;;
+            95) reason='candidate-integrity-failed' ;;
+            *)  reason="recursive-archive-failed-rc-${rc}" ;;
+        esac
+        if (( rc == 0 && candidate_size < original_size )); then
+            output_size=$candidate_size
             printf '%s\n' "$output_rel" >> "$NESTED_REPACKED_LIST"
-            printf 'repacked\t%s\t%s\t%s\t%s\n' "$relative" "$output_rel" "$original_size" "$output_size" >> "$NESTED_RESULT_MANIFEST"
+            printf 'repacked\t%s\t%s\t%s\t%s\t%s\t%s\n' "$relative" "$output_rel" "$original_size" "$candidate_size" "$output_size" "$reason" >> "$NESTED_RESULT_MANIFEST"
             ((NESTED_REPACKED_COUNT+=1)); NESTED_SAVED_BYTES=$((NESTED_SAVED_BYTES+original_size-output_size))
         else
             rm -f -- "$full_output"; printf '%s\n' "$relative" >> "$NESTED_FALLBACK_LIST"
-            printf 'original\t%s\t%s\t%s\t%s\n' "$relative" "$relative" "$original_size" "$original_size" >> "$NESTED_RESULT_MANIFEST"
+            printf 'original\t%s\t%s\t%s\t%s\t%s\t%s\n' "$relative" "$relative" "$original_size" "$candidate_size" "$original_size" "$reason" >> "$NESTED_RESULT_MANIFEST"
             ((NESTED_FALLBACK_COUNT+=1))
         fi
+        if (( candidate_size > 0 )); then candidate_display=$(human_bytes "$candidate_size"); else candidate_display='not produced'; fi
+        printf 'Nested decision: %s | original %s | candidate %s | %s (%s)\n' \
+            "$relative" "$(human_bytes "$original_size")" "$candidate_display" \
+            "$([[ $reason == candidate-smaller ]] && printf 'REPACKED' || printf 'PRESERVED')" "$reason"
         rm -rf --one-file-system -- "$extracted" "$normalized"; rm -f -- "$child_archive"
     done < "$NESTED_LIST"
     if [[ -s $NESTED_REPACKED_LIST ]]; then
@@ -5555,7 +6316,7 @@ prepare_and_add_nested_archives() {
         (cd -- "$SOURCE_PARENT" && run_logged_stage "nested-archive original fallback storage" "$SEVEN_ZIP_LOG" "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 -spd -scsUTF-8 -bsp1 -y "@${NESTED_FALLBACK_LIST}")
     fi
     if [[ -s $NESTED_RESULT_MANIFEST ]]; then
-        { printf 'action\toriginal path\tarchived path\toriginal bytes\tarchived bytes\n'; cat "$NESTED_RESULT_MANIFEST"; } > "$NESTED_MANIFEST_FILE"
+        { printf 'action\toriginal path\tarchived path\toriginal bytes\tcandidate bytes\tarchived bytes\treason\n'; cat "$NESTED_RESULT_MANIFEST"; } > "$NESTED_MANIFEST_FILE"
         (cd -- "$ARCHIVE_MANIFEST_STAGE" && run_logged_stage "nested-archive manifest storage" "$SEVEN_ZIP_LOG" "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 -spd -scsUTF-8 -bsp1 -y '.hardcore-archive-nested-manifest.txt')
     fi
 }
@@ -5616,6 +6377,13 @@ Source bytes: $TOTAL_BYTES
 Verification: $VERIFY_MODE_EFFECTIVE
 Sparse files: $SPARSE_FILE_COUNT
 Sparse hole bytes: $SPARSE_HOLE_BYTES
+LZMA2 files: $NONVIDEO_COUNT
+LZMA2 source bytes: $NONVIDEO_BYTES
+Copy-lane files: $COPY_COUNT
+Copy-lane bytes: $COPY_BYTES
+Format-preserving containers: $CONTAINER_COUNT
+Containers repacked: $CONTAINER_REPACKED_COUNT
+Container bytes saved: $CONTAINER_SAVED_BYTES
 Nested archives repacked: $NESTED_REPACKED_COUNT
 EOF
     {
@@ -5637,7 +6405,7 @@ EOF
     } > "$METADATA_MANIFEST"
 
     if command -v getfacl >/dev/null 2>&1; then
-        (cd -- "$SOURCE_PARENT" && getfacl -R -p -- "$SOURCE_NAME" 2>/dev/null) > "$ACL_MANIFEST" || : > "$ACL_MANIFEST"
+        (cd -- "$SOURCE_PARENT" && getfacl -R -p -n -- "$SOURCE_NAME" 2>/dev/null) > "$ACL_MANIFEST" || : > "$ACL_MANIFEST"
     else
         printf '# getfacl was unavailable when the archive was created.\n' > "$ACL_MANIFEST"
     fi
@@ -5682,12 +6450,13 @@ RESTORE_NOTES
 build_expected_paths_and_hashes() {
     : > "$EXPECTED_PATHS"
     : > "$HASH_MANIFEST"
-    local file_size relative source_path action original archived original_size archived_size data_path hash
+    local file_size relative source_path action original archived original_size candidate_size archived_size reason data_path hash
 
     while IFS= read -r -d '' file_size && IFS= read -r -d '' relative; do
         is_video_path "$relative" && continue
         is_image_path "$relative" && continue
         $NESTED_REPACK && is_nested_archive_path "$relative" && continue
+        $CONTAINER_REPACK && is_format_preserving_container_path "$relative" && continue
         printf '%s\n' "$relative" >> "$EXPECTED_PATHS"
         if [[ $VERIFY_MODE_EFFECTIVE == hashes || $VERIFY_MODE_EFFECTIVE == extract ]]; then
             source_path="$SOURCE_PARENT/$relative"
@@ -5725,7 +6494,19 @@ build_expected_paths_and_hashes() {
     done < "$IMAGE_RESULT_MANIFEST"
 
 
-    while IFS=$'\t' read -r action original archived original_size archived_size; do
+
+
+    while IFS=$'\t' read -r action original archived original_size candidate_size archived_size reason; do
+        [[ -n $archived ]] || continue
+        printf '%s\n' "$archived" >> "$EXPECTED_PATHS"
+        if [[ $VERIFY_MODE_EFFECTIVE == hashes || $VERIFY_MODE_EFFECTIVE == extract ]]; then
+            if [[ $action == repacked ]]; then data_path="$CONTAINER_STAGE_PARENT/$archived"; else data_path="$SOURCE_PARENT/$original"; fi
+            hash=$(sha256sum -- "$data_path" | awk '{print $1}')
+            printf '%s  %s\n' "$hash" "$archived" >> "$HASH_MANIFEST"
+        fi
+    done < "$CONTAINER_RESULT_MANIFEST"
+
+    while IFS=$'\t' read -r action original archived original_size candidate_size archived_size reason; do
         [[ -n $archived ]] || continue
         printf '%s\n' "$archived" >> "$EXPECTED_PATHS"
         if [[ $VERIFY_MODE_EFFECTIVE == hashes || $VERIFY_MODE_EFFECTIVE == extract ]]; then
@@ -5751,6 +6532,8 @@ build_expected_paths_and_hashes() {
         printf '%s\n' '.hardcore-archive-video-manifest.txt' >> "$EXPECTED_PATHS"
     (( IMAGE_COUNT > 0 )) && \
         printf '%s\n' '.hardcore-archive-image-manifest.txt' >> "$EXPECTED_PATHS"
+    (( CONTAINER_COUNT > 0 )) && \
+        printf '%s\n' '.hardcore-archive-container-manifest.txt' >> "$EXPECTED_PATHS"
     (( NESTED_COUNT > 0 )) && \
         printf '%s\n' '.hardcore-archive-nested-manifest.txt' >> "$EXPECTED_PATHS"
     if [[ -s $HASH_MANIFEST ]]; then
@@ -5799,38 +6582,22 @@ verify_archive_completeness() {
     printf 'Archive completeness check passed: expected and archived entries match exactly.\n'
 }
 
-verify_archive_hashes_streaming() {
-    [[ -s $HASH_MANIFEST ]] || return 0
-    local expected path actual count=0 total
-    total=$(wc -l < "$HASH_MANIFEST")
+verify_archive_hashes_single_pass() {
+    local extract_dir="$JOB_WORK_DIR/hash-verification"
     : > "$HASH_VERIFY_LOG"
-    while IFS= read -r line; do
-        expected=${line:0:64}
-        path=${line:66}
-        count=$((count + 1))
-        printf '\rHash verification: %s/%s' "$count" "$total"
-        set +e
-        actual=$(set -o pipefail; "$SEVEN_ZIP" x -so -y -spd "$TEMP_ARCHIVE" -- "$path" 2>>"$HASH_VERIFY_LOG" | sha256sum | awk '{print $1}')
-        rc=$?
-        set -e
-        if (( rc != 0 )) || [[ $actual != "$expected" ]]; then
-            printf '\nHash mismatch or extraction failure: %s\n' "$path" >&2
-            printf '%s\texpected=%s\tactual=%s\trc=%s\n' "$path" "$expected" "$actual" "$rc" >> "$HASH_VERIFY_LOG"
-            return 1
-        fi
-    done < "$HASH_MANIFEST"
-    printf '\nArchive content hashes match the selected source and video results.\n'
+    rm -rf --one-file-system -- "$extract_dir"
+    mkdir -p -- "$extract_dir"
+    run_logged_stage "single-pass hash extraction" "$HASH_VERIFY_LOG" \
+        "$SEVEN_ZIP" x -y -spd -o"$extract_dir" "$TEMP_ARCHIVE" || return 1
+    if [[ -s $HASH_MANIFEST ]]; then
+        (cd -- "$extract_dir" && sha256sum -c --quiet "$HASH_MANIFEST") >>"$HASH_VERIFY_LOG" 2>&1 || return 1
+    fi
+    rm -rf --one-file-system -- "$extract_dir"
+    printf 'Single-pass extraction and SHA-256 content verification passed.\n'
 }
 
 verify_archive_by_extraction() {
-    local extract_dir="$JOB_WORK_DIR/full-extract-verification"
-    rm -rf --one-file-system -- "$extract_dir"
-    mkdir -p -- "$extract_dir"
-    run_logged_stage "full extraction verification" "$SEVEN_ZIP_LOG" \
-        "$SEVEN_ZIP" x -y -o"$extract_dir" "$TEMP_ARCHIVE"
-    (cd -- "$extract_dir" && sha256sum -c --quiet "$ARCHIVE_MANIFEST_STAGE/.hardcore-archive-sha256.txt")
-    rm -rf --one-file-system -- "$extract_dir"
-    printf 'Full extraction and hash verification passed.\n'
+    verify_archive_hashes_single_pass
 }
 
 write_success_report() {
@@ -5856,6 +6623,13 @@ write_success_report() {
         printf 'Match cycles: %s\n' "$SEARCH_CYCLES"
         printf 'Verification: %s\n' "$VERIFY_MODE_EFFECTIVE"
         printf 'Completeness: passed\n'
+        printf 'LZMA2 files: %s\n' "$NONVIDEO_COUNT"
+        printf 'LZMA2 source bytes: %s\n' "$NONVIDEO_BYTES"
+        printf 'Copy-lane files: %s\n' "$COPY_COUNT"
+        printf 'Copy-lane bytes: %s\n' "$COPY_BYTES"
+        printf 'Containers repacked: %s\n' "$CONTAINER_REPACKED_COUNT"
+        printf 'Containers preserved: %s\n' "$CONTAINER_FALLBACK_COUNT"
+        printf 'Container bytes saved: %s\n' "$CONTAINER_SAVED_BYTES"
         printf 'Videos transcoded: %s\n' "$VIDEO_COMPRESSED_COUNT"
         printf 'Videos preserved: %s\n' "$VIDEO_FALLBACK_COUNT"
         printf 'Video bytes saved: %s\n' "$VIDEO_SAVED_BYTES"
@@ -5885,6 +6659,16 @@ write_success_report() {
             printf '\n===== Image decisions =====\n'
             printf 'action\toriginal path\tarchived path\toriginal bytes\tarchived bytes\ttool\n'
             cat -- "$IMAGE_RESULT_MANIFEST"
+        fi
+        if [[ -s $CONTAINER_RESULT_MANIFEST ]]; then
+            printf '\n===== Container repack decisions =====\n'
+            printf 'action\toriginal path\tarchived path\toriginal bytes\tcandidate bytes\tarchived bytes\treason\n'
+            cat -- "$CONTAINER_RESULT_MANIFEST"
+        fi
+        if [[ -s $NESTED_RESULT_MANIFEST ]]; then
+            printf '\n===== Nested archive decisions =====\n'
+            printf 'action\toriginal path\tarchived path\toriginal bytes\tcandidate bytes\tarchived bytes\treason\n'
+            cat -- "$NESTED_RESULT_MANIFEST"
         fi
         if [[ -s $IMAGE_LOG ]]; then
             printf '\n===== Image pipeline log =====\n'
@@ -5972,6 +6756,9 @@ else
     fi
 fi
 
+process_format_preserving_containers
+add_copy_lane_to_archive
+
 if (( IMAGE_COUNT > 0 )); then
     classify_image_results
     add_image_results_to_archive
@@ -5985,14 +6772,18 @@ printf '\nAdding completeness, hash, and Linux metadata manifests...\n'
 add_safety_manifests_to_archive
 
 printf '\nStage 7/8: Testing every stream in the completed archive...\n\n'
-FAILURE_CONTEXT="integrity-test"
-INTEGRITY_TEST_RC=0
-run_logged_stage "archive integrity test" "$SEVEN_ZIP_LOG" \
-    "$SEVEN_ZIP" t "$TEMP_ARCHIVE" -t7z -bsp1 || INTEGRITY_TEST_RC=$?
+if [[ $VERIFY_MODE_EFFECTIVE == integrity ]]; then
+    FAILURE_CONTEXT="integrity-test"
+    INTEGRITY_TEST_RC=0
+    run_logged_stage "archive integrity test" "$SEVEN_ZIP_LOG" \
+        "$SEVEN_ZIP" t "$TEMP_ARCHIVE" -t7z -bsp1 || INTEGRITY_TEST_RC=$?
 
-if (( INTEGRITY_TEST_RC != 0 )) || \
-   grep -Eq '^(Sub items Errors|Archives with Errors):[[:space:]]*[1-9][0-9]*' "$SEVEN_ZIP_LOG"; then
-    die "Archive integrity testing failed. The failed archive and diagnostic log will be preserved."
+    if (( INTEGRITY_TEST_RC != 0 )) || \
+       grep -Eq '^(Sub items Errors|Archives with Errors):[[:space:]]*[1-9][0-9]*' "$SEVEN_ZIP_LOG"; then
+        die "Archive integrity testing failed. The failed archive and diagnostic log will be preserved."
+    fi
+else
+    printf 'The single strong-verification extraction below also checks every archive stream.\n'
 fi
 
 FAILURE_CONTEXT="completeness-test"
@@ -6002,7 +6793,7 @@ verify_archive_completeness || \
 case "$VERIFY_MODE_EFFECTIVE" in
     hashes)
         FAILURE_CONTEXT="hash-verification"
-        verify_archive_hashes_streaming || \
+        verify_archive_hashes_single_pass || \
             die "Archive hash verification failed. The failed archive and diagnostic log will be preserved."
         ;;
     extract)
@@ -6028,6 +6819,10 @@ sync "$ARCHIVE" 2>/dev/null || sync
 
 printf 'Archive integrity test passed.\n'
 printf 'Final dictionary used: %s MiB\n' "$DICTIONARY_MIB"
+printf 'LZMA2 lane: %s files / %s\n' "$NONVIDEO_COUNT" "$(human_bytes "$NONVIDEO_BYTES")"
+printf 'Container lane: %s files / %s; repacked %s; saved %s\n' \
+    "$CONTAINER_COUNT" "$(human_bytes "$CONTAINER_BYTES")" "$CONTAINER_REPACKED_COUNT" "$(human_bytes "$CONTAINER_SAVED_BYTES")"
+printf 'Copy lane:  %s files / %s\n' "$COPY_COUNT" "$(human_bytes "$COPY_BYTES")"
 if (( VIDEO_COUNT > 0 )); then
     printf 'Videos transcoded smaller: %s\n' "$VIDEO_COMPRESSED_COUNT"
     printf 'Videos stored original:    %s\n' "$VIDEO_FALLBACK_COUNT"

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 
-# Preservation-first frontend for Hardcore Archive. It resolves policy, scans
-# the requested source before feature-specific dependency checks, performs a
-# strict capability doctor, and then delegates to the full archive engine.
+# HARDCORE_DEFAULT_ON_CONTAINER_POLICY_V1
+# HARDCORE_VIDEO_CODEC_AUTO_POLICY_V1
+# Safety-first frontend for Hardcore Archive. Validated transformations are on
+# by default, but every transformed candidate is accepted only after the
+# feature-specific safety/size checks succeed. Source deletion remains opt-in.
 if [[ -z ${BASH_VERSION:-} || ${BASH_VERSINFO[0]:-0} -lt 4 || ( ${BASH_VERSINFO[0]:-0} -eq 4 && ${BASH_VERSINFO[1]:-0} -lt 2 ) ]]; then
     printf 'Error: hardcore-archive requires Bash 4.2 or newer.\n' >&2
     if [[ $(uname -s 2>/dev/null || true) == Darwin ]]; then
@@ -45,10 +47,13 @@ Usage:
   $PROGRAM_NAME --restore ARCHIVE.7z [DESTINATION]
 
 Default policy
-  Source data is preserved. Video transcoding, image optimization, nested-
-  archive repacking, and source deletion are opt-in. Before a create job starts,
-  Hardcore Archive scans the source and checks only capabilities required by
-  the selected workflow and file types. There are no dependency fallbacks.
+  Safe archive transformations are enabled by default: hardware video transcode,
+  lossless JPEG/PNG optimization, recursive nested-archive repacking, and
+  format-preserving application-container repacking. A transformed candidate is
+  used only when its own validation policy passes and it is smaller where that
+  feature requires a size win. Source deletion remains explicit/opt-in. Before
+  create work starts, Hardcore Archive scans the source and checks only required
+  capabilities. There are no dependency fallbacks.
 
 Doctor / dependencies:
   --doctor                  Scan SOURCE and print the exact capabilities needed.
@@ -59,16 +64,21 @@ Doctor / dependencies:
   Broken capability         Capability is advertised but a real probe fails.
   Repair commands are printed only; Hardcore Archive never installs software.
 
-Transformation opt-ins:
-  --video-transcode         Validated video transcoding. Hardware encoding is mandatory.
-  --no-video-transcode      Store original video bitstreams. Default unless config opts in.
-  --image-optimize          Validated lossless JPEG/PNG optimization.
-  --no-image-optimize       Store original JPEG/PNG bitstreams. Default unless config opts in.
-  --nested-repack           Validated nested-archive repacking.
-  --no-nested-repack        Preserve nested archives bit-for-bit. Default unless config opts in.
+Transformations (enabled by default):
+  --video-transcode         Enable validated hardware video transcoding.
+  --no-video-transcode      Store original video bitstreams.
+  --image-optimize          Enable validated lossless JPEG/PNG optimization.
+  --no-image-optimize       Store original JPEG/PNG bitstreams.
+  --nested-repack           Recursively repack true archive files (ZIP/RAR/7z/etc.).
+  --no-nested-repack        Preserve true nested archives bit-for-bit.
+  --container-repack        Repack safe ZIP-based application containers while
+                            preserving their original file type. Default.
+  --no-container-repack     Preserve DOCX/XLSX/PPTX/ODF/EPUB/NPZ/WHL/JAR/WAR
+                            containers bit-for-bit.
 
 Video policy:
-  --video-codec CODEC       av1 or hevc. Default: av1.
+  --video-codec CODEC       auto, av1, or hevc. Default: auto.
+                            auto compares working hardware codecs per file.
   --video-encoder NAME      Force a supported hardware FFmpeg encoder.
   --video-parallel          Hardware video work runs beside LZMA2.
   --video-sequential        Accepted for compatibility; hardware policy overrides it.
@@ -76,17 +86,25 @@ Video policy:
   --video-no-scale          Never reduce large video resolution.
   --video-no-denoise        Disable automatic mild denoising.
   --video-copy-audio        Copy audio streams instead of Opus optimization.
+  --video-min-vmaf V        Minimum accepted VMAF score. Config: VIDEO_MIN_VMAF.
   --video-min-savings P     Minimum accepted saving.
   --video-no-preflight      Disable representative sample testing.
   --quality-check MODE      auto, off, or required.
   --no-video-manifest       Omit transformation manifest.
 
-AV1 is preferred. The only automatic codec fallback is AV1 -> HEVC when a real
-hardware probe proves the GPU itself cannot encode AV1 and HEVC hardware encode
-passes. Missing/broken FFmpeg, drivers, permissions, or filters never trigger a fallback.
+auto compares every working hardware AV1/HEVC encoder exposed for this machine.
+Each file keeps the smallest candidate that satisfies the same VMAF and minimum-
+savings policy. Explicit --video-codec or --video-encoder requests remain authoritative.
+Broken advertised hardware capabilities still fail closed instead of being ignored.
 
 Source deletion:
   --remove-source           Delete source only after strong verification.
+
+Verification:
+  --verify auto|hashes      Extract once and compare every payload SHA-256.
+                            auto is the default.
+  --verify integrity        Run 7-Zip stream/CRC and completeness checks only.
+  --verify extract          Explicit extraction plus SHA-256 verification.
 
 Core options are passed through unchanged, including --batch, --analyze-only,
 --force, --dictionary, --threads, --effort, --search-cycles, --mc-auto,
@@ -157,6 +175,7 @@ done
 VIDEO_STATE=auto
 IMAGE_STATE=auto
 NESTED_STATE=auto
+CONTAINER_STATE=auto
 MC_AUTO_STATE=auto
 VIDEO_PREFLIGHT_STATE=auto
 QUALITY_CHECK_CLI=''
@@ -219,6 +238,10 @@ while (( $# > 0 )); do
             NESTED_STATE=true; shift ;;
         --no-nested-repack)
             NESTED_STATE=false; shift ;;
+        --container-repack)
+            CONTAINER_STATE=true; shift ;;
+        --no-container-repack)
+            CONTAINER_STATE=false; shift ;;
         --video-no-preflight)
             VIDEO_PREFLIGHT_STATE=false; FORWARDED+=("$1"); shift ;;
         --video-codec)
@@ -235,9 +258,9 @@ while (( $# > 0 )); do
             QUALITY_CHECK_CLI=${1#*=}; QUALITY_CHECK_CLI=${QUALITY_CHECK_CLI,,}; FORWARDED+=("$1"); shift ;;
         --video-copy-audio)
             VIDEO_AUDIO_COPY_COMPAT=true; FORWARDED+=("$1"); shift ;;
-        --dictionary|--threads|--effort|--search-cycles|--progress-interval|--nested-max-depth|--verify|--work-dir|--config|--video-mode|--video-min-savings|--image-mode|--image-jobs|--batch-root-files|--batch-jobs)
+        --dictionary|--threads|--effort|--search-cycles|--progress-interval|--nested-max-depth|--verify|--work-dir|--config|--video-mode|--video-min-vmaf|--video-min-savings|--image-mode|--image-jobs|--batch-root-files|--batch-jobs)
             need_value "$@"; FORWARDED+=("$1" "$2"); shift 2 ;;
-        --dictionary=*|--threads=*|--effort=*|--search-cycles=*|--progress-interval=*|--nested-max-depth=*|--verify=*|--work-dir=*|--config=*|--video-mode=*|--video-min-savings=*|--image-mode=*|--image-jobs=*|--batch-root-files=*|--batch-jobs=*)
+        --dictionary=*|--threads=*|--effort=*|--search-cycles=*|--progress-interval=*|--nested-max-depth=*|--verify=*|--work-dir=*|--config=*|--video-mode=*|--video-min-vmaf=*|--video-min-savings=*|--image-mode=*|--image-jobs=*|--batch-root-files=*|--batch-jobs=*)
             FORWARDED+=("$1"); shift ;;
         --*)
             FORWARDED+=("$1"); shift ;;
@@ -254,6 +277,7 @@ fi
 VIDEO_CONFIG=''
 IMAGE_CONFIG=''
 NESTED_CONFIG=''
+CONTAINER_CONFIG=''
 CONFIG_VIDEO_CODEC=''
 CONFIG_VIDEO_ENCODER=''
 CONFIG_MC_AUTO=''
@@ -263,6 +287,7 @@ if $CONFIG_ENABLED; then
     VIDEO_CONFIG=$(config_bool_value VIDEO_TRANSCODE "$CONFIG_FILE" || true)
     IMAGE_CONFIG=$(config_bool_value IMAGE_OPTIMIZE "$CONFIG_FILE" || true)
     NESTED_CONFIG=$(config_bool_value NESTED_REPACK "$CONFIG_FILE" || true)
+    CONTAINER_CONFIG=$(config_bool_value CONTAINER_REPACK "$CONFIG_FILE" || true)
     CONFIG_VIDEO_CODEC=$(config_value VIDEO_CODEC "$CONFIG_FILE" || true); CONFIG_VIDEO_CODEC=${CONFIG_VIDEO_CODEC,,}
     CONFIG_VIDEO_ENCODER=$(config_value VIDEO_ENCODER "$CONFIG_FILE" || true)
     CONFIG_MC_AUTO=$(config_bool_value MC_AUTO "$CONFIG_FILE" || true)
@@ -278,16 +303,17 @@ resolve_bool_state() {
     esac
 }
 
-VIDEO_ENABLED=$(resolve_bool_state "$VIDEO_STATE" "$VIDEO_CONFIG" false)
-IMAGE_ENABLED=$(resolve_bool_state "$IMAGE_STATE" "$IMAGE_CONFIG" false)
-NESTED_ENABLED=$(resolve_bool_state "$NESTED_STATE" "$NESTED_CONFIG" false)
+VIDEO_ENABLED=$(resolve_bool_state "$VIDEO_STATE" "$VIDEO_CONFIG" true)
+IMAGE_ENABLED=$(resolve_bool_state "$IMAGE_STATE" "$IMAGE_CONFIG" true)
+NESTED_ENABLED=$(resolve_bool_state "$NESTED_STATE" "$NESTED_CONFIG" true)
+CONTAINER_ENABLED=$(resolve_bool_state "$CONTAINER_STATE" "$CONTAINER_CONFIG" true)
 MC_AUTO_ENABLED=$(resolve_bool_state "$MC_AUTO_STATE" "$CONFIG_MC_AUTO" true)
 VIDEO_PREFLIGHT_ENABLED=$(resolve_bool_state "$VIDEO_PREFLIGHT_STATE" "$CONFIG_VIDEO_PREFLIGHT" true)
 QUALITY_CHECK_EFFECTIVE=${QUALITY_CHECK_CLI:-${CONFIG_QUALITY_CHECK:-auto}}
-EFFECTIVE_VIDEO_CODEC=${CLI_VIDEO_CODEC:-${CONFIG_VIDEO_CODEC:-av1}}
+EFFECTIVE_VIDEO_CODEC=${CLI_VIDEO_CODEC:-${CONFIG_VIDEO_CODEC:-auto}}
 EFFECTIVE_VIDEO_CODEC=${EFFECTIVE_VIDEO_CODEC,,}
 REQUESTED_VIDEO_ENCODER=${CLI_VIDEO_ENCODER:-$CONFIG_VIDEO_ENCODER}
-case $EFFECTIVE_VIDEO_CODEC in av1|hevc) ;; *) printf 'Error: video codec must be av1 or hevc.\n' >&2; exit 1;; esac
+case $EFFECTIVE_VIDEO_CODEC in auto|av1|hevc) ;; *) printf 'Error: video codec must be auto, av1, or hevc.\n' >&2; exit 1;; esac
 case $QUALITY_CHECK_EFFECTIVE in auto|off|required) ;; *) printf 'Error: quality check must be auto, off, or required.\n' >&2; exit 1;; esac
 
 if (( ${#POSITIONALS[@]} == 0 )); then
@@ -303,6 +329,7 @@ JPEG_COUNT=0
 PNG_COUNT=0
 NESTED_COUNT=0
 NESTED_PATHS=()
+CONTAINER_COUNT=0
 SYMLINK_COUNT=0
 FIRST_VIDEO=''
 
@@ -313,6 +340,9 @@ is_jpeg_path() { case ${1,,} in *.jpg|*.jpeg|*.jpe) return 0;; *) return 1;; esa
 is_png_path() { [[ ${1,,} == *.png ]]; }
 is_nested_path() {
     case ${1,,} in *.7z|*.zip|*.rar|*.tar|*.tar.gz|*.tgz|*.tar.bz2|*.tbz|*.tbz2|*.tar.xz|*.txz|*.tar.zst|*.tzst) return 0;; *) return 1;; esac
+}
+is_container_repack_path() {
+    case ${1,,} in *.docx|*.xlsx|*.pptx|*.odt|*.ods|*.odp|*.epub|*.npz|*.whl|*.jar|*.war) return 0;; *) return 1;; esac
 }
 
 ROOT_DEVICE=''
@@ -334,6 +364,7 @@ scan_entry() {
         elif is_jpeg_path "$path"; then JPEG_COUNT=$((JPEG_COUNT + 1))
         elif is_png_path "$path"; then PNG_COUNT=$((PNG_COUNT + 1))
         elif is_nested_path "$path"; then NESTED_COUNT=$((NESTED_COUNT + 1)); NESTED_PATHS+=("$path")
+        elif is_container_repack_path "$path"; then CONTAINER_COUNT=$((CONTAINER_COUNT + 1))
         fi
         return 0
     fi
@@ -352,15 +383,18 @@ scan_entry() {
 scan_entry "$SOURCE"
 
 # Features with no relevant content are disabled before the core sees them. This
-# prevents the legacy core from requiring feature libraries that cannot be used.
+# prevents the static core from requiring feature libraries that cannot be used.
 VIDEO_RELEVANT=false
 IMAGE_RELEVANT=false
 NESTED_RELEVANT=false
+CONTAINER_RELEVANT=false
 (( NESTED_COUNT > 0 )) && $NESTED_ENABLED && NESTED_RELEVANT=true
+(( CONTAINER_COUNT > 0 )) && $CONTAINER_ENABLED && CONTAINER_RELEVANT=true
 (( VIDEO_COUNT > 0 )) && VIDEO_RELEVANT=true
 (( JPEG_COUNT > 0 || PNG_COUNT > 0 )) && IMAGE_RELEVANT=true
 # Strict source-specific dependency/capability doctor.
 source "$SCRIPT_DIR/lib/hardcore-archive-doctor.sh"
+[[ $CONTAINER_ENABLED == true && $CONTAINER_RELEVANT == true ]] &&     add_info "Format-preserving container repack: $CONTAINER_COUNT candidate file(s)."
 
 check_strict_runtime_capabilities
 
@@ -374,11 +408,12 @@ if $DOCTOR_MODE; then
 fi
 
 # Now that nested contents have been inspected, disable transforms that cannot
-# be used by this particular source before the legacy core performs its own
+# be used by this particular source before the static core performs its own
 # broad preflight.
 if [[ $VIDEO_ENABLED != true || $VIDEO_RELEVANT != true ]]; then VIDEO_ENABLED=false; FORWARDED+=(--no-video-transcode); fi
 if [[ $IMAGE_ENABLED != true || $IMAGE_RELEVANT != true ]]; then IMAGE_ENABLED=false; FORWARDED+=(--no-image-optimize); fi
 if [[ $NESTED_ENABLED != true || $NESTED_RELEVANT != true ]]; then NESTED_ENABLED=false; FORWARDED+=(--no-nested-repack); fi
+if [[ $CONTAINER_ENABLED != true || $CONTAINER_RELEVANT != true ]]; then CONTAINER_ENABLED=false; fi
 
 # Preserve CLI opt-in precedence over an explicit false config value.
 TEMP_CONFIG=''
@@ -404,17 +439,35 @@ for info in "${INFO_LINES[@]}"; do printf '%s\n' "$info" >&2; done
 
 if [[ $VIDEO_ENABLED == true && $VIDEO_RELEVANT == true ]]; then
     [[ -n $HARDWARE_VIDEO_ENCODER ]] || { printf 'Error: internal doctor error: video encoder was not resolved.\n' >&2; exit 3; }
-    # Append final codec/encoder so they win over earlier CLI/config values. This
-    # also applies the permitted AV1->HEVC hardware compatibility fallback.
-    FORWARDED+=(--video-codec "$EFFECTIVE_VIDEO_CODEC" --video-encoder "$HARDWARE_VIDEO_ENCODER" --video-parallel)
-    printf 'Hardware video policy: %s via %s; CPU fallback disabled; video runs in parallel.\n' "${EFFECTIVE_VIDEO_CODEC^^}" "$HARDWARE_VIDEO_ENCODER" >&2
+    if [[ $EFFECTIVE_VIDEO_CODEC == auto ]]; then
+        [[ -n ${HARDWARE_VIDEO_PRIMARY_CODEC:-} ]] || { printf 'Error: internal doctor error: automatic video primary codec was not resolved.\n' >&2; exit 3; }
+        FORWARDED+=(--video-codec "$HARDWARE_VIDEO_PRIMARY_CODEC" --video-encoder "$HARDWARE_VIDEO_ENCODER" --video-parallel)
+        export HARDCORE_ARCHIVE_VIDEO_CODEC_AUTO=1
+        export HARDCORE_ARCHIVE_AUTO_AV1_ENCODER="${HARDWARE_AV1_ENCODER:-}"
+        export HARDCORE_ARCHIVE_AUTO_HEVC_ENCODER="${HARDWARE_HEVC_ENCODER:-}"
+        export HARDCORE_ARCHIVE_HARDWARE_ENCODER_LOCKED="$HARDWARE_VIDEO_ENCODER"
+        printf 'Hardware video policy: AUTO; AV1=%s; HEVC=%s; primary=%s via %s; CPU fallback disabled.\n' \
+            "${HARDWARE_AV1_ENCODER:-unavailable}" "${HARDWARE_HEVC_ENCODER:-unavailable}" \
+            "${HARDWARE_VIDEO_PRIMARY_CODEC^^}" "$HARDWARE_VIDEO_ENCODER" >&2
+    else
+        FORWARDED+=(--video-codec "$EFFECTIVE_VIDEO_CODEC" --video-encoder "$HARDWARE_VIDEO_ENCODER" --video-parallel)
+        export HARDCORE_ARCHIVE_VIDEO_CODEC_AUTO=0
+        export HARDCORE_ARCHIVE_AUTO_AV1_ENCODER=''
+        export HARDCORE_ARCHIVE_AUTO_HEVC_ENCODER=''
+        printf 'Hardware video policy: %s via %s; CPU fallback disabled; video runs in parallel.\n' "${EFFECTIVE_VIDEO_CODEC^^}" "$HARDWARE_VIDEO_ENCODER" >&2
+    fi
 fi
 
-# The legacy core still labels several strict capabilities as optional. The
-# frontend has now proved every one that can be used by this source, so suppress
-# the old fallback prompt; this is not permission to omit a required capability.
+# The static core labels several strict capabilities as optional. The frontend
+# has proved every one that can be used by this source, so suppress its fallback
+# prompt; this is not permission to omit a required capability.
 export HARDCORE_ARCHIVE_DEPENDENCIES_APPROVED=1
 export VIDEO_AUDIO_COPY=$VIDEO_AUDIO_COPY_COMPAT
+export HARDCORE_ARCHIVE_CONTAINER_REPACK=$CONTAINER_ENABLED
+export HARDCORE_ARCHIVE_CONTAINER_COUNT=$CONTAINER_COUNT
+if [[ $CONTAINER_ENABLED == true && $CONTAINER_RELEVANT == true ]]; then
+    printf 'Container policy: format-preserving repack enabled for %s candidate file(s).\n' "$CONTAINER_COUNT" >&2
+fi
 
 set +e
 bash -c 'core=$1; shift; source "$core"' "$0" "$CORE_SCRIPT" "${FORWARDED[@]}"

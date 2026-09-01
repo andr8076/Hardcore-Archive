@@ -8,7 +8,7 @@ cleanup() { rm -rf -- "$TMP"; }
 trap cleanup EXIT
 mkdir -p "$TMP/app/lib" "$TMP/bin" "$TMP/home/.config/hardcore-archive"
 cp "$ROOT/hardcore-archive" "$ROOT/hardcore-archive.sh" "$ROOT/config" "$TMP/app/"
-cp "$ROOT/lib/common.sh" "$ROOT/lib/platform.sh" "$ROOT/lib/config.sh" "$TMP/app/lib/"
+cp "$ROOT/lib/common.sh" "$ROOT/lib/platform.sh" "$ROOT/lib/config.sh" "$ROOT/lib/visual.sh" "$TMP/app/lib/"
 
 cat > "$TMP/app/hardcore-archive-runner.sh" <<'EOF_RUNNER'
 #!/usr/bin/env bash

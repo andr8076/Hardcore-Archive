@@ -13,6 +13,9 @@ DOCTOR_REPORT="$ROOT/lib/hardcore-archive-doctor-report.sh" \
 
 bash "$ROOT/tests/module-layout.sh"
 bash "$ROOT/tests/config-layer.sh"
+bash "$ROOT/tests/hash-verification-policy.sh"
+bash "$ROOT/tests/metadata-roundtrip.sh"
+bash "$ROOT/tests/benchmark-corpus.sh"
 bash "$ROOT/tests/copy-lane-policy.sh"
 bash "$ROOT/tests/ffmpeg-detection.sh"
 bash "$ROOT/tests/video-quality-nested-policy.sh"

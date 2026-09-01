@@ -174,7 +174,12 @@ hardcore_encoder_menu_collect() {
 
 hardcore_encoder_has_controlling_tty() {
     [[ ${HARDCORE_ARCHIVE_TEST_STDIN:-0} == 1 ]] && return 1
-    [[ -r /dev/tty && -w /dev/tty ]]
+    local tty_fd status
+    { exec {tty_fd}<>/dev/tty; } 2>/dev/null || return 1
+    [[ -t $tty_fd ]]
+    status=$?
+    exec {tty_fd}>&-
+    return "$status"
 }
 
 hardcore_encoder_menu_should_prompt() {
