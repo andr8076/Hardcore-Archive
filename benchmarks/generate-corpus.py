@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import pathlib
-import random
 import shutil
 import subprocess
 import zipfile

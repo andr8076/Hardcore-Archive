@@ -218,6 +218,7 @@ The modes are:
 - `auto` / `hashes` — one extraction pass plus SHA-256 comparison;
 - `extract` — the same strong extraction-and-hash path, retained as an explicit name;
 - `integrity` — 7-Zip stream/CRC integrity and completeness only;
+
 Strong verification needs temporary space roughly equal to the extracted archive. `--remove-source` still refuses any verification mode weaker than hashes.
 
 ## Power off after completion
