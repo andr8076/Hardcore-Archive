@@ -23,7 +23,30 @@ fi
 [[ -f $TMP/corpus/already-compressed/repeated.txt.gz ]]
 [[ -f $TMP/corpus/nested/payload.zip ]]
 [[ -f $TMP/corpus/containers/benchmark.docx ]]
-grep -Fq 'sha256sum -c --quiet' "$ROOT/benchmarks/verify-archive.sh"
-grep -Fq 'peak_rss_kib' "$ROOT/benchmarks/run.sh"
 
-printf 'Benchmark corpus smoke tests passed.\n'
+# The portable measurement helper must provide sub-second wall time and a
+# numeric peak-RSS value without depending on GNU/BSD time output syntax.
+python3 "$ROOT/benchmarks/measure.py" --output "$TMP/measure.tsv" -- \
+    python3 -c 'import time; payload=bytearray(4*1024*1024); time.sleep(0.02)'
+IFS=$'\t' read -r wall peak < "$TMP/measure.tsv"
+[[ $wall =~ ^[0-9]+([.][0-9]+)?$ ]]
+[[ $peak =~ ^[0-9]+$ ]]
+awk -v value="$wall" 'BEGIN {exit !(value > 0)}'
+(( peak > 0 ))
+
+# The benchmark output contract exposes the requested five metrics directly,
+# while retaining detailed phase rows and reproducibility metadata.
+grep -Fq $'case\tarchive_bytes\tcreation_seconds\tverification_seconds\textraction_seconds\tpeak_memory_kib' "$ROOT/benchmarks/run.sh"
+grep -Fq 'results.tsv' "$ROOT/benchmarks/run.sh"
+grep -Fq 'summary.tsv' "$ROOT/benchmarks/run.sh"
+grep -Fq 'environment.tsv' "$ROOT/benchmarks/run.sh"
+grep -Fq 'hardcore_hash_jobs' "$ROOT/benchmarks/run.sh"
+grep -Fq 'measure.py' "$ROOT/benchmarks/run.sh"
+
+# Strong verification must remain extract-once + SHA-256. The Hardcore case
+# deliberately enables the application's adaptive checksum worker policy.
+grep -Fq 'sha256sum -c --quiet' "$ROOT/benchmarks/verify-archive.sh"
+grep -Fq 'hardcore_enable_adaptive_hash_verifier' "$ROOT/benchmarks/verify-archive.sh"
+grep -Fq 'adaptive' "$ROOT/benchmarks/run.sh"
+
+printf 'Benchmark corpus and metrics smoke tests passed.\n'
