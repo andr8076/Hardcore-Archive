@@ -50,6 +50,9 @@ VIDEO_MODE=balanced
 # Higher values preserve more visual quality but usually reduce compression.
 # Set QUALITY_CHECK=off to disable sample quality checks.
 QUALITY_CHECK=92
+# VMAF CPU workers: auto uses available logical CPUs, capped at 8.
+# Set 1..64 to override (still capped at the CPUs available to the process).
+VIDEO_QUALITY_THREADS=auto
 # Reuse settings for similar source formats, after one fresh 3s sample passes.
 # Cache entries expire after 30 days. Set false to search every file in full.
 VIDEO_CALIBRATION_CACHE=true

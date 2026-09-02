@@ -889,6 +889,13 @@ load_config_file() {
                 [[ ${HARDCORE_ARCHIVE_CALIBRATION_POLICY_INHERITED:-0} == 1 ]] && continue
                 export HARDCORE_ARCHIVE_CALIBRATION_CACHE_DIR=$value
                 ;;
+            VIDEO_QUALITY_THREADS)
+                [[ ${HARDCORE_ARCHIVE_CALIBRATION_POLICY_INHERITED:-0} == 1 ]] && continue
+                if [[ $value != auto && ! $value =~ ^([1-9]|[1-5][0-9]|6[0-4])$ ]]; then
+                    die 'VIDEO_QUALITY_THREADS must be auto or an integer from 1 to 64.'
+                fi
+                export HARDCORE_ARCHIVE_VIDEO_QUALITY_THREADS=$value
+                ;;
             VERIFY_MODE) VERIFY_MODE=${value,,} ;;
             WORK_DIR) WORK_DIR_OVERRIDE=$value ;;
             BATCH_ROOT_FILES) BATCH_ROOT_FILES=${value,,} ;;
@@ -2096,23 +2103,55 @@ filter_chain=''
 
 MEASURED_QUALITY_KIND=''
 MEASURED_QUALITY_SCORE=''
+QUALITY_WORKER_THREADS=''
+QUALITY_VMAF_AVAILABLE=''
+
+quality_worker_threads() {
+    local requested=${HARDCORE_ARCHIVE_VIDEO_QUALITY_THREADS:-auto} available
+    if [[ $requested != auto && ! $requested =~ ^([1-9]|[1-5][0-9]|6[0-4])$ ]]; then
+        printf 'Error: VIDEO_QUALITY_THREADS must be auto or an integer from 1 to 64.\n' >&2
+        return 1
+    fi
+    available=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || printf 1)
+    [[ $available =~ ^[1-9][0-9]{0,5}$ ]] || available=1
+    if [[ $requested == auto ]]; then
+        requested=$available
+        (( requested > 8 )) && requested=8
+    fi
+    (( requested > available )) && requested=$available
+    printf '%s' "$requested"
+}
+
 measure_preflight_quality() {
-    local start=$1 length=$2 encoded=$3 width height log_file output score
+    local start=$1 length=$2 encoded=$3 width height dimensions log_file score started
     MEASURED_QUALITY_KIND=''
     MEASURED_QUALITY_SCORE=''
     [[ $quality_check != off ]] || return 1
 
-    width=$(ffprobe -v error -select_streams V:0 -show_entries stream=width -of csv=p=0 "$encoded" 2>/dev/null | head -n1)
-    height=$(ffprobe -v error -select_streams V:0 -show_entries stream=height -of csv=p=0 "$encoded" 2>/dev/null | head -n1)
+    dimensions=$(ffprobe -v error -select_streams V:0 -show_entries stream=width,height \
+        -of csv=p=0:s=x "$encoded" 2>/dev/null | head -n1)
+    IFS=x read -r width height <<< "$dimensions"
     [[ $width =~ ^[0-9]+$ && $height =~ ^[0-9]+$ ]] || return 1
 
-    if has_filter libvmaf; then
+    if [[ -z $QUALITY_WORKER_THREADS ]]; then
+        QUALITY_WORKER_THREADS=$(quality_worker_threads) || return 1
+    fi
+    if [[ -z $QUALITY_VMAF_AVAILABLE ]]; then
+        if has_filter libvmaf; then QUALITY_VMAF_AVAILABLE=true; else QUALITY_VMAF_AVAILABLE=false; fi
+    fi
+    if [[ $QUALITY_VMAF_AVAILABLE == true ]]; then
         log_file="${encoded}.vmaf.json"
         preflight_files+=("$log_file")
+        # Drop stale scores before a retry; only this FFmpeg invocation can pass.
+        rm -f -- "$log_file"
+        printf '\nVMAF scoring: %sx%s, %s CPU worker(s), every sample frame...\n' \
+            "$width" "$height" "$QUALITY_WORKER_THREADS"
+        started=$SECONDS
         if ffmpeg -hide_banner -v error -nostdin \
             -ss "$start" -t "$length" -i "$input" -i "$encoded" \
-            -filter_complex "[0:v:0]setpts=PTS-STARTPTS,scale=${width}:${height}:flags=lanczos:out_range=tv,format=yuv420p[ref];[1:v:0]setpts=PTS-STARTPTS,scale=${width}:${height}:flags=bilinear:out_range=tv,format=yuv420p[dist];[dist][ref]libvmaf=log_fmt=json:log_path=${log_file}" \
+            -filter_complex "[0:v:0]setpts=PTS-STARTPTS,scale=${width}:${height}:flags=lanczos:out_range=tv,format=yuv420p[ref];[1:v:0]setpts=PTS-STARTPTS,scale=${width}:${height}:flags=bilinear:out_range=tv,format=yuv420p[dist];[dist][ref]libvmaf=log_fmt=json:log_path=${log_file}:n_threads=${QUALITY_WORKER_THREADS}:n_subsample=1" \
             -an -f null - >/dev/null 2>&1; then
+            printf 'VMAF scoring finished in %ss.\n' "$((SECONDS - started))"
             score=$(python3 - "$log_file" <<'PYVMAF'
 import json, math, sys
 try:
@@ -2129,6 +2168,8 @@ PYVMAF
                 MEASURED_QUALITY_SCORE=$score
                 return 0
             fi
+        else
+            printf 'VMAF scoring failed after %ss.\n' "$((SECONDS - started))"
         fi
     fi
 
@@ -2301,7 +2342,7 @@ evaluate_hardware_quality() {
     local codec=$1 encoder=$2 quality=$3 mode=${4:-full}
     local sample_length=3
     local -a positions=(0.10 0.50 0.90)
-    local position start sample_file actual_length sample_size sample_bps
+    local position start sample_file actual_length sample_size sample_bps encode_started
     local total_bps=0 sample_count=0 minimum_vmaf=101
     local -a CAL_COMMAND=()
     CAL_MIN_VMAF=''
@@ -2325,11 +2366,15 @@ evaluate_hardware_quality() {
         rm -f -- "$sample_file" "${sample_file}.vmaf.json"
 
         calibration_candidate_command "$encoder" "$quality" "$start" "$sample_length" "$sample_file" || return 1
+        printf 'Encoding calibration sample %s/%s at %ss (%s %s)...\n' \
+            "$((sample_count + 1))" "${#positions[@]}" "$start" "$encoder" "$quality"
+        encode_started=$SECONDS
         if ! "${CAL_COMMAND[@]}"; then
             printf '%s via %s quality %s: sample encode failed.\n' "${codec^^}" "$encoder" "$quality"
             rm -f -- "$sample_file" "${sample_file}.vmaf.json"
             return 1
         fi
+        printf 'Sample encoding finished in %ss.\n' "$((SECONDS - encode_started))"
 
         actual_length=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$sample_file" 2>/dev/null | head -n1)
         sample_size=$(stat -c '%s' -- "$sample_file" 2>/dev/null || printf 0)
@@ -3364,6 +3409,7 @@ fi
 # policy and shared directory, including explicit false overrides.
 export HARDCORE_ARCHIVE_CALIBRATION_CACHE=${HARDCORE_ARCHIVE_CALIBRATION_CACHE:-true}
 export HARDCORE_ARCHIVE_CALIBRATION_EARLY_ABORT=${HARDCORE_ARCHIVE_CALIBRATION_EARLY_ABORT:-true}
+export HARDCORE_ARCHIVE_VIDEO_QUALITY_THREADS=${HARDCORE_ARCHIVE_VIDEO_QUALITY_THREADS:-auto}
 export HARDCORE_ARCHIVE_CALIBRATION_POLICY_INHERITED=1
 
 # Read enough flags before argument parsing to decide whether an inhibitor is
@@ -4033,6 +4079,14 @@ run_batch_mode() {
     IFS=$'\t' read -r _batch_mem_total _batch_available_kib _batch_swap_total _batch_swap_free < <(platform_memory_kib)
     available_mib=$((_batch_available_kib / 1024))
     cpu_count=$(platform_cpu_threads)
+    local quality_cpu=${HARDCORE_ARCHIVE_VIDEO_QUALITY_THREADS:-auto}
+    if [[ $quality_cpu == auto ]]; then
+        quality_cpu=$cpu_count
+        (( quality_cpu > 8 )) && quality_cpu=8
+    fi
+    [[ $quality_cpu =~ ^([1-9]|[1-5][0-9]|6[0-4])$ ]] || die 'Invalid VIDEO_QUALITY_THREADS.'
+    (( quality_cpu > cpu_count )) && quality_cpu=$cpu_count
+    [[ $QUALITY_CHECK == off ]] && quality_cpu=0
     ram_capacity_mib=$((available_mib * 70 / 100))
     cpu_capacity=$((cpu_count - 2))
     (( cpu_capacity < 1 )) && cpu_capacity=1
@@ -4083,7 +4137,9 @@ run_batch_mode() {
                         # Forced software-video parallelism is CPU intensive.
                         cpu_cost=$cpu_capacity
                     else
-                        cpu_cost=$((cpu_cost + 2))
+                        # Hardware encoding still needs CPU VMAF workers plus
+                        # decode/control capacity during quality calibration.
+                        cpu_cost=$((cpu_cost + quality_cpu + 2))
                         gpu_cost=1
                     fi
                 else
