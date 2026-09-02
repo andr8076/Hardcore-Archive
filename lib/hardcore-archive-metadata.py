@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely restore metadata data from a Hardcore Archive extraction."""
+"""Capture filesystem metadata and safely restore it from an extraction."""
 from __future__ import annotations
 
 import argparse
@@ -9,6 +9,7 @@ import os
 import pathlib
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,57 @@ import tempfile
 
 class MetadataError(RuntimeError):
     pass
+
+
+def capture_files(root: pathlib.Path, destination: pathlib.Path, stream) -> int:
+    """Capture find's NUL-delimited inventory with one lstat per entry.
+
+    Keep traversal policy with the caller (mount boundaries and symlinks), and
+    keep the existing seven-column files.tsv representation for restoration.
+    """
+    count = 0
+    pending = b""
+    with destination.open("w", encoding="utf-8", errors="surrogateescape") as output:
+        output.write("type\tmode\tuid\tgid\tmtime_epoch\tpath\tlink_target\n")
+        while True:
+            chunk = stream.read(65536)
+            if not chunk:
+                if pending:
+                    raise MetadataError("unterminated metadata path inventory")
+                break
+            names = (pending + chunk).split(b"\0")
+            pending = names.pop()
+            for raw in names:
+                relative = os.fsdecode(raw)
+                parts = pathlib.PurePath(relative).parts
+                if not relative or os.path.isabs(relative) or ".." in parts or any(c in relative for c in "\t\n\r"):
+                    raise MetadataError(f"unrepresentable metadata path: {relative!r}")
+                path = root / relative
+                info = path.lstat()
+                if stat.S_ISREG(info.st_mode):
+                    kind = "regular file" if info.st_size else "regular empty file"
+                elif stat.S_ISDIR(info.st_mode):
+                    kind = "directory"
+                elif stat.S_ISLNK(info.st_mode):
+                    kind = "symbolic link"
+                elif stat.S_ISFIFO(info.st_mode):
+                    kind = "fifo"
+                elif stat.S_ISSOCK(info.st_mode):
+                    kind = "socket"
+                elif stat.S_ISBLK(info.st_mode):
+                    kind = "block special file"
+                elif stat.S_ISCHR(info.st_mode):
+                    kind = "character special file"
+                else:
+                    kind = "unknown"
+                target = os.readlink(path) if stat.S_ISLNK(info.st_mode) else ""
+                if any(c in target for c in "\t\n\r"):
+                    raise MetadataError(f"unrepresentable symlink target: {relative!r}")
+                # Integer division also matches stat %Y for pre-epoch times.
+                output.write(f"{kind}\t{stat.S_IMODE(info.st_mode):o}\t{info.st_uid}\t{info.st_gid}\t"
+                             f"{info.st_mtime_ns // 1_000_000_000}\t{relative}\t{target}\n")
+                count += 1
+    return count
 
 
 ACL_ENTRY = re.compile(
@@ -276,11 +328,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", required=True)
     parser.add_argument("--metadata-dir", required=True)
+    parser.add_argument("--capture-files", action="store_true",
+                        help="Capture NUL-delimited relative paths from stdin into files.tsv")
     args = parser.parse_args()
     try:
-        restore(pathlib.Path(args.root), pathlib.Path(args.metadata_dir))
-    except MetadataError as exc:
-        print(f"Error: safe metadata restoration failed: {exc}", file=sys.stderr)
+        if args.capture_files:
+            capture_files(pathlib.Path(args.root), pathlib.Path(args.metadata_dir) / "files.tsv", sys.stdin.buffer)
+        else:
+            restore(pathlib.Path(args.root), pathlib.Path(args.metadata_dir))
+    except (MetadataError, OSError) as exc:
+        print(f"Error: metadata {'capture' if args.capture_files else 'restoration'} failed: {exc}", file=sys.stderr)
         return 1
     return 0
 

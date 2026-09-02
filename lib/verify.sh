@@ -71,12 +71,42 @@ hardcore_parallel_sha256_check() {
     (( jobs > lines )) && jobs=$lines
     chunk=$(( (lines + jobs - 1) / jobs ))
     temp=$(mktemp -d "${TMPDIR:-/tmp}/hardcore-hash-check.XXXXXX") || return 1
-    if ! split -l "$chunk" -- "$manifest" "$temp/part."; then
-        rm -rf -- "$temp"
-        return 1
+    # Equal file counts can put all large files on one worker. Assign intact
+    # GNU checksum lines by accumulated payload bytes, without loading the
+    # entire manifest or changing any filename/checksum escaping.
+    if ! python3 -c '
+import contextlib, heapq, os, pathlib, re, sys
+manifest, destination, workers = sys.argv[1], pathlib.Path(sys.argv[2]), int(sys.argv[3])
+pattern = re.compile(rb"(\\?)[0-9a-fA-F]{64} [ *](.*)\n?\Z")
+queue = [(0, 0, i) for i in range(workers)]
+with contextlib.ExitStack() as stack:
+    outputs = [stack.enter_context((destination / f"part.{i:03d}").open("wb")) for i in range(workers)]
+    source = stack.enter_context(open(manifest, "rb"))
+    for line in source:
+        match = pattern.fullmatch(line.rstrip(b"\n"))
+        if not match:
+            # Unsupported formats stay with the existing GNU/split path.
+            raise SystemExit(1)
+        escaped, name = match.groups()
+        if escaped:
+            name = re.sub(rb"\\([\\nr])", lambda m: {b"\\": b"\\", b"n": b"\n", b"r": b"\r"}[m[1]], name)
+        try:
+            size = max(1, os.stat(name).st_size)
+        except OSError:
+            size = 1  # Still pass missing/unreadable paths to GNU for rejection.
+        load, count, index = heapq.heappop(queue)
+        outputs[index].write(line)
+        heapq.heappush(queue, (load + size, count + 1, index))
+' "$manifest" "$temp" "$jobs"; then
+        rm -f -- "$temp"/part.*
+        if ! split -l "$chunk" -- "$manifest" "$temp/part."; then
+            rm -rf -- "$temp"
+            return 1
+        fi
     fi
 
     for part in "$temp"/part.*; do
+        [[ -s $part ]] || continue
         parts+=("$part")
         if $quiet; then
             "$HARDCORE_REAL_SHA256SUM" -c --quiet "$part" >"$part.out" 2>"$part.err" &
@@ -85,6 +115,10 @@ hardcore_parallel_sha256_check() {
         fi
         pids+=("$!")
     done
+    if (( ${#pids[@]} == 0 )); then
+        rm -rf -- "$temp"
+        return 1
+    fi
 
     for ((index=0; index<${#pids[@]}; index++)); do
         pid=${pids[index]}

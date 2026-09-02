@@ -263,6 +263,27 @@ Restore validates archive paths, extracts into a temporary destination, verifies
 
 ## Benchmarks
 
+### Resource-use audit
+
+High overall CPU usage is not guaranteed, and is not a reliable throughput measure by itself. Current stage policies are:
+
+| Stage | Current execution policy | Limit or tradeoff |
+| --- | --- | --- |
+| LZMA2 compression | Two threads by default; explicit `THREADS` / `--threads` override | More threads can split independent blocks, increase RAM use and change compression ratio. |
+| Match-cycle tuning | Four bounded trials, sequential, two threads each | Startup work; small inputs skip it. |
+| Video encoding | Hardware encoder; sequential files; can overlap LZMA2/images | A busy video engine may not show as GPU 3D utilization. Decode/filter work remains on the CPU. |
+| VMAF scoring | Up to eight CPU workers by default | Configurable with `VIDEO_QUALITY_THREADS`; keeps the same samples and scoring resolution. |
+| Images | Up to four file workers in auto mode; two Oxipng threads each | Bounded by CPU/file count and the parallel-memory plan; `IMAGE_JOBS` overrides file workers. |
+| Container and nested-archive repacking | Sequential files | Still a utilization limit; independent-file concurrency needs a memory/storage budget. |
+| Metadata capture | One Python process, one `lstat` per inventory entry | Replaces five external `stat` processes per entry; still subject to filesystem latency. |
+| Strong checksum comparison | Up to four GNU workers on detected SSD/NVMe; one on rotational/unknown storage | Worker groups are balanced by payload bytes. A single large file still occupies one worker. |
+| Strong source-hash creation | Sequential payloads | Remains a potential bottleneck when strong verification is explicitly enabled. |
+| Copy storage, integrity checks, extraction | Delegated to 7-Zip | Throughput depends on storage and the archive's independent compression blocks. |
+
+The metadata manifest format and GNU checksum checks are unchanged. Byte balancing preserves each checksum line verbatim; unsupported manifest formats fall back to the previous splitting behavior. Archive writes remain serialized. Default integrity verification still avoids payload SHA-256 comparisons. The benchmark suite below is needed to measure end-to-end throughput on the actual source, disk and GPU; these policies alone do not prove maximum hardware utilization.
+
+### Running benchmarks
+
 The deterministic mixed corpus covers repeated text, structured data, incompressible and patterned binary data, many small files, duplicates, sparse files, pre-compressed data, a nested ZIP, and a repackable DOCX. Optional generated media can be included for machine-specific video tests.
 
 ```bash

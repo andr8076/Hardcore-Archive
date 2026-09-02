@@ -6590,23 +6590,13 @@ Containers repacked: $CONTAINER_REPACKED_COUNT
 Container bytes saved: $CONTAINER_SAVED_BYTES
 Nested archives repacked: $NESTED_REPACKED_COUNT
 EOF
-    {
-        printf 'type\tmode\tuid\tgid\tmtime_epoch\tpath\tlink_target\n'
-        (
-            cd -- "$SOURCE_PARENT"
-            source_find "$SOURCE_NAME" -print0
-        ) | while IFS= read -r -d '' path; do
-            local_type=$(stat -c '%F' -- "$SOURCE_PARENT/$path" 2>/dev/null || printf unknown)
-            local_mode=$(stat -c '%a' -- "$SOURCE_PARENT/$path" 2>/dev/null || printf 0)
-            local_uid=$(stat -c '%u' -- "$SOURCE_PARENT/$path" 2>/dev/null || printf 0)
-            local_gid=$(stat -c '%g' -- "$SOURCE_PARENT/$path" 2>/dev/null || printf 0)
-            local_mtime=$(stat -c '%Y' -- "$SOURCE_PARENT/$path" 2>/dev/null || printf 0)
-            local_link=''
-            [[ -L $SOURCE_PARENT/$path ]] && local_link=$(readlink -- "$SOURCE_PARENT/$path" || true)
-            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-                "$local_type" "$local_mode" "$local_uid" "$local_gid" "$local_mtime" "$path" "$local_link"
-        done
-    } > "$METADATA_MANIFEST"
+    [[ -n $METADATA_HELPER && -f $METADATA_HELPER ]] || \
+        die "Trusted metadata capture helper is missing: ${METADATA_HELPER:-unset}"
+    (
+        cd -- "$SOURCE_PARENT"
+        source_find "$SOURCE_NAME" -print0
+    ) | python3 "$METADATA_HELPER" --capture-files \
+        --root "$SOURCE_PARENT" --metadata-dir "$METADATA_DIR"
 
     if command -v getfacl >/dev/null 2>&1; then
         (cd -- "$SOURCE_PARENT" && getfacl -R -p -n -- "$SOURCE_NAME" 2>/dev/null) > "$ACL_MANIFEST" || : > "$ACL_MANIFEST"

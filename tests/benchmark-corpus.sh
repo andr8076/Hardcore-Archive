@@ -36,7 +36,7 @@ awk -v value="$wall" 'BEGIN {exit !(value > 0)}'
 
 # The benchmark output contract exposes the requested five metrics directly,
 # while retaining detailed phase rows and reproducibility metadata.
-grep -Fq $'case\tarchive_bytes\tcreation_seconds\tverification_seconds\textraction_seconds\tpeak_memory_kib' "$ROOT/benchmarks/run.sh"
+grep -Fq 'case\tarchive_bytes\tcreation_seconds\tverification_seconds\textraction_seconds\tpeak_memory_kib' "$ROOT/benchmarks/run.sh"
 grep -Fq 'results.tsv' "$ROOT/benchmarks/run.sh"
 grep -Fq 'summary.tsv' "$ROOT/benchmarks/run.sh"
 grep -Fq 'environment.tsv' "$ROOT/benchmarks/run.sh"
