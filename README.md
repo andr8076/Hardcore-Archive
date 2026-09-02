@@ -160,7 +160,19 @@ Normal create jobs perform the same check automatically. Repair commands are pri
 
 Video transcoding is hardware-only. CPU encoders are never accepted as dependency fallbacks.
 
-`VIDEO_CODEC=auto` is the default. When both working AV1 and HEVC hardware encoders are available, Hardcore Archive calibrates them against the same VMAF floor and minimum-savings target for each video, then uses the smaller quality-valid candidate. `--video-codec av1` and `--video-codec hevc` remain explicit overrides.
+`VIDEO_CODEC=auto` is the default. When both working AV1 and HEVC hardware encoders are available, Hardcore Archive checks them against the same VMAF floor and minimum-savings target for each video, then uses the candidate predicted to be smaller. `--video-codec av1` and `--video-codec hevc` remain explicit overrides.
+
+Hardware calibration (VAAPI, NVENC and QSV) now reuses successful settings for similar videos:
+
+- **First file in a group:** search the encoder's quality range using three 3-second segments (one for clips shorter than 9 seconds).
+- **Cache hit:** encode and measure one 3-second center segment from the current video at the cached setting. Both your configured `QUALITY_CHECK` VMAF target and predicted minimum savings must pass. A failed check, unavailable measurement, or insufficient saving triggers full calibration.
+- **Early stopping:** if three failed trials span at least four quality steps, vary by no more than 0.25 VMAF, and remain at least 5 points below your target, stop that codec's search. Another available codec can still qualify; otherwise the original is preserved. This is a conservative rejection heuristic, not proof that higher quality could never pass.
+
+The cache groups sources by codec/profile, resolution, pixel format/bit depth, frame rate, interlacing, aspect ratio and color metadata. Keys also include the output codec, hardware encoder, selected VAAPI device, FFmpeg build, actual scaling/denoising filters and VMAF target. Only a successful full calibration writes a quality setting; failures are never cached. Every cache hit measures the new file, and its savings estimate includes that file's audio. The selected candidate reuses those measurements instead of repeating the separate three-segment preflight. Final codec, duration, stream-count, full-decode and actual-size checks remain in place.
+
+These are **sampled quality checks**: one center segment can miss difficult scenes elsewhere, and a cached setting may compress less than a fresh search. Use `VIDEO_CALIBRATION_CACHE=false` for a full search on every file, or `VIDEO_CALIBRATION_EARLY_ABORT=false` to disable plateau stopping. Unsupported encoder families retain their existing preflight behavior; `QUALITY_CHECK=off` bypasses calibration as before.
+
+Settings persist across runs and are shared with batch/nested children. They expire after 30 days and are separated by quality target and processing settings. The default directory is `~/.cache/hardcore-archive/video-calibration-v1` on Linux or `~/Library/Caches/hardcore-archive/video-calibration-v1` on macOS (`XDG_CACHE_HOME` is respected). Override it with `VIDEO_CALIBRATION_CACHE_DIR`; deleting its contents forces fresh calibration. Cache writes are atomic, and unavailable or malformed cache entries simply fall back to full calibration.
 
 Before an interactive create run starts, Hardcore Archive prints the available AV1/HEVC FFmpeg encoders in two groups:
 

@@ -39,6 +39,9 @@ case $PLATFORM_KERNEL in
         ;;
 esac
 
+# Shared by per-file helpers, batch jobs and nested archive children.
+export HARDCORE_ARCHIVE_CALIBRATION_CACHE_DIR=${HARDCORE_ARCHIVE_CALIBRATION_CACHE_DIR:-$PLATFORM_CACHE_HOME/hardcore-archive/video-calibration-v1}
+
 # Homebrew keeps GNU utilities out of the default command names on macOS.
 # Prefer their gnubin directories automatically so the main workflow has one
 # consistent command contract on both supported operating systems.
@@ -873,6 +876,19 @@ load_config_file() {
             VIDEO_MODE) VIDEO_MODE=${value,,} ;;
             VIDEO_MIN_VMAF) VIDEO_MIN_VMAF=$value ;;
             VIDEO_MIN_SAVINGS_PERCENT) VIDEO_MIN_SAVINGS_PERCENT=$value ;;
+            VIDEO_CALIBRATION_CACHE|VIDEO_CALIBRATION_EARLY_ABORT)
+                [[ ${HARDCORE_ARCHIVE_CALIBRATION_POLICY_INHERITED:-0} == 1 ]] && continue
+                bool=$(config_bool "$value") || { warn "Invalid $key value in config: $value"; continue; }
+                if [[ $key == VIDEO_CALIBRATION_CACHE ]]; then
+                    export HARDCORE_ARCHIVE_CALIBRATION_CACHE=$bool
+                else
+                    export HARDCORE_ARCHIVE_CALIBRATION_EARLY_ABORT=$bool
+                fi
+                ;;
+            VIDEO_CALIBRATION_CACHE_DIR)
+                [[ ${HARDCORE_ARCHIVE_CALIBRATION_POLICY_INHERITED:-0} == 1 ]] && continue
+                export HARDCORE_ARCHIVE_CALIBRATION_CACHE_DIR=$value
+                ;;
             VERIFY_MODE) VERIFY_MODE=${value,,} ;;
             WORK_DIR) WORK_DIR_OVERRIDE=$value ;;
             BATCH_ROOT_FILES) BATCH_ROOT_FILES=${value,,} ;;
@@ -2131,6 +2147,91 @@ CAL_PREDICTED_SAVINGS=''
 CAL_REQUIRED_SAVINGS=''
 CAL_REASON=''
 CAL_QUALITY_LABEL=''
+CAL_SELECTED_VALIDATED=false
+CAL_CACHE_FILE=''
+
+# Cache entries are hints, never evidence that a different file meets VMAF.
+# Version this key when sampling, VMAF normalization or encoder policy changes.
+calibration_cache_prepare() {
+    local codec=$1 encoder=$2 directory profile ffmpeg_build key
+    local CAL_FILTER_CHAIN=''
+    CAL_CACHE_FILE=''
+    [[ ${HARDCORE_ARCHIVE_CALIBRATION_CACHE:-true} == true ]] || return 0
+    directory=${HARDCORE_ARCHIVE_CALIBRATION_CACHE_DIR:-}
+    [[ -n $directory ]] || return 0
+    profile=$(ffprobe -v error -select_streams V:0 -show_entries \
+        stream=codec_name,profile,width,height,pix_fmt,bits_per_raw_sample,avg_frame_rate,r_frame_rate,field_order,sample_aspect_ratio,color_range,color_space,color_transfer,color_primaries \
+        -of compact=p=0:nk=0 "$input" 2>/dev/null) || return 0
+    [[ -n $profile ]] || return 0
+    ffmpeg_build=$(ffmpeg -version 2>/dev/null) || return 0
+    [[ -n $ffmpeg_build ]] || return 0
+    calibration_build_filter_chain "$encoder"
+    key=$(printf '%s\0' 'calibration-v1-three-3s-center-validation' \
+        "$codec" "$encoder" "${HARDCORE_ARCHIVE_VAAPI_DEVICE:-}" \
+        "$profile" "$ffmpeg_build" "$CAL_FILTER_CHAIN" \
+        "$quality_vmaf_threshold" | sha256sum | awk '{print $1}') || return 0
+    [[ $key =~ ^[a-f0-9]{64}$ ]] || return 0
+    (umask 077; mkdir -p -- "$directory") 2>/dev/null || return 0
+    [[ -d $directory && ! -L $directory && -O $directory && -w $directory ]] || return 0
+    CAL_CACHE_FILE="$directory/$key"
+}
+
+calibration_cache_read() {
+    local low=$1 high=$2 version quality timestamp extra now size
+    [[ -n $CAL_CACHE_FILE && -f $CAL_CACHE_FILE && ! -L $CAL_CACHE_FILE && -O $CAL_CACHE_FILE ]] || return 1
+    size=$(stat -c '%s' -- "$CAL_CACHE_FILE" 2>/dev/null) || return 1
+    (( size > 0 && size <= 128 )) || return 1
+    IFS=$'\t' read -r version quality timestamp extra < "$CAL_CACHE_FILE" || return 1
+    [[ $version == v1 && -z $extra && $quality =~ ^[1-9][0-9]{0,2}$ && $timestamp =~ ^[1-9][0-9]{0,10}$ ]] || return 1
+    (( quality >= low && quality <= high )) || return 1
+    now=$(date +%s) || return 1
+    # Expire after 30 days; future timestamps and malformed entries are misses.
+    (( timestamp <= now && now - timestamp <= 2592000 )) || return 1
+    printf '%s' "$quality"
+}
+
+calibration_cache_write() {
+    local quality=$1 temporary_cache timestamp
+    [[ -n $CAL_CACHE_FILE ]] || return 0
+    timestamp=$(date +%s) || return 0
+    temporary_cache=$(mktemp "${CAL_CACHE_FILE}.XXXXXX" 2>/dev/null) || return 0
+    if ! printf 'v1\t%s\t%s\n' "$quality" "$timestamp" > "$temporary_cache" || \
+       ! mv -fT -- "$temporary_cache" "$CAL_CACHE_FILE" 2>/dev/null; then
+        rm -f -- "$temporary_cache"
+    fi
+    return 0
+}
+
+calibration_predict_savings() {
+    local video_bps=$1 source_bps=$2 predicted_bps
+    predicted_bps=$(LC_NUMERIC=C awk -v video="$video_bps" -v audio="$estimated_output_audio_bps" \
+        'BEGIN {printf "%.0f",(video+audio)*1.015}')
+    CAL_PREDICTED_SAVINGS=$(LC_NUMERIC=C awk -v source="$source_bps" -v output="$predicted_bps" \
+        'BEGIN {if(source<=0){print 0; exit} printf "%.2f",(source-output)*100/source}')
+}
+
+calibration_score_passes() {
+    LC_NUMERIC=C awk -v v="$CAL_MIN_VMAF" -v threshold="$quality_vmaf_threshold" \
+        'BEGIN {exit !(v>=threshold)}'
+}
+
+calibration_savings_pass() {
+    LC_NUMERIC=C awk -v saving="$CAL_PREDICTED_SAVINGS" -v required="$CAL_REQUIRED_SAVINGS" \
+        'BEGIN {exit !(saving>=required)}'
+}
+
+# Heuristic: three failed trials spanning at least four quality steps, with
+# <=0.25 total VMAF variation and still >=5 points below the requested floor.
+# It only rejects a candidate (preserving the original); it never accepts one.
+calibration_has_plateau() {
+    [[ ${HARDCORE_ARCHIVE_CALIBRATION_EARLY_ABORT:-true} == true ]] || return 1
+    LC_NUMERIC=C awk -v q1="$1" -v q2="$2" -v q3="$3" \
+        -v v1="$4" -v v2="$5" -v v3="$6" -v target="$quality_vmaf_threshold" 'BEGIN {
+        maximum=v1; if(v2>maximum)maximum=v2; if(v3>maximum)maximum=v3;
+        minimum=v1; if(v2<minimum)minimum=v2; if(v3<minimum)minimum=v3;
+        exit !(q1>q2 && q2>q3 && q1-q3>=4 && maximum<=target-5 && maximum-minimum<=0.25)
+    }'
+}
 
 calibration_encoder_supported() {
     case "$1" in
@@ -2172,6 +2273,7 @@ calibration_build_filter_chain() {
     fi
     CAL_FILTER_CHAIN=''
     ((${#filters[@]} > 0)) && CAL_FILTER_CHAIN=$(IFS=,; printf '%s' "${filters[*]}")
+    return 0
 }
 
 calibration_candidate_command() {
@@ -2196,12 +2298,16 @@ calibration_candidate_command() {
 }
 
 evaluate_hardware_quality() {
-    local codec=$1 encoder=$2 quality=$3
+    local codec=$1 encoder=$2 quality=$3 mode=${4:-full}
     local sample_length=3
     local -a positions=(0.10 0.50 0.90)
     local position start sample_file actual_length sample_size sample_bps
     local total_bps=0 sample_count=0 minimum_vmaf=101
     local -a CAL_COMMAND=()
+    CAL_MIN_VMAF=''
+    CAL_AVG_VIDEO_BPS=''
+
+    [[ $mode == one-shot ]] && positions=(0.50)
 
     if LC_NUMERIC=C awk -v d="$duration" 'BEGIN {exit !(d<9)}'; then
         positions=(0.50)
@@ -2227,17 +2333,20 @@ evaluate_hardware_quality() {
 
         actual_length=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$sample_file" 2>/dev/null | head -n1)
         sample_size=$(stat -c '%s' -- "$sample_file" 2>/dev/null || printf 0)
-        if [[ ! $actual_length =~ ^[0-9]+([.][0-9]+)?$ ]] || (( sample_size <= 0 )); then
+        if [[ ! $actual_length =~ ^[0-9]+([.][0-9]+)?$ ]] || (( sample_size <= 0 )) || \
+           ! LC_NUMERIC=C awk -v d="$actual_length" 'BEGIN {exit !(d>0)}'; then
             rm -f -- "$sample_file" "${sample_file}.vmaf.json"
             return 1
         fi
         sample_bps=$(LC_NUMERIC=C awk -v bytes="$sample_size" -v seconds="$actual_length" \
             'BEGIN {if(seconds<=0)print 0; else printf "%.0f",bytes*8/seconds}')
+        (( sample_bps > 0 )) || { rm -f -- "$sample_file" "${sample_file}.vmaf.json"; return 1; }
         total_bps=$((total_bps + sample_bps))
         sample_count=$((sample_count + 1))
 
         if ! measure_preflight_quality "$start" "$actual_length" "$sample_file" || \
-           [[ $MEASURED_QUALITY_KIND != VMAF ]]; then
+           [[ $MEASURED_QUALITY_KIND != VMAF || ! $MEASURED_QUALITY_SCORE =~ ^[0-9]+([.][0-9]+)?$ ]] || \
+           ! LC_NUMERIC=C awk -v v="$MEASURED_QUALITY_SCORE" 'BEGIN {exit !(v>=0 && v<=100)}'; then
             rm -f -- "$sample_file" "${sample_file}.vmaf.json"
             return 1
         fi
@@ -2257,7 +2366,8 @@ evaluate_hardware_quality() {
 calibrate_hardware_candidate() {
     local codec=$1 encoder=$2
     local range low high quality_label mid best_quality=0 best_video_bps=0
-    local source_average_bps predicted_output_bps required_savings
+    local source_average_bps required_savings cached_quality='' count
+    local -a failed_qualities=() failed_scores=()
 
     CAL_BEST_QUALITY=''
     CAL_PREDICTED_SAVINGS=''
@@ -2270,7 +2380,7 @@ calibrate_hardware_candidate() {
         return 4
     }
     range=$(calibration_quality_range "$encoder") || return 4
-    read -r low high quality_label <<< "$range"
+    IFS=' ' read -r low high quality_label <<< "$range"
     CAL_QUALITY_LABEL=$quality_label
 
     source_average_bps=$(LC_NUMERIC=C awk -v bytes="$original_size" -v seconds="$duration" \
@@ -2292,6 +2402,24 @@ calibrate_hardware_candidate() {
     printf 'Encoder: %s | searching %s %s..%s for worst-sample VMAF >= %s.\n' \
         "$encoder" "$quality_label" "$low" "$high" "$quality_vmaf_threshold"
 
+    calibration_cache_prepare "$codec" "$encoder"
+    cached_quality=$(calibration_cache_read "$low" "$high") || cached_quality=''
+    if [[ -n $cached_quality ]]; then
+        printf 'Cached %s %s: validating one 3s center sample for this file.\n' "$quality_label" "$cached_quality"
+        if evaluate_hardware_quality "$codec" "$encoder" "$cached_quality" one-shot && calibration_score_passes; then
+            calibration_predict_savings "$CAL_AVG_VIDEO_BPS" "$source_average_bps"
+            if calibration_savings_pass; then
+                CAL_BEST_QUALITY=$cached_quality
+                CAL_REASON='cache-validated'
+                printf 'Cached setting passed: VMAF %s >= %s; predicted saving %s%% (required %s%%).\n' \
+                    "$CAL_MIN_VMAF" "$quality_vmaf_threshold" "$CAL_PREDICTED_SAVINGS" "$required_savings"
+                return 0
+            fi
+        fi
+        printf 'Cached setting did not pass quality/size validation; running full calibration.\n'
+        CAL_PREDICTED_SAVINGS=''
+    fi
+
     while (( low <= high )); do
         mid=$(((low + high) / 2))
         if ! evaluate_hardware_quality "$codec" "$encoder" "$mid"; then
@@ -2299,12 +2427,24 @@ calibrate_hardware_candidate() {
             return 1
         fi
         printf '%s %s: worst VMAF %s.\n' "$quality_label" "$mid" "$CAL_MIN_VMAF"
-        if LC_NUMERIC=C awk -v v="$CAL_MIN_VMAF" -v threshold="$quality_vmaf_threshold" \
-            'BEGIN {exit !(v>=threshold)}'; then
+        if calibration_score_passes; then
             best_quality=$mid
             best_video_bps=$CAL_AVG_VIDEO_BPS
             low=$((mid + 1))
         else
+            if (( best_quality == 0 )); then
+                failed_qualities+=("$mid")
+                failed_scores+=("$CAL_MIN_VMAF")
+                count=${#failed_qualities[@]}
+                if (( count >= 3 )) && calibration_has_plateau \
+                    "${failed_qualities[count-3]}" "${failed_qualities[count-2]}" "${failed_qualities[count-1]}" \
+                    "${failed_scores[count-3]}" "${failed_scores[count-2]}" "${failed_scores[count-1]}"; then
+                    CAL_REASON='quality-plateau-below-floor'
+                    printf 'Stopping calibration early: VMAF plateau near %s is far below %s; original retained unless another codec passes.\n' \
+                        "$CAL_MIN_VMAF" "$quality_vmaf_threshold"
+                    return 2
+                fi
+            fi
             high=$((mid - 1))
         fi
     done
@@ -2314,20 +2454,16 @@ calibrate_hardware_candidate() {
         return 2
     fi
 
-    predicted_output_bps=$(LC_NUMERIC=C awk -v video="$best_video_bps" -v audio="$estimated_output_audio_bps" \
-        'BEGIN {printf "%.0f",(video+audio)*1.015}')
-    CAL_PREDICTED_SAVINGS=$(LC_NUMERIC=C awk -v source="$source_average_bps" -v output="$predicted_output_bps" 'BEGIN {
-        if(source<=0){print 0; exit} printf "%.2f",(source-output)*100/source
-    }')
+    calibration_predict_savings "$best_video_bps" "$source_average_bps"
     CAL_BEST_QUALITY=$best_quality
     printf '%s quality-valid boundary: %s %s; predicted saving %s%%; required %s%%.\n' \
         "${codec^^}" "$quality_label" "$best_quality" "$CAL_PREDICTED_SAVINGS" "$required_savings"
 
-    if ! LC_NUMERIC=C awk -v saving="$CAL_PREDICTED_SAVINGS" -v required="$required_savings" \
-        'BEGIN {exit !(saving>=required)}'; then
+    if ! calibration_savings_pass; then
         CAL_REASON='minimum-saving-not-met'
         return 3
     fi
+    calibration_cache_write "$best_quality"
     CAL_REASON='candidate-valid'
     return 0
 }
@@ -2339,6 +2475,7 @@ apply_calibrated_candidate() {
     calibration_apply_quality "$encoder" "$quality" || return 1
     calibration_build_filter_chain "$encoder"
     filter_chain=$CAL_FILTER_CHAIN
+    CAL_SELECTED_VALIDATED=true
     case "$encoder" in
         av1_vaapi) video_crf="CQP q_idx ${quality} (calibrated)" ;;
         hevc_vaapi) video_crf="CQP QP ${quality} (calibrated)" ;;
@@ -2349,6 +2486,7 @@ apply_calibrated_candidate() {
 }
 
 calibrate_and_choose_video_codec() {
+    CAL_SELECTED_VALIDATED=false
     [[ "$quality_check" != off ]] || {
         if [[ $HARDCORE_AUTO_CODEC_MODE == 1 ]]; then
             printf 'Automatic AV1/HEVC comparison requires VMAF; original preserved unchanged.\n'
@@ -2441,6 +2579,10 @@ calibrate_and_choose_video_codec() {
 }
 
 run_video_preflight() {
+    if [[ $CAL_SELECTED_VALIDATED == true && $quality_check != off ]]; then
+        printf "\nVideo preflight: reusing this file's calibrated quality and size measurements.\n"
+        return 0
+    fi
     [[ "$video_preflight" == true ]] || return 0
     [[ "$duration" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 0
 
@@ -3217,6 +3359,12 @@ if $CONFIG_ENABLED; then
     CONFIG_FILE=$PRE_CONFIG_FILE
     load_config_file "$CONFIG_FILE"
 fi
+
+# Children may read a different config; keep the parent's resolved calibration
+# policy and shared directory, including explicit false overrides.
+export HARDCORE_ARCHIVE_CALIBRATION_CACHE=${HARDCORE_ARCHIVE_CALIBRATION_CACHE:-true}
+export HARDCORE_ARCHIVE_CALIBRATION_EARLY_ABORT=${HARDCORE_ARCHIVE_CALIBRATION_EARLY_ABORT:-true}
+export HARDCORE_ARCHIVE_CALIBRATION_POLICY_INHERITED=1
 
 # Read enough flags before argument parsing to decide whether an inhibitor is
 # useful. Help and analysis-only runs do not need sleep protection.

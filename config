@@ -50,6 +50,13 @@ VIDEO_MODE=balanced
 # Higher values preserve more visual quality but usually reduce compression.
 # Set QUALITY_CHECK=off to disable sample quality checks.
 QUALITY_CHECK=92
+# Reuse settings for similar source formats, after one fresh 3s sample passes.
+# Cache entries expire after 30 days. Set false to search every file in full.
+VIDEO_CALIBRATION_CACHE=true
+# Stop searches that plateau far below the VMAF target; preserve the original.
+VIDEO_CALIBRATION_EARLY_ABORT=true
+# Optional shared directory (default: platform cache/hardcore-archive/video-calibration-v1).
+# VIDEO_CALIBRATION_CACHE_DIR=/path/to/calibration-cache
 VIDEO_MIN_SAVINGS_PERCENT=3
 VIDEO_PREFLIGHT=true
 VIDEO_SCALE=true
