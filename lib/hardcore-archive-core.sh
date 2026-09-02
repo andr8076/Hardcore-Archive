@@ -2147,9 +2147,13 @@ measure_preflight_quality() {
         printf '\nVMAF scoring: %sx%s, %s CPU worker(s), every sample frame...\n' \
             "$width" "$height" "$QUALITY_WORKER_THREADS"
         started=$SECONDS
+        # Matroska rounds sample timestamps to milliseconds. Framesync's
+        # default floor matching can then compare a frame to its predecessor
+        # in the MP4 reference. Nearest timestamp matching keeps frame content
+        # aligned without discarding timestamps or changing the frame rate.
         if ffmpeg -hide_banner -v error -nostdin \
             -ss "$start" -t "$length" -i "$input" -i "$encoded" \
-            -filter_complex "[0:v:0]setpts=PTS-STARTPTS,scale=${width}:${height}:flags=lanczos:out_range=tv,format=yuv420p[ref];[1:v:0]setpts=PTS-STARTPTS,scale=${width}:${height}:flags=bilinear:out_range=tv,format=yuv420p[dist];[dist][ref]libvmaf=log_fmt=json:log_path=${log_file}:n_threads=${QUALITY_WORKER_THREADS}:n_subsample=1" \
+            -filter_complex "[0:v:0]settb=AVTB,setpts=PTS-STARTPTS,scale=${width}:${height}:flags=lanczos:out_range=tv,format=yuv420p[ref];[1:v:0]settb=AVTB,setpts=PTS-STARTPTS,scale=${width}:${height}:flags=bilinear:out_range=tv,format=yuv420p[dist];[dist][ref]libvmaf=log_fmt=json:log_path=${log_file}:n_threads=${QUALITY_WORKER_THREADS}:n_subsample=1:ts_sync_mode=nearest" \
             -an -f null - >/dev/null 2>&1; then
             printf 'VMAF scoring finished in %ss.\n' "$((SECONDS - started))"
             score=$(python3 - "$log_file" <<'PYVMAF'
@@ -2207,7 +2211,7 @@ calibration_cache_prepare() {
     ffmpeg_build=$(ffmpeg -version 2>/dev/null) || return 0
     [[ -n $ffmpeg_build ]] || return 0
     calibration_build_filter_chain "$encoder"
-    key=$(printf '%s\0' 'calibration-v1-three-3s-center-validation' \
+    key=$(printf '%s\0' 'calibration-v2-nearest-timestamps-three-3s-center-validation' \
         "$codec" "$encoder" "${HARDCORE_ARCHIVE_VAAPI_DEVICE:-}" \
         "$profile" "$ffmpeg_build" "$CAL_FILTER_CHAIN" \
         "$quality_vmaf_threshold" | sha256sum | awk '{print $1}') || return 0

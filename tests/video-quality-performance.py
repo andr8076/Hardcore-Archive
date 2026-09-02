@@ -3,7 +3,9 @@
 import json
 import os
 from pathlib import Path
+import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -78,6 +80,8 @@ measure_preflight_quality 12.5 3 "$TEST_ROOT/sample.mkv"
         args = (self.root / "args").read_bytes().decode().split("\0")
         graph = args[args.index("-filter_complex") + 1]
         self.assertIn(":n_threads=8:n_subsample=1", graph)
+        self.assertIn(":ts_sync_mode=nearest", graph)
+        self.assertEqual(graph.count("settb=AVTB,setpts=PTS-STARTPTS"), 2)
         self.assertIn("scale=3840:2160:flags=lanczos:out_range=tv", graph)
         self.assertIn("scale=3840:2160:flags=bilinear:out_range=tv", graph)
         self.assertNotIn("fps=", graph)
@@ -85,6 +89,51 @@ measure_preflight_quality 12.5 3 "$TEST_ROOT/sample.mkv"
         self.assertEqual(args[args.index("-t") + 1], "3")
         self.assertEqual((self.root / "filters").read_text().splitlines(), ["probe"])
         self.assertEqual(len((self.root / "probes").read_text().splitlines()), 2)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is unavailable")
+    def test_real_lossless_sample_matches_across_container_timebases(self):
+        encoders = subprocess.check_output(["ffmpeg", "-hide_banner", "-encoders"],
+                                          stderr=subprocess.DEVNULL, text=True)
+        if not all(name in encoders for name in ("libx264", "ffv1")):
+            self.skipTest("FFmpeg needs libx264 and FFV1 for this fixture")
+
+        # Capture the production filter graph; SSIM uses the same framesync
+        # machinery and lets this regression run without a libvmaf build.
+        result = self.run_shell('measure_preflight_quality 0.833 3 "$TEST_ROOT/sample.mkv"',
+                                SCORE_JSON=json.dumps({"pooled_metrics": {"vmaf": {"mean": 100}}}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = (self.root / "args").read_bytes().decode().split("\0")
+        graph = args[args.index("-filter_complex") + 1]
+        graph = graph.replace("3840:2160", "128:72")
+        graph = re.sub(r"libvmaf=log_fmt=json:log_path=[^:;]+:n_threads=[0-9]+:n_subsample=1:",
+                       "ssim=", graph)
+        source, sample = self.root / "reference.mp4", self.root / "lossless.mkv"
+
+        def ffmpeg(*arguments):
+            process = subprocess.run(["ffmpeg", "-hide_banner", "-nostdin", "-y", *map(str, arguments)],
+                                     capture_output=True, text=True, timeout=30)
+            self.assertEqual(process.returncode, 0, process.stderr[-4000:])
+            return process.stderr
+
+        # Rapid frame changes make a one-frame mismatch unambiguous. Both
+        # encodes are lossless, but MP4 and Matroska have different timebases.
+        ffmpeg("-v", "error", "-f", "lavfi", "-i",
+               "nullsrc=s=128x72:r=60000/1001:d=6,geq=lum='mod(N*47+X*Y,220)+16':cb=128:cr=128",
+               "-c:v", "libx264", "-threads", "2", "-qp", "0", source)
+        ffmpeg("-v", "error", "-ss", "0.833", "-i", source, "-t", "3", "-map", "0:V:0",
+               "-an", "-sn", "-dn", "-c:v", "ffv1", "-threads", "2", "-f", "matroska", sample)
+
+        def score(filter_graph):
+            output = ffmpeg("-ss", "0.833", "-t", "3", "-i", source, "-i", sample,
+                            "-filter_complex", filter_graph, "-an", "-f", "null", "-")
+            return float(re.search(r"All:([0-9.]+)", output)[1])
+
+        self.assertAlmostEqual(score(graph), 1.0, places=6)
+        old_graph = graph.replace("ssim=ts_sync_mode=nearest", "ssim").replace("settb=AVTB,", "")
+        self.assertLess(score(old_graph), 0.9)
+        # Nearest matching must not forgive a real frame-content shift.
+        shifted = graph.replace("[1:v:0]", "[1:v:0]trim=start_frame=1,")
+        self.assertLess(score(shifted), 0.9)
 
     def test_failed_ffmpeg_or_missing_score_cannot_reuse_old_score(self):
         for changes in ({"ENCODE_FAIL": 1}, {"OMIT_SCORE": 1}):
