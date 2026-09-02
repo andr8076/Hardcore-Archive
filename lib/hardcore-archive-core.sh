@@ -6440,16 +6440,61 @@ add_video_results_to_archive() {
 
 
 # HARDCORE_NESTED_CHILD_DIAGNOSTICS_V1
+choose_nested_work_root() {
+    # Nested work can hold an extraction, staged media, and a child archive at
+    # once. The ordinary work-root probe only reserves a small staging minimum.
+    # Compare free space again here, after the parent media work has finished.
+    local candidate free fs probe best_free=-1
+    local -a candidates=("$WORK_ROOT")
+    NESTED_WORK_ROOT=""
+    [[ -n $WORK_DIR_OVERRIDE ]] || candidates+=("$ARCHIVE_PARENT/.hardcore-archive-work")
+    for candidate in "${candidates[@]}"; do
+        candidate=$(realpath -m -- "$candidate")
+        if [[ $candidate == "$SOURCE" || $candidate == "$SOURCE/"* || $SOURCE == "$candidate/"* ]]; then
+            continue
+        fi
+        (umask 077; mkdir -p -- "$candidate") 2>/dev/null || continue
+        fs=$(filesystem_type "$candidate")
+        case $fs in
+            ext2|ext3|ext4|btrfs|xfs|f2fs|zfs|tmpfs|overlay|reiserfs|jfs|apfs|hfs|hfsplus) ;;
+            *) [[ -n $WORK_DIR_OVERRIDE ]] || continue ;;
+        esac
+        free=$(df -PB1 -- "$candidate" 2>/dev/null | awk 'NR==2 {print $4}') || continue
+        [[ $free =~ ^[0-9]+$ ]] || continue
+        (( free > best_free )) || continue
+        # Test actual writability, including ACLs, before selecting the path.
+        probe=$(mktemp -d -p "$candidate" .nested-probe.XXXXXX) 2>/dev/null || continue
+        rmdir -- "$probe"
+        NESTED_WORK_ROOT=$candidate
+        best_free=$free
+    done
+    [[ -n $NESTED_WORK_ROOT ]] || die "No suitable nested working directory is writable. Use --work-dir PATH."
+    printf 'Nested working directory: %s | free %s\n' "$NESTED_WORK_ROOT" "$(human_bytes "$best_free")"
+}
+
+nested_child_failure_reason() {
+    local rc=$1 child_log=$2
+    if (( rc == 1 )) && grep -Eq '^Error: (The shared output/work filesystem needs|The destination needs|The working filesystem needs|Insufficient destination space\.|No suitable working directory has enough free space\.)' "$child_log"; then
+        printf 'insufficient-child-work-space'
+    else
+        printf 'recursive-archive-failed-rc-%s' "$rc"
+    fi
+}
+
 prepare_and_add_nested_archives() {
     (( NESTED_COUNT > 0 )) || return 0
     printf '\nProcessing %s nested archive(s) through bounded recursive content-aware repacking...\n' "$NESTED_COUNT"
-    NESTED_STAGE_PARENT=$(mktemp -d -p "$WORK_ROOT" nested-archives.XXXXXX)
+    choose_nested_work_root
+    NESTED_STAGE_PARENT=$(mktemp -d -p "$NESTED_WORK_ROOT" nested-archives.XXXXXX)
     : > "$NESTED_RESULT_MANIFEST"; : > "$NESTED_REPACKED_LIST"; : > "$NESTED_FALLBACK_LIST"
     local relative input extracted child_archive normalized output_rel full_output original_size output_size candidate_size depth rc reason child_log
     local expanded files encrypted free max_expanded candidate_display
     local -a inherited=()
     depth=${HARDCORE_ARCHIVE_NESTED_DEPTH:-0}
     inherited+=(--force --yes --no-report --allow-sleep --nested-max-depth "$NESTED_MAX_DEPTH")
+    # A sibling of extract.XXXXXX cannot overlap the child source. Keep child
+    # staging on the selected filesystem instead of reselecting the home cache.
+    inherited+=(--work-dir "$NESTED_STAGE_PARENT/child-work")
     $VIDEO_TRANSCODE || inherited+=(--no-video-transcode)
     inherited+=(--video-codec "$VIDEO_CODEC" --video-mode "$VIDEO_MODE" --quality-check "$QUALITY_CHECK" --video-min-vmaf "$VIDEO_MIN_VMAF")
     [[ -n $VIDEO_ENCODER ]] && inherited+=(--video-encoder "$VIDEO_ENCODER")
@@ -6533,7 +6578,7 @@ prepare_and_add_nested_archives() {
             93) reason='child-extraction-failed' ;;
             94) reason='candidate-build-failed' ;;
             95) reason='candidate-integrity-failed' ;;
-            *)  reason="recursive-archive-failed-rc-${rc}" ;;
+            *)  reason=$(nested_child_failure_reason "$rc" "$child_log") ;;
         esac
         if (( rc == 0 && candidate_size < original_size )); then
             output_size=$candidate_size
