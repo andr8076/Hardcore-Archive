@@ -2197,6 +2197,39 @@ CAL_CACHE_FILE=''
 
 # Cache entries are hints, never evidence that a different file meets VMAF.
 # Version this key when sampling, VMAF normalization or encoder policy changes.
+calibration_cache_profile() {
+    # Camera average rates vary with clip duration (e.g. 59.9386 vs 60.0053).
+    # Group nearby nominal rates, keeping average and declared rates separate
+    # and retaining every other profile field. Actual encode timing is untouched.
+    python3 - "$1" <<'PYCALPROFILE'
+from fractions import Fraction
+import re
+import sys
+
+fields = []
+try:
+    for field in sys.argv[1].split("|"):
+        name, separator, value = field.partition("=")
+        if name in ("avg_frame_rate", "r_frame_rate"):
+            if not separator or not re.fullmatch(r"[0-9]{1,12}(?:/[0-9]{1,12})?", value):
+                raise ValueError("invalid frame rate")
+            rate = Fraction(value)
+            if not 0 < rate <= 1000:
+                raise ValueError("invalid frame rate")
+            nominal = (2 * rate.numerator + rate.denominator) // (2 * rate.denominator)
+            if nominal and abs(rate - nominal) <= Fraction(nominal, 100):
+                value = f"nominal-{nominal}"
+            else:
+                value = f"exact-{rate}"
+            field = f"{name}={value}"
+        fields.append(field)
+except (ValueError, ZeroDivisionError):
+    # Bad probe data disables reuse, not the current file's full calibration.
+    sys.exit(1)
+print("|".join(fields))
+PYCALPROFILE
+}
+
 calibration_cache_prepare() {
     local codec=$1 encoder=$2 directory profile ffmpeg_build key
     local CAL_FILTER_CHAIN=''
@@ -2208,10 +2241,11 @@ calibration_cache_prepare() {
         stream=codec_name,profile,width,height,pix_fmt,bits_per_raw_sample,avg_frame_rate,r_frame_rate,field_order,sample_aspect_ratio,color_range,color_space,color_transfer,color_primaries \
         -of compact=p=0:nk=0 "$input" 2>/dev/null) || return 0
     [[ -n $profile ]] || return 0
+    profile=$(calibration_cache_profile "$profile") || return 0
     ffmpeg_build=$(ffmpeg -version 2>/dev/null) || return 0
     [[ -n $ffmpeg_build ]] || return 0
     calibration_build_filter_chain "$encoder"
-    key=$(printf '%s\0' 'calibration-v2-nearest-timestamps-three-3s-center-validation' \
+    key=$(printf '%s\0' 'calibration-v3-nominal-fps-nearest-timestamps-center-validation' \
         "$codec" "$encoder" "${HARDCORE_ARCHIVE_VAAPI_DEVICE:-}" \
         "$profile" "$ffmpeg_build" "$CAL_FILTER_CHAIN" \
         "$quality_vmaf_threshold" | sha256sum | awk '{print $1}') || return 0

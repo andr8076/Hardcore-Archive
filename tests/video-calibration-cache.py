@@ -200,6 +200,52 @@ printf 'RESULT:%s:%s:%s\n' "$rc" "$CAL_BEST_QUALITY" "$CAL_REASON"
                 self.assertGreater(len(encodes), 1)
         self.assertEqual(len(list(self.cache.iterdir())), 7)
 
+    def test_camera_rate_jitter_reuses_cache_and_still_rejects_harder_video(self):
+        prefix = "codec_name=h264|profile=High|width=3840|height=2160|pix_fmt=yuvj420p|"
+        def profile(rate):
+            return prefix + f"avg_frame_rate={rate}|r_frame_rate=60000/1001"
+        output, encodes, _ = self.run_calibration(PROFILE=profile("170775/2846"))
+        self.assertIn("RESULT:0:18:candidate-valid", output)
+        self.assertEqual(len(encodes), 18)
+        for rate in ("762000/12713", "39575/661", "1176600/19669", "60/1"):
+            with self.subTest(rate=rate):
+                output, encodes, _ = self.run_calibration(PROFILE=profile(rate))
+                self.assertIn("RESULT:0:18:cache-validated", output)
+                self.assertEqual(len(encodes), 1)
+        self.assertEqual(len(list(self.cache.iterdir())), 1)
+        output, encodes, _ = self.run_calibration(PROFILE=profile("164775/2746"), CURVE="hard")
+        self.assertIn("Cached setting did not pass", output)
+        self.assertIn("RESULT:0:13:candidate-valid", output)
+        self.assertGreater(len(encodes), 1)
+
+    def test_nominal_rate_groups_keep_distinct_rates_and_profiles_apart(self):
+        base = "codec_name=h264|width=3840|height=2160|pix_fmt=yuv420p|color_range=tv|"
+        seed = base + "avg_frame_rate=60/1|r_frame_rate=60/1"
+        self.run_calibration(PROFILE=seed)
+        for profile in (base + "avg_frame_rate=30/1|r_frame_rate=30/1",
+                        base + "avg_frame_rate=50/1|r_frame_rate=50/1",
+                        base + "avg_frame_rate=60/1|r_frame_rate=120/1",
+                        seed.replace("height=2160", "height=1080"),
+                        seed.replace("yuv420p", "yuv420p10le"),
+                        seed.replace("color_range=tv", "color_range=pc")):
+            with self.subTest(profile=profile):
+                output, encodes, _ = self.run_calibration(PROFILE=profile)
+                self.assertIn("RESULT:0:18:candidate-valid", output)
+                self.assertEqual(len(encodes), 18)
+        # An unusual rate more than 1% from a whole number stays exact.
+        self.run_calibration(PROFILE=base + "avg_frame_rate=24/1|r_frame_rate=24/1")
+        output, encodes, _ = self.run_calibration(PROFILE=base + "avg_frame_rate=122/5|r_frame_rate=24/1")
+        self.assertIn("RESULT:0:18:candidate-valid", output)
+        self.assertEqual(len(encodes), 18)
+
+    def test_invalid_rate_disables_cache_without_skipping_calibration(self):
+        for rate in ("0/0", "0/1", "-1/1", "nan", "6000/1", "$(touch injected)"):
+            with self.subTest(rate=rate):
+                output, encodes, _ = self.run_calibration(PROFILE=f"avg_frame_rate={rate}")
+                self.assertIn("RESULT:0:18:candidate-valid", output)
+                self.assertEqual(len(encodes), 18)
+        self.assertFalse(self.cache.exists())
+
     def test_malformed_expired_future_and_out_of_range_entries_are_misses(self):
         entry = self.seed()
         now = int(time.time())
