@@ -166,6 +166,8 @@ Video transcoding is hardware-only. CPU encoders are never accepted as dependenc
 
 `VIDEO_CODEC=auto` is the default. When both working AV1 and HEVC hardware encoders are available, Hardcore Archive checks them against the same VMAF floor and minimum-savings target for each video, then uses the candidate predicted to be smaller. `--video-codec av1` and `--video-codec hevc` remain explicit overrides.
 
+Automatic discovery uses real encode probes, not GPU-model rules or FFmpeg's encoder list alone. If AV1 is exposed by FFmpeg but fails on the installed hardware while HEVC works, only HEVC participates; the reverse also works. Excluded candidates and probe errors remain visible in diagnostics. No usable hardware candidate, missing VMAF, or a failed explicitly requested encoder still stops preflight rather than silently bypassing the quality or hardware-encoding requirements.
+
 ### GPU decoding and filtering
 
 `VIDEO_ACCELERATION=auto` enables preprocessing acceleration alongside the existing hardware encoder:

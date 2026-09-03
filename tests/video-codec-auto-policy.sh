@@ -71,4 +71,76 @@ check_video_capability
 [[ $HARDWARE_VIDEO_ENCODER == hevc_vaapi ]]
 (( ${#FAIL_TYPES[@]} == 0 ))
 
+# FFmpeg can expose AV1 NVENC even when the installed GPU cannot encode AV1.
+# A failed automatic candidate must not make a working alternative fatal.
+reset_auto_doctor() {
+    FAIL_TYPES=(); FAIL_CAPS=(); FAIL_DETAILS=(); FAIL_REPAIR_KEYS=(); FAIL_REPAIR_CMDS=()
+    READY_LINES=(); INFO_LINES=(); REPAIR_KEY_SEEN=()
+    EFFECTIVE_VIDEO_CODEC=auto
+    QUALITY_CHECK_EFFECTIVE=auto
+    REQUESTED_VIDEO_ENCODER=''
+}
+select_hardware_encoder() { printf '%s_nvenc' "$1"; }
+encoder_available() { return 0; }
+probe_hardware_encoder() {
+    if [[ $1 == "$BROKEN_CODEC" || $BROKEN_CODEC == both ]]; then
+        VIDEO_PROBE_ERROR="$1 is not supported by this device"
+        return 1
+    fi
+    VIDEO_PROBE_ERROR=''
+    return 0
+}
+for BROKEN_CODEC in av1 hevc; do
+    reset_auto_doctor
+    check_video_capability
+    (( ${#FAIL_TYPES[@]} == 0 ))
+    if [[ $BROKEN_CODEC == av1 ]]; then
+        [[ -z $HARDWARE_AV1_ENCODER && $HARDWARE_HEVC_ENCODER == hevc_nvenc ]]
+        [[ $HARDWARE_VIDEO_PRIMARY_CODEC == hevc && $HARDWARE_VIDEO_ENCODER == hevc_nvenc ]]
+    else
+        [[ -z $HARDWARE_HEVC_ENCODER && $HARDWARE_AV1_ENCODER == av1_nvenc ]]
+        [[ $HARDWARE_VIDEO_PRIMARY_CODEC == av1 && $HARDWARE_VIDEO_ENCODER == av1_nvenc ]]
+    fi
+    [[ ${INFO_LINES[*]} == *'excluded after runtime probe'* ]]
+    [[ ${INFO_LINES[*]} == *'not supported by this device'* ]]
+done
+
+# No stale successful candidate may survive a later all-failed probe.
+reset_auto_doctor
+BROKEN_CODEC=both
+check_video_capability
+(( ${#FAIL_TYPES[@]} == 1 ))
+[[ ${FAIL_TYPES[0]} == BROKEN && ${FAIL_DETAILS[0]} == *av1_nvenc* && ${FAIL_DETAILS[0]} == *hevc_nvenc* ]]
+[[ -z $HARDWARE_VIDEO_ENCODER && -z $HARDWARE_VIDEO_PRIMARY_CODEC ]]
+[[ -z $HARDWARE_AV1_ENCODER && -z $HARDWARE_HEVC_ENCODER ]]
+
+reset_auto_doctor
+select_hardware_encoder() { return 1; }
+check_video_capability
+(( ${#FAIL_TYPES[@]} == 1 ))
+[[ ${FAIL_TYPES[0]} == UNSUPPORTED ]]
+
+# Missing VMAF and quality-off are not opportunities to skip quality checks.
+select_hardware_encoder() { printf '%s_nvenc' "$1"; }
+BROKEN_CODEC=none
+reset_auto_doctor
+filter_available() { return 1; }
+check_video_capability
+(( ${#FAIL_TYPES[@]} == 1 ))
+[[ ${FAIL_CAPS[0]} == 'FFmpeg libvmaf filter' && -z $HARDWARE_VIDEO_ENCODER ]]
+filter_available() { return 0; }
+reset_auto_doctor
+QUALITY_CHECK_EFFECTIVE=off
+check_video_capability
+(( ${#FAIL_TYPES[@]} == 1 ))
+[[ ${FAIL_CAPS[0]} == 'Automatic video codec comparison' && -z $HARDWARE_VIDEO_ENCODER ]]
+
+# Explicit encoder requests still fail rather than silently choosing another.
+reset_auto_doctor
+REQUESTED_VIDEO_ENCODER=av1_nvenc
+BROKEN_CODEC=av1
+check_video_capability
+(( ${#FAIL_TYPES[@]} == 1 ))
+[[ ${FAIL_TYPES[0]} == BROKEN && -z $HARDWARE_VIDEO_ENCODER ]]
+
 printf 'Automatic AV1/HEVC policy tests passed.\n'

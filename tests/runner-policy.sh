@@ -154,14 +154,23 @@ assert_has "$out" 'ARG=av1_vaapi'
 assert_has "$out" 'ARG=--video-parallel'
 assert_contains "$out" 'Hardware video policy: AUTO; AV1=av1_vaapi; HEVC=hevc_vaapi; primary=AV1 via av1_vaapi'
 
-# Auto mode fails closed when an advertised candidate is broken; explicitly
-# requesting AV1 retains the one allowed compatibility fallback to working HEVC.
+# Automatic discovery excludes an unusable AV1 candidate and uses working HEVC
+# without a user-supplied codec setting. The probe reason remains diagnostic.
+out=$(FAKE_AV1_INCOMPAT=1 run_frontend --video-transcode "$TMP/source" 2>&1)
+assert_contains "$out" 'Automatic video candidate excluded after runtime probe: AV1'
+assert_contains "$out" 'Hardware video policy: AUTO; AV1=unavailable; HEVC=hevc_vaapi; primary=HEVC via hevc_vaapi'
+assert_has "$out" 'ARG=hevc'
+assert_has "$out" 'ARG=hevc_vaapi'
+assert_has "$out" 'DEP_APPROVED=1'
+
+# If neither hardware candidate works, automatic mode still blocks creation.
 set +e
-out=$(FAKE_AV1_INCOMPAT=1 run_frontend --video-transcode "$TMP/source" 2>&1); rc=$?
+out=$(FAKE_HW_BROKEN=1 run_frontend --video-transcode "$TMP/source" 2>&1); rc=$?
 set -e
-(( rc == 3 )) || { printf 'Broken auto-codec candidate should fail doctor.\n%s\n' "$out" >&2; exit 1; }
-assert_contains "$out" 'BROKEN'
-assert_contains "$out" 'Hardware AV1 encode'
+(( rc == 3 )) || { printf 'All failed auto-codec candidates must fail doctor.\n%s\n' "$out" >&2; exit 1; }
+assert_contains "$out" 'No automatic hardware candidate passed its runtime probe'
+
+# Explicit AV1 codec mode retains its existing HEVC compatibility fallback.
 out=$(FAKE_AV1_INCOMPAT=1 run_frontend --video-transcode --video-codec av1 "$TMP/source" 2>&1)
 assert_has "$out" 'ARG=hevc'
 assert_has "$out" 'ARG=hevc_vaapi'

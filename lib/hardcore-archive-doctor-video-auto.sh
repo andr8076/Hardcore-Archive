@@ -19,6 +19,11 @@ check_video_capability() {
 
     [[ $VIDEO_ENABLED == true && $VIDEO_RELEVANT == true ]] || return 0
     local encoder codec
+    local -a failed_probes=()
+    HARDWARE_AV1_ENCODER=''
+    HARDWARE_HEVC_ENCODER=''
+    HARDWARE_VIDEO_ENCODER=''
+    HARDWARE_VIDEO_PRIMARY_CODEC=''
 
     if ! check_version_command FFmpeg ffmpeg ffmpeg 'Video transcoding requires FFmpeg.' -version; then return 0; fi
     if ! check_version_command FFprobe ffprobe ffmpeg 'Video stream validation requires FFprobe.' -version; then return 0; fi
@@ -68,8 +73,12 @@ check_video_capability() {
                 if [[ $codec == av1 ]]; then HARDWARE_AV1_ENCODER=$encoder; else HARDWARE_HEVC_ENCODER=$encoder; fi
                 add_ready "Video hardware candidate: ${codec^^} via $encoder"
             else
-                add_failure BROKEN "Hardware ${codec^^} encode" \
-                    "FFmpeg advertises $encoder, but the automatic-codec hardware probe failed: ${VIDEO_PROBE_ERROR//$'\n'/ }" ffmpeg-gpu
+                # FFmpeg can expose an encoder the installed GPU cannot use
+                # (for example AV1 NVENC on a HEVC-only GPU). In auto mode this
+                # excludes that candidate, not every working codec. Keep the
+                # actual probe error visible; fail below if no candidate works.
+                failed_probes+=("${codec^^} via $encoder: ${VIDEO_PROBE_ERROR//$'\n'/ }")
+                add_info "Automatic video candidate excluded after runtime probe: ${failed_probes[-1]}"
             fi
         else
             add_info "Automatic video candidate unavailable: ${codec^^} hardware encoder is not exposed on this machine."
@@ -83,8 +92,13 @@ check_video_capability() {
         HARDWARE_VIDEO_PRIMARY_CODEC=hevc
         HARDWARE_VIDEO_ENCODER=$HARDWARE_HEVC_ENCODER
     elif (( ${#FAIL_TYPES[@]} == 0 )); then
-        add_failure UNSUPPORTED 'Hardware AV1/HEVC encoder' \
-            'VIDEO_CODEC=auto is enabled but FFmpeg exposes no supported hardware AV1 or HEVC encoder.' ffmpeg-gpu
+        if (( ${#failed_probes[@]} > 0 )); then
+            add_failure BROKEN 'Hardware AV1/HEVC encoder' \
+                "No automatic hardware candidate passed its runtime probe: ${failed_probes[*]}" ffmpeg-gpu
+        else
+            add_failure UNSUPPORTED 'Hardware AV1/HEVC encoder' \
+                'VIDEO_CODEC=auto is enabled but FFmpeg exposes no supported hardware AV1 or HEVC encoder.' ffmpeg-gpu
+        fi
         return 0
     fi
 
