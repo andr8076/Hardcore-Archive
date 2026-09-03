@@ -5911,10 +5911,6 @@ process_format_preserving_containers() {
         printf '\nColumns: action<TAB>original path<TAB>archived path<TAB>original bytes<TAB>candidate bytes<TAB>archived bytes<TAB>reason\n'
         cat -- "$CONTAINER_RESULT_MANIFEST"
     } > "$CONTAINER_MANIFEST_FILE"
-    ( cd -- "$ARCHIVE_MANIFEST_STAGE" && \
-        run_logged_stage "container manifest storage" "$SEVEN_ZIP_LOG" \
-            "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
-                -spd -scsUTF-8 -bsp1 -y '.hardcore-archive-container-manifest.txt' )
 }
 
 add_copy_lane_to_archive() {
@@ -6297,14 +6293,6 @@ add_image_results_to_archive() {
         )
     fi
     write_image_manifest
-    if [[ -s $IMAGE_MANIFEST_FILE ]]; then
-        (
-            cd -- "$ARCHIVE_MANIFEST_STAGE"
-            run_logged_stage "image manifest storage" "$SEVEN_ZIP_LOG" \
-                "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
-                    -spd -scsUTF-8 -bsp1 -y ".hardcore-archive-image-manifest.txt"
-        )
-    fi
 }
 
 classify_video_stage_results() {
@@ -6426,16 +6414,6 @@ add_video_results_to_archive() {
 
 
     write_video_manifest
-    if $VIDEO_WRITE_MANIFEST && [[ -s $ARCHIVE_MANIFEST_FILE ]]; then
-        (
-            cd -- "$ARCHIVE_MANIFEST_STAGE"
-            run_logged_stage "video manifest storage" "$SEVEN_ZIP_LOG" \
-                "$SEVEN_ZIP" a "$TEMP_ARCHIVE" \
-                    -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
-                    -spd -scsUTF-8 -bsp1 -y \
-                    ".hardcore-archive-video-manifest.txt"
-        )
-    fi
 }
 
 
@@ -6604,7 +6582,6 @@ prepare_and_add_nested_archives() {
     fi
     if [[ -s $NESTED_RESULT_MANIFEST ]]; then
         { printf 'action\toriginal path\tarchived path\toriginal bytes\tcandidate bytes\tarchived bytes\treason\n'; cat "$NESTED_RESULT_MANIFEST"; } > "$NESTED_MANIFEST_FILE"
-        (cd -- "$ARCHIVE_MANIFEST_STAGE" && run_logged_stage "nested-archive manifest storage" "$SEVEN_ZIP_LOG" "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 -spd -scsUTF-8 -bsp1 -y '.hardcore-archive-nested-manifest.txt')
     fi
 }
 
@@ -6824,6 +6801,14 @@ add_safety_manifests_to_archive() {
     build_metadata_bundle
     build_expected_paths_and_hashes
     local -a manifest_items=(.hardcore-archive-metadata)
+    # All lanes have finished writing their manifests. Store them together so
+    # each tiny manifest does not trigger another copy of the existing archive.
+    # Match the expected-path conditions, including --no-video-manifest.
+    $VIDEO_WRITE_MANIFEST && (( VIDEO_COUNT > 0 )) && \
+        manifest_items+=(.hardcore-archive-video-manifest.txt)
+    (( IMAGE_COUNT > 0 )) && manifest_items+=(.hardcore-archive-image-manifest.txt)
+    (( CONTAINER_COUNT > 0 )) && manifest_items+=(.hardcore-archive-container-manifest.txt)
+    (( NESTED_COUNT > 0 )) && manifest_items+=(.hardcore-archive-nested-manifest.txt)
     [[ -s $ARCHIVE_MANIFEST_STAGE/.hardcore-archive-sha256.txt ]] && \
         manifest_items+=(.hardcore-archive-sha256.txt)
     (

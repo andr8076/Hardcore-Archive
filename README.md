@@ -138,6 +138,8 @@ report.docx  → always remains report.docx
 
 If nested repacking cannot beat the original archive, the original is preserved. The report records original size, candidate size, archived size, and the exact rejection/acceptance reason for every nested archive.
 
+Video, image, container, and nested transformation manifests are added together with the safety metadata in one final archive update. This avoids repeatedly copying the existing archive just to add small manifest files. Integrity and completeness verification run after that update.
+
 Nested staging automatically compares the normal working directory with a working directory beside the output archive and uses the suitable location with more free space. An explicit `--work-dir` keeps nested work in that location. Child media staging uses the same selected filesystem. Expansion limits and child capacity checks still apply; a child rejected by a space check is reported as `insufficient-child-work-space`, with details in its child log.
 
 ## Strict source-specific dependency policy
