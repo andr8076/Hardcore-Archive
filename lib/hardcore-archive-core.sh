@@ -2530,41 +2530,103 @@ calibrate_hardware_candidate() {
 }
 
 calibrate_hardware_candidate_accelerated() {
-    local codec=$1 encoder=$2 rc mode compare=false gpu_valid=false
-    local CAL_PIPELINE_HINT=''
-    local -a gpu_result=()
+    local codec=$1 encoder=$2 rc=1 mode start_mode selection kind record range low high label
+    local best='' best_bps=0 all_rejected=true cacheable=true fastest='' fastest_ns=0
+    local CAL_PIPELINE_HINT='' CAL_ENDPOINT_HINT=''
+    local -a modes=() finalists=()
+    local -A results=() qualities=()
     hardcore_video_accel_prepare "$encoder"
-    while :; do
-        mode=$(hardcore_video_accel_mode "$encoder")
-        if calibrate_hardware_candidate_impl "$codec" "$encoder"; then rc=0; else rc=$?; fi
-        if (( rc == 1 || rc == 2 || rc == 3 )) && hardcore_video_accel_demote "$encoder"; then
-            continue
-        fi
-        if [[ $mode == gpu && $apply_scaling == true ]]; then
-            # GPU and software scalers need not produce identical pixels.
-            # Search both boundaries and compare the three-segment estimates.
-            compare=true
-            if (( rc == 0 )); then
-                gpu_valid=true
-                gpu_result=("$CAL_BEST_QUALITY" "$CAL_PREDICTED_SAVINGS" "$CAL_REQUIRED_SAVINGS" "$CAL_REASON" "$CAL_QUALITY_LABEL")
-                CAL_PIPELINE_HINT=$CAL_BEST_QUALITY
+    start_mode=${HARDCORE_VIDEO_START_MODES[$encoder]:-cpu}
+    if [[ $start_mode == cpu ]]; then
+        HARDCORE_VIDEO_PIPELINES[$encoder]=cpu
+        calibrate_hardware_candidate_impl "$codec" "$encoder"
+        return $?
+    fi
+    case "$start_mode" in
+        gpu) modes=(gpu hybrid cpu) ;;
+        hybrid) modes=(hybrid cpu) ;;
+    esac
+    hardcore_video_selection_prepare "$codec" "$encoder" "$start_mode"
+    if selection=$(hardcore_video_selection_read); then
+        IFS=$'\t' read -r kind mode <<< "$selection"
+        if [[ $start_mode == gpu || $mode != gpu ]]; then
+            HARDCORE_VIDEO_PIPELINES[$encoder]=$mode
+            calibration_cache_prepare "$codec" "$encoder"
+            range=$(calibration_quality_range "$encoder") || return 4
+            IFS=' ' read -r low high label <<< "$range"
+            # A routing record alone never certifies a quality boundary.
+            if record=$(calibration_video_cache_read "$low" "$high") && [[ $record == "$kind"$'\t'* ]]; then
+                printf 'Reusing per-video preprocessing decision: %s (%s); validating its quality record.\n' "$mode" "$kind"
+                if calibrate_hardware_candidate_impl "$codec" "$encoder"; then rc=0; else rc=$?; fi
+                if [[ $kind == boundary && $rc == 0 && $CAL_REASON == cache-validated ]] ||
+                   [[ $kind == rejected && $rc == 2 && $CAL_REASON == cached-quality-rejection-confirmed ]]; then
+                    hardcore_video_accel_describe "$encoder"
+                    return "$rc"
+                fi
             fi
-            HARDCORE_VIDEO_PIPELINES[$encoder]=hybrid
+        fi
+        printf 'Preprocessing decision needs fresh comparison; reopening available paths.\n'
+        hardcore_video_selection_forget
+    fi
+
+    for mode in "${modes[@]}"; do
+        HARDCORE_VIDEO_PIPELINES[$encoder]=$mode
+        hardcore_video_accel_describe "$encoder"
+        if [[ $mode == hybrid && $start_mode == gpu && $apply_scaling == true ]]; then
             printf 'Comparing GPU scaling against CPU Lanczos for quality and compression.\n'
-            continue
         fi
-        if [[ $compare == true && $gpu_valid == true ]]; then
-            if (( rc != 0 )) || LC_NUMERIC=C awk -v gpu="${gpu_result[1]}" -v cpu="$CAL_PREDICTED_SAVINGS" 'BEGIN {exit !(gpu>=cpu)}'; then
-                HARDCORE_VIDEO_PIPELINES[$encoder]=gpu
-                CAL_BEST_QUALITY=${gpu_result[0]}; CAL_PREDICTED_SAVINGS=${gpu_result[1]}
-                CAL_REQUIRED_SAVINGS=${gpu_result[2]}; CAL_REASON=${gpu_result[3]}; CAL_QUALITY_LABEL=${gpu_result[4]}
-                printf 'GPU scaling selected: its accepted candidate predicts equal or better compression.\n'
-                return 0
+        if calibrate_hardware_candidate_impl "$codec" "$encoder"; then rc=0; else rc=$?; fi
+        if (( rc == 0 )); then
+            all_rejected=false
+            qualities[$mode]=$CAL_BEST_QUALITY
+            results[$mode]="$CAL_BEST_QUALITY|$CAL_PREDICTED_SAVINGS|$CAL_REQUIRED_SAVINGS|$CAL_REASON|$CAL_QUALITY_LABEL|$CAL_MIN_VMAF|$CAL_AVG_VIDEO_BPS|$CAL_WORST_POSITION|$CAL_RESULT_VIDEO_BPS"
+            if [[ -z $best ]] || (( CAL_RESULT_VIDEO_BPS < best_bps )); then
+                best=$mode; best_bps=$CAL_RESULT_VIDEO_BPS; finalists=("$mode")
+            elif (( CAL_RESULT_VIDEO_BPS == best_bps )); then
+                finalists+=("$mode")
             fi
+            CAL_PIPELINE_HINT=$CAL_BEST_QUALITY
+            CAL_ENDPOINT_HINT=''
+            # No resizing/denoising: preserve the direct GPU path. Comparisons
+            # are needed when software filters introduce a transfer round trip.
+            [[ $mode != gpu || $apply_scaling == true ]] || break
+        else
+            (( rc == 2 )) || all_rejected=false
+            (( rc == 1 )) && cacheable=false
+            CAL_PIPELINE_HINT=''
+            CAL_ENDPOINT_HINT=''
+            # Probe an alternative at the known failing position/endpoint before
+            # spending another binary search on a pipeline-level quality limit.
+            (( rc != 2 )) || CAL_ENDPOINT_HINT=$CAL_WORST_POSITION
+            [[ $mode == cpu ]] || printf 'Preprocessing attempt failed; checking the next compatible path.\n'
         fi
-        [[ $compare != true || $rc != 0 ]] || printf 'CPU filtering selected for its accepted compression result.\n'
-        return "$rc"
     done
+    if [[ -z $best ]]; then
+        [[ $all_rejected != true ]] || hardcore_video_selection_write rejected cpu
+        return "$rc"
+    fi
+
+    if (( ${#finalists[@]} > 1 )); then
+        printf 'Accepted paths predict identical video bitrate; comparing bounded encode speed.\n'
+        for mode in "${finalists[@]}"; do
+            HARDCORE_VIDEO_PIPELINES[$encoder]=$mode
+            if hardcore_video_speed_probe "$codec" "$encoder" "${qualities[$mode]}"; then
+                if [[ -z $fastest ]] || (( HARDCORE_VIDEO_PROBE_NS < fastest_ns )); then
+                    fastest=$mode; fastest_ns=$HARDCORE_VIDEO_PROBE_NS
+                fi
+            else
+                cacheable=false
+                printf 'Speed probe failed for %s; not caching this selection.\n' "$mode"
+            fi
+        done
+        [[ -z $fastest ]] || best=$fastest
+    fi
+    HARDCORE_VIDEO_PIPELINES[$encoder]=$best
+    IFS='|' read -r CAL_BEST_QUALITY CAL_PREDICTED_SAVINGS CAL_REQUIRED_SAVINGS CAL_REASON CAL_QUALITY_LABEL \
+        CAL_MIN_VMAF CAL_AVG_VIDEO_BPS CAL_WORST_POSITION CAL_RESULT_VIDEO_BPS <<< "${results[$best]}"
+    printf 'Selected preprocessing: %s; best accepted compression, speed used only to break equal-bitrate ties.\n' "$best"
+    [[ $cacheable != true ]] || hardcore_video_selection_write boundary "$best"
+    return 0
 }
 
 calibrate_hardware_candidate_impl() {
@@ -2579,6 +2641,7 @@ calibrate_hardware_candidate_impl() {
     CAL_REQUIRED_SAVINGS=''
     CAL_REASON=''
     CAL_QUALITY_LABEL=''
+    CAL_RESULT_VIDEO_BPS=''
 
     calibration_encoder_supported "$encoder" || {
         CAL_REASON='encoder-family-not-calibrated'
@@ -2609,7 +2672,21 @@ calibrate_hardware_candidate_impl() {
         "$encoder" "$quality_label" "$low" "$high" "$quality_vmaf_threshold"
 
     calibration_cache_prepare "$codec" "$encoder"
-    if record=$(calibration_video_cache_read "$low" "$high"); then
+    record=$(calibration_video_cache_read "$low" "$high") || record=''
+    if [[ -z $record && ${CAL_ENDPOINT_HINT:-} =~ ^0\.(10|50|90)$ ]]; then
+        printf 'Another preprocessing path failed quality; testing this path at its highest-quality endpoint first.\n'
+        if ! evaluate_hardware_quality "$codec" "$encoder" "$endpoint" one-shot "$CAL_ENDPOINT_HINT"; then
+            CAL_REASON="sample-probe-failed-at-${endpoint}"
+            return 1
+        fi
+        if ! calibration_score_passes; then
+            CAL_REASON='quality-endpoint-below-floor'
+            calibration_video_cache_write rejected "$endpoint" "$CAL_WORST_POSITION" "$CAL_AVG_VIDEO_BPS"
+            return 2
+        fi
+        printf 'Alternative endpoint passes; searching its compression boundary.\n'
+    fi
+    if [[ -n $record ]]; then
         IFS=$'\t' read -r cache_kind cached_quality cached_position cached_bps <<< "$record"
         printf 'Calibration cache source: video (%s).\n' "$cache_kind"
         printf 'Cached %s %s: validating one 3s segment at the previously worst position %s.\n' \
@@ -2630,6 +2707,7 @@ calibrate_hardware_candidate_impl() {
                     calibration_predict_savings "$cached_bps" "$source_average_bps"
                     if calibration_savings_pass; then
                         CAL_BEST_QUALITY=$cached_quality
+                        CAL_RESULT_VIDEO_BPS=$cached_bps
                         CAL_REASON='cache-validated'
                         printf 'Cached setting passed: VMAF %s >= %s; predicted saving %s%% (required %s%%).\n' \
                             "$CAL_MIN_VMAF" "$quality_vmaf_threshold" "$CAL_PREDICTED_SAVINGS" "$required_savings"
@@ -2726,6 +2804,7 @@ calibrate_hardware_candidate_impl() {
 
     calibration_predict_savings "$best_video_bps" "$source_average_bps"
     CAL_BEST_QUALITY=$best_quality
+    CAL_RESULT_VIDEO_BPS=$best_video_bps
     printf '%s quality-valid boundary: %s %s; predicted saving %s%%; required %s%%.\n' \
         "${codec^^}" "$quality_label" "$best_quality" "$CAL_PREDICTED_SAVINGS" "$required_savings"
 
@@ -6129,7 +6208,7 @@ video_cache_key() {
         "$SCRIPT_VERSION" "$relative" "$stat_value" "$source_hash" "$stream_signature" \
         "$VIDEO_CODEC" "$VIDEO_ENCODER" "$VIDEO_MODE" "$VIDEO_MIN_VMAF" "$VIDEO_MIN_SAVINGS_PERCENT" \
         "$VIDEO_NO_SCALE" "$VIDEO_NO_DENOISE" "$VIDEO_AUDIO_COPY" "$QUALITY_CHECK" "$ffmpeg_version" \
-        "video-preprocessing-v1" "${HARDCORE_ARCHIVE_VIDEO_ACCELERATION:-auto}" \
+        "video-preprocessing-v2-selection" "${HARDCORE_ARCHIVE_VIDEO_ACCELERATION:-auto}" \
         "${HARDCORE_ARCHIVE_VIDEO_GPU_FILTERS:-auto}" "${HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE:-0}" | \
         sha256sum | awk '{print $1}'
 }

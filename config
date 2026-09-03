@@ -57,7 +57,8 @@ VIDEO_QUALITY_THREADS=auto
 # Set cpu to use software decoding/filtering with the existing hardware encoder.
 VIDEO_ACCELERATION=auto
 # Compare GPU scaling with CPU Lanczos; retain the better accepted compression.
-# Set off to retain CPU filters while still trying hardware decoding.
+# Equal-compression paths use a bounded speed probe; exact-video decisions are cached.
+# Set off to retain CPU filters while comparing hardware and software decoding.
 VIDEO_GPU_FILTERS=auto
 # NVIDIA CUDA/NVENC device index; ignored by AMD VAAPI encoding.
 VIDEO_CUDA_DEVICE=0

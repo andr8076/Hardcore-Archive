@@ -7,6 +7,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +19,7 @@ has_filter() { [[ ${MISSING_FILTERS:-0} != 1 ]]; }
 ffprobe() {
     case "$*" in
         *stream=pix_fmt*) printf '%s\n' "${PIXEL_FORMAT:-yuv420p}" ;;
+        *format=duration*.speed-*) printf '%s\n' "${SPEED_DURATION:-12}" ;;
         *) base_ffprobe "$@" ;;
     esac
 }
@@ -45,6 +47,17 @@ measure_preflight_quality() {
     [[ ${GPU_BAD_QUALITY:-0} != 1 || $LAST_SAMPLE_MODE != gpu ]] || MEASURED_QUALITY_SCORE=74
     return 0
 }
+hardcore_video_speed_probe() {
+    local mode
+    mode=$(hardcore_video_accel_mode "$2")
+    printf '%s\n' "$mode" >> "$TEST_ROOT/speed-probes"
+    [[ ${FAIL_SPEED:-none} != "$mode" && ${FAIL_SPEED:-none} != all ]] || return 1
+    case "$mode" in
+        gpu) HARDCORE_VIDEO_PROBE_NS=${GPU_NS:-3000000000} ;;
+        hybrid) HARDCORE_VIDEO_PROBE_NS=${HYBRID_NS:-1000000000} ;;
+        cpu) HARDCORE_VIDEO_PROBE_NS=${CPU_NS:-2000000000} ;;
+    esac
+}
 '''
 
 
@@ -58,7 +71,7 @@ class AccelerationTests(unittest.TestCase):
         self.functions.write_text(CALIBRATION["FUNCTIONS"])
 
     def run_shell(self, body=None, expected=0, **changes):
-        for name in ("encodes", "measures"):
+        for name in ("encodes", "measures", "speed-probes"):
             (self.root / name).write_text("")
         env = dict(os.environ, TEST_ROOT=str(self.root), HARDCORE_ARCHIVE_VIDEO_ACCELERATION="auto",
                    HARDCORE_ARCHIVE_VIDEO_GPU_FILTERS="auto", HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE="0",
@@ -120,9 +133,11 @@ printf 'FULL:'; printf '%q ' "${command[@]}"; printf '\n'
     def test_gpu_scaler_failure_retries_hardware_decode_with_cpu_filters(self):
         output, commands = self.run_shell(FAIL_MODE="gpu")
         self.assertIn("RESULT:0:18:hybrid", output)
-        self.assertEqual(len(commands), 19)
-        self.assertIn("hwdownload,format=nv12", commands[-1][commands[-1].index("-vf") + 1])
-        self.assertTrue(all("-hwaccel" in c for c in commands))
+        self.assertEqual(len(commands), 25)
+        hybrid = [c for c in commands if "-vf" in c and "hwdownload" in c[c.index("-vf") + 1]]
+        self.assertTrue(hybrid)
+        self.assertIn("hwdownload,format=nv12", hybrid[-1][hybrid[-1].index("-vf") + 1])
+        self.assertNotIn("-hwaccel", commands[-1])
 
     def test_av1_source_selects_hardware_capable_decoder_only_on_gpu_paths(self):
         for encoder in ("hevc_vaapi", "hevc_nvenc"):
@@ -158,7 +173,8 @@ hardcore_video_accel_arguments "$ENCODER"
             with self.subTest(changes=changes):
                 output, commands = self.run_shell(PIXEL_FORMAT="yuv420p10le", SCALING="true", **changes)
                 self.assertIn("RESULT:0:18:hybrid", output)
-                graph = commands[-1][commands[-1].index("-vf") + 1]
+                hybrid = [c for c in commands if "-vf" in c and "hwdownload" in c[c.index("-vf") + 1]]
+                graph = hybrid[-1][hybrid[-1].index("-vf") + 1]
                 self.assertIn("hwdownload,format=p010le", graph)
                 self.assertIn("scale=-2:1080:flags=lanczos", graph)
                 if "DENOISE" in changes:
@@ -172,25 +188,213 @@ hardcore_video_accel_arguments "$ENCODER"
                 output, commands = self.run_shell(SCALING="true", GPU_SIZE_PERCENT=cost)
                 self.assertIn(f"RESULT:0:18:{winner}", output)
                 self.assertIn("Comparing GPU scaling", output)
-                self.assertLessEqual(len(commands), 24)
+                self.assertLessEqual(len(commands), 30)
                 output, commands = self.run_shell(SCALING="true", GPU_SIZE_PERCENT=cost)
                 self.assertIn(f"RESULT:0:18:{winner}", output)
-                self.assertEqual(len(commands), 2)
-                self.assertEqual(output.count("Calibration cache source: video"), 2)
+                self.assertEqual(len(commands), 1)
+                self.assertEqual(output.count("Calibration cache source: video"), 1)
+                self.assertEqual((self.root / "speed-probes").read_text(), "")
 
     def test_gpu_quality_failure_cannot_hide_passing_cpu_filter_candidate(self):
         output, _ = self.run_shell(SCALING="true", GPU_BAD_QUALITY=1, GPU_SIZE_PERCENT=1)
         self.assertIn("RESULT:0:18:hybrid", output)
         output, commands = self.run_shell(SCALING="true", GPU_BAD_QUALITY=1, GPU_SIZE_PERCENT=1)
-        self.assertIn("Calibration cache source: video (rejected)", output)
+        self.assertIn("Reusing per-video preprocessing decision: hybrid", output)
         self.assertIn("RESULT:0:18:hybrid", output)
-        self.assertEqual(len(commands), 2)
+        self.assertEqual(len(commands), 1)
 
     def test_no_usable_measurement_fails_all_paths_without_caching_acceptance(self):
         output, commands = self.run_shell(CURVE="unavailable")
         self.assertIn("RESULT:1::cpu", output)
         self.assertEqual(len(commands), 3)
         self.assertEqual(list((self.root / "cache").iterdir()), [])
+
+    def test_equal_compression_prefers_faster_cpu_or_gpu_decoding(self):
+        for cpu_ns, winner in ((500000000, "cpu"), (2000000000, "hybrid")):
+            (self.root / "source.mov").write_bytes(str(cpu_ns).encode())
+            output, _ = self.run_shell(SCALING="true", GPU_SIZE_PERCENT=200, CPU_NS=cpu_ns)
+            self.assertIn(f"RESULT:0:18:{winner}", output)
+            self.assertEqual((self.root / "speed-probes").read_text().splitlines(), ["hybrid", "cpu"])
+            output, commands = self.run_shell(SCALING="true", GPU_SIZE_PERCENT=200, CPU_NS=cpu_ns)
+            self.assertIn(f"Reusing per-video preprocessing decision: {winner}", output)
+            self.assertEqual(len(commands), 1)
+            self.assertEqual((self.root / "speed-probes").read_text(), "")
+
+    def test_smaller_gpu_candidate_wins_even_if_cpu_is_faster(self):
+        output, _ = self.run_shell(SCALING="true", GPU_SIZE_PERCENT=50, CPU_NS=1)
+        self.assertIn("RESULT:0:18:gpu", output)
+        self.assertEqual((self.root / "speed-probes").read_text(), "")
+
+    def test_all_path_rejections_need_only_one_fresh_check_on_repeat(self):
+        output, commands = self.run_shell(CURVE="flat", SCALING="true")
+        self.assertIn("RESULT:2::cpu", output)
+        self.assertEqual(len(commands), 12)  # ten for first plateau; one per alternative
+        self.assertEqual(output.count("highest-quality endpoint first"), 2)
+        output, commands = self.run_shell(CURVE="flat", SCALING="true")
+        self.assertIn("Reusing per-video preprocessing decision: cpu (rejected)", output)
+        self.assertEqual(len(commands), 1)
+
+    def test_rejection_recovery_reopens_other_preprocessing_paths(self):
+        self.run_shell(CURVE="flat", SCALING="true")
+        output, commands = self.run_shell(SCALING="true", GPU_SIZE_PERCENT=50)
+        self.assertIn("reopening available paths", output)
+        self.assertIn("RESULT:0:18:gpu", output)
+        self.assertGreater(len(commands), 3)
+
+    def test_cached_winner_quality_failure_reopens_comparison(self):
+        self.run_shell(SCALING="true", GPU_SIZE_PERCENT=50)
+        output, commands = self.run_shell(SCALING="true", GPU_SIZE_PERCENT=50, GPU_BAD_QUALITY=1)
+        self.assertIn("reopening available paths", output)
+        self.assertIn("RESULT:0:18:hybrid", output)
+        self.assertGreater(len(commands), 1)
+
+    def test_changed_audio_size_policy_and_source_reopen_selection(self):
+        self.run_shell(SCALING="true", GPU_SIZE_PERCENT=200)
+        output, commands = self.run_shell(SCALING="true", GPU_SIZE_PERCENT=200, AUDIO_BPS=1234)
+        self.assertNotIn("Reusing per-video preprocessing decision", output)
+        self.assertEqual(len(commands), 3)  # reuse existing path boundaries, not routing
+        (self.root / "source.mov").write_bytes(b"different video")
+        output, commands = self.run_shell(SCALING="true", GPU_SIZE_PERCENT=200)
+        self.assertNotIn("Reusing per-video preprocessing decision", output)
+        self.assertGreater(len(commands), 3)
+
+    def test_expired_future_malformed_and_symlink_routing_records_are_misses(self):
+        self.run_shell(SCALING="true", GPU_SIZE_PERCENT=200)
+        path = next((self.root / "cache").glob("selection-*"))
+        now = int(time.time())
+        for bad in (f"v1\tboundary\thybrid\t{now-2592001}\n",
+                    f"v1\tboundary\thybrid\t{now+60}\n",
+                    f"v1\tboundary\tinvalid\t{now}\n",
+                    f"v1\trejected\tgpu\t{now}\n",
+                    f"v1\tboundary\thybrid\t{now}\nextra\n", "x" * 129):
+            path.write_text(bad)
+            output, commands = self.run_shell(SCALING="true", GPU_SIZE_PERCENT=200)
+            self.assertNotIn("Reusing per-video preprocessing decision", output)
+            self.assertEqual(len(commands), 3)
+        outside = self.root / "outside"
+        outside.write_text(path.read_text())
+        original = outside.read_text()
+        path.unlink()
+        path.symlink_to(outside)
+        output, commands = self.run_shell(SCALING="true", GPU_SIZE_PERCENT=200)
+        self.assertNotIn("Reusing per-video preprocessing decision", output)
+        self.assertEqual(len(commands), 3)
+        self.assertTrue(path.is_symlink())
+        self.assertEqual(outside.read_text(), original)
+
+    def test_routing_alone_cannot_replace_missing_quality_records(self):
+        self.run_shell(SCALING="true", GPU_SIZE_PERCENT=200)
+        for path in (self.root / "cache").glob("video-*"):
+            path.unlink()
+        output, commands = self.run_shell(SCALING="true", GPU_SIZE_PERCENT=200)
+        self.assertIn("reopening available paths", output)
+        self.assertGreater(len(commands), 3)
+
+    def test_routing_expiry_is_not_extended_by_one_shot_success(self):
+        self.run_shell(SCALING="true", GPU_SIZE_PERCENT=200)
+        path = next((self.root / "cache").glob("selection-*"))
+        old = f"v1\tboundary\thybrid\t{int(time.time())-100}\n"
+        path.write_text(old)
+        _, commands = self.run_shell(SCALING="true", GPU_SIZE_PERCENT=200)
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(path.read_text(), old)
+
+    def test_forced_cpu_retry_cannot_reload_gpu_winner(self):
+        self.run_shell(SCALING="true", GPU_SIZE_PERCENT=50)
+        self.run_shell(r'''
+hardcore_video_accel_prepare hevc_vaapi
+hardcore_video_accel_force_cpu hevc_vaapi
+calibrate_hardware_candidate hevc hevc_vaapi
+[[ $(hardcore_video_accel_mode hevc_vaapi) == cpu ]]
+''', SCALING="true", GPU_SIZE_PERCENT=50)
+
+    def test_speed_probe_failures_cannot_cache_routing_or_accept_bad_quality(self):
+        output, _ = self.run_shell(SCALING="true", GPU_SIZE_PERCENT=200, FAIL_SPEED="all")
+        self.assertIn("RESULT:0:18:hybrid", output)
+        self.assertEqual(list((self.root / "cache").glob("selection-*")), [])
+        output, _ = self.run_shell(SCALING="true", CURVE="unavailable", CPU_NS=1)
+        self.assertIn("RESULT:1::cpu", output)
+        self.assertEqual((self.root / "speed-probes").read_text(), "")
+
+    def test_disabled_cache_never_reuses_preprocessing_decisions(self):
+        self.run_shell(SCALING="true", GPU_SIZE_PERCENT=200)
+        output, commands = self.run_shell(SCALING="true", GPU_SIZE_PERCENT=200,
+                                          HARDCORE_ARCHIVE_CALIBRATION_CACHE="false")
+        self.assertNotIn("Reusing per-video preprocessing decision", output)
+        self.assertGreater(len(commands), 3)
+
+    def test_actual_speed_probe_is_bounded_uses_selected_path_and_cleans_up(self):
+        # Restore the production probe instead of the deterministic selector timer.
+        setup = "source " + shlex.quote(str(ROOT / "lib/video-acceleration.sh")) + r'''
+hardcore_video_accel_prepare hevc_vaapi
+HARDCORE_VIDEO_PIPELINES[hevc_vaapi]=hybrid
+hardcore_video_speed_probe hevc hevc_vaapi 18
+[[ $HARDCORE_VIDEO_PROBE_NS -gt 0 ]]
+'''
+        _, commands = self.run_shell(setup, SCALING="true")
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0][commands[0].index("-t") + 1], "12.000")
+        self.assertEqual(commands[0][commands[0].index("-ss") + 1], "54.000")
+        self.assertIn("hwdownload", commands[0][commands[0].index("-vf") + 1])
+        self.assertEqual((self.root / "measures").read_text(), "")
+        self.assertFalse(list(self.root.glob(".*.speed-*.mkv")))
+        self.run_shell(setup, SCALING="true", SPEED_DURATION=0, expected=1)
+        self.assertFalse(list(self.root.glob(".*.speed-*.mkv")))
+
+    def test_four_video_mixed_corpus_returns_to_eight_checks_on_repeat(self):
+        paths = []
+        for index in range(4):
+            path = self.root / f"video-{index}.mov"
+            path.write_bytes(f"video {index}".encode())
+            paths.append(path)
+        for repeat in range(2):
+            total = 0
+            for index, path in enumerate(paths):
+                for codec in ("av1", "hevc"):
+                    rejected = index == 3 or (index in (1, 2) and codec == "av1")
+                    output, commands = self.run_shell(r'''
+rc=0
+calibrate_hardware_candidate "$CODEC" "${CODEC}_vaapi" || rc=$?
+printf 'RC:%s\n' "$rc"
+''', CODEC=codec, INPUT_PATH=path, CURVE="flat" if rejected else "normal",
+                        SCALING="true" if index else "false", GPU_SIZE_PERCENT=200, CPU_NS=500000000)
+                    self.assertIn(f"RC:{2 if rejected else 0}", output)
+                    total += len(commands)
+                    if repeat:
+                        self.assertEqual(len(commands), 1)
+                        self.assertEqual((self.root / "speed-probes").read_text(), "")
+            if repeat:
+                self.assertEqual(total, 8)
+
+    def test_nvidia_selection_retains_nvenc_when_cpu_preprocessing_wins(self):
+        args = dict(ENCODER="hevc_nvenc", SCALING="true", GPU_SIZE_PERCENT=200, CPU_NS=1)
+        output, _ = self.run_shell(**args)
+        self.assertIn("RESULT:0:18:cpu", output)
+        output, commands = self.run_shell(**args)
+        self.assertEqual(len(commands), 1)
+        self.assertNotIn("-hwaccel", commands[0])
+        self.assertEqual(commands[0][commands[0].index("-c:v") + 1], "hevc_nvenc")
+
+    def test_selection_keys_include_devices_build_filters_and_raw_profile(self):
+        self.run_shell(SCALING="true", GPU_SIZE_PERCENT=200)
+        for change in ({"TARGET": 93}, {"BUILD": "new-build"},
+                       {"HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE": 2},
+                       {"HARDCORE_ARCHIVE_VAAPI_DEVICE": "/dev/dri/renderD129"},
+                       {"DENOISE": "true"}, {"HARDCORE_ARCHIVE_VIDEO_GPU_FILTERS": "off"},
+                       {"PROFILE": "codec_name=h264|width=1920|height=1080|avg_frame_rate=30/1"}):
+            output, _ = self.run_shell(SCALING="true", GPU_SIZE_PERCENT=200, **change)
+            self.assertNotIn("Reusing per-video preprocessing decision", output)
+
+    def test_endpoint_probe_error_is_not_a_cached_all_path_rejection(self):
+        output, _ = self.run_shell(SCALING="true", CURVE="flat", FAIL_ENDPOINT=1)
+        self.assertIn("RESULT:1::cpu", output)
+        self.assertEqual(list((self.root / "cache").glob("selection-*")), [])
+
+    def test_invalid_old_winner_is_removed_if_new_comparison_has_probe_errors(self):
+        self.run_shell(SCALING="true", GPU_SIZE_PERCENT=50)
+        output, _ = self.run_shell(SCALING="true", GPU_SIZE_PERCENT=50, CURVE="unavailable")
+        self.assertIn("reopening available paths", output)
+        self.assertEqual(list((self.root / "cache").glob("selection-*")), [])
 
     def test_cache_keys_separate_decoding_paths_and_cuda_devices(self):
         output, _ = self.run_shell(r'''

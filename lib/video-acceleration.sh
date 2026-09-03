@@ -4,7 +4,7 @@
 # Export functions so batch/nested helper shells use this checked-in module.
 hardcore_video_accel_init() {
     [[ ${HARDCORE_VIDEO_ACCEL_INITIALIZED:-0} == 1 ]] && return 0
-    declare -gA HARDCORE_VIDEO_PIPELINES=() HARDCORE_VIDEO_DOWNLOAD_FORMATS=()
+    declare -gA HARDCORE_VIDEO_PIPELINES=() HARDCORE_VIDEO_DOWNLOAD_FORMATS=() HARDCORE_VIDEO_START_MODES=()
     HARDCORE_VIDEO_ACCEL_INITIALIZED=1
 }
 
@@ -18,6 +18,7 @@ hardcore_video_accel_prepare() {
     hardcore_video_accel_init
     [[ -z ${HARDCORE_VIDEO_PIPELINES[$encoder]:-} ]] || return 0
     HARDCORE_VIDEO_PIPELINES[$encoder]=cpu
+    HARDCORE_VIDEO_START_MODES[$encoder]=cpu
     [[ ${HARDCORE_ARCHIVE_VIDEO_ACCELERATION:-auto} == auto ]] || return 0
     case "$encoder" in *_vaapi|*_nvenc) ;; *) return 0 ;; esac
     pixel_format=$(ffprobe -v error -select_streams V:0 -show_entries stream=pix_fmt \
@@ -38,6 +39,7 @@ hardcore_video_accel_prepare() {
         esac
     fi
     HARDCORE_VIDEO_PIPELINES[$encoder]=$mode
+    HARDCORE_VIDEO_START_MODES[$encoder]=$mode
     hardcore_video_accel_describe "$encoder"
 }
 
@@ -67,6 +69,7 @@ hardcore_video_accel_force_cpu() {
     local encoder=$1
     [[ $(hardcore_video_accel_mode "$encoder") != cpu ]] || return 1
     HARDCORE_VIDEO_PIPELINES[$encoder]=cpu
+    HARDCORE_VIDEO_START_MODES[$encoder]=cpu
     printf 'Accelerated full-video attempt failed; retrying with CPU preprocessing and fresh calibration.\n'
     hardcore_video_accel_describe "$encoder"
 }
@@ -77,6 +80,90 @@ hardcore_video_accel_signature() {
     mode=$(hardcore_video_accel_mode "$encoder")
     printf 'video-preprocessing-v1:%s:%s:%s' "$mode" \
         "${HARDCORE_VIDEO_DOWNLOAD_FORMATS[$encoder]:-}" "${HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE:-0}"
+}
+
+# Separate from quality records: remembers which already-compared path to
+# revalidate. Source identity, raw profile, encoder/build/device and software
+# filters come from the existing per-video key. Policy changes reopen selection.
+hardcore_video_selection_prepare() {
+    local codec=$1 encoder=$2 start_mode=$3 key saved_mode
+    local CAL_CACHE_FILE='' CAL_FILE_CACHE_FILE=''
+    HARDCORE_VIDEO_SELECTION_FILE=''
+    saved_mode=$(hardcore_video_accel_mode "$encoder")
+    HARDCORE_VIDEO_PIPELINES[$encoder]=cpu
+    calibration_cache_prepare "$codec" "$encoder"
+    HARDCORE_VIDEO_PIPELINES[$encoder]=$saved_mode
+    [[ -n $CAL_FILE_CACHE_FILE ]] || return 0
+    key=$(printf '%s\0' 'preprocessing-selection-v1' "$CAL_FILE_CACHE_FILE" "$start_mode" \
+        "${HARDCORE_ARCHIVE_VIDEO_ACCELERATION:-auto}" "${HARDCORE_ARCHIVE_VIDEO_GPU_FILTERS:-auto}" \
+        "$min_savings_percent" "$estimated_output_audio_bps" "$original_size" "$duration" |
+        sha256sum | awk '{print $1}') || return 0
+    [[ $key =~ ^[a-f0-9]{64}$ ]] || return 0
+    HARDCORE_VIDEO_SELECTION_FILE="${CAL_FILE_CACHE_FILE%/*}/selection-$key"
+}
+
+hardcore_video_selection_read() {
+    local version kind mode timestamp extra size now file=${HARDCORE_VIDEO_SELECTION_FILE:-}
+    [[ -n $file && -f $file && ! -L $file && -O $file ]] || return 1
+    size=$(stat -c '%s' -- "$file" 2>/dev/null) || return 1
+    (( size > 0 && size <= 128 )) || return 1
+    IFS=$'\t' read -r version kind mode timestamp extra < "$file" || return 1
+    [[ $version == v1 && $kind =~ ^(boundary|rejected)$ && $mode =~ ^(gpu|hybrid|cpu)$ &&
+       $timestamp =~ ^[1-9][0-9]{0,10}$ && -z $extra ]] || return 1
+    [[ $kind != rejected || $mode == cpu ]] || return 1
+    [[ $(<"$file") == "$version"$'\t'"$kind"$'\t'"$mode"$'\t'"$timestamp" ]] || return 1
+    now=$(date +%s) || return 1
+    # Do not refresh this timestamp on cache hits: periodically reopen the
+    # alternatives even if the source never changes.
+    (( timestamp <= now && now - timestamp <= 2592000 )) || return 1
+    printf '%s\t%s' "$kind" "$mode"
+}
+
+hardcore_video_selection_write() {
+    local kind=$1 mode=$2 file=${HARDCORE_VIDEO_SELECTION_FILE:-} temporary_cache timestamp
+    [[ -n $file && ! -L $file && -d ${file%/*} && ! -L ${file%/*} && -O ${file%/*} ]] || return 0
+    [[ ! -e $file || ( -f $file && -O $file ) ]] || return 0
+    timestamp=$(date +%s) || return 0
+    temporary_cache=$(mktemp "${file}.XXXXXX" 2>/dev/null) || return 0
+    if ! printf 'v1\t%s\t%s\t%s\n' "$kind" "$mode" "$timestamp" > "$temporary_cache" ||
+       ! mv -fT -- "$temporary_cache" "$file" 2>/dev/null; then
+        rm -f -- "$temporary_cache"
+    fi
+    return 0
+}
+
+hardcore_video_selection_forget() {
+    local file=${HARDCORE_VIDEO_SELECTION_FILE:-}
+    [[ -n $file && -f $file && ! -L $file && -O $file ]] || return 0
+    rm -f -- "$file"
+}
+
+# Only called for independently quality-valid candidates with equal predicted
+# compression. Time one identical, bounded window per finalist, excluding VMAF.
+# This is an encode benchmark, never substitute evidence for a quality check.
+hardcore_video_speed_probe() {
+    local codec=$1 encoder=$2 quality=$3 mode length start file began ended actual rc=0
+    local -a CAL_COMMAND=()
+    HARDCORE_VIDEO_PROBE_NS=''
+    mode=$(hardcore_video_accel_mode "$encoder")
+    length=$(LC_NUMERIC=C awk -v d="$duration" 'BEGIN {if(d>12)d=12; printf "%.3f",d}')
+    start=$(LC_NUMERIC=C awk -v d="$duration" -v l="$length" 'BEGIN {printf "%.3f",(d-l)/2}')
+    file="${output_dir}/.${output_name}.speed-${codec}-${mode}.$$.mkv"
+    preflight_files+=("$file")
+    rm -f -- "$file"
+    calibration_candidate_command "$encoder" "$quality" "$start" "$length" "$file" || return 1
+    began=$(python3 -c 'import time; print(time.monotonic_ns())') || return 1
+    "${CAL_COMMAND[@]}" || rc=$?
+    ended=$(python3 -c 'import time; print(time.monotonic_ns())') || rc=1
+    actual=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$file" 2>/dev/null) || rc=1
+    [[ -s $file && $actual =~ ^[0-9]+([.][0-9]+)?$ ]] || rc=1
+    rm -f -- "$file"
+    (( rc == 0 )) || return 1
+    LC_NUMERIC=C awk -v a="$actual" -v l="$length" 'BEGIN {d=a-l; if(d<0)d=-d; exit !(a>0 && d<=0.5)}' || return 1
+    [[ $began =~ ^[0-9]{1,18}$ && $ended =~ ^[0-9]{1,18}$ ]] && (( ended > began )) || return 1
+    HARDCORE_VIDEO_PROBE_NS=$((ended - began))
+    printf 'Preprocessing speed probe: %s, %ss video, %ss encoding.\n' "$mode" "$length" \
+        "$(LC_NUMERIC=C awk -v ns="$HARDCORE_VIDEO_PROBE_NS" 'BEGIN {printf "%.3f",ns/1000000000}')"
 }
 
 # Device options are global; decoding options must precede the source -i.
@@ -194,4 +281,5 @@ hardcore_video_encode_full() {
 export -f hardcore_video_accel_init hardcore_video_accel_mode hardcore_video_accel_prepare
 export -f hardcore_video_accel_describe hardcore_video_accel_demote hardcore_video_accel_force_cpu
 export -f hardcore_video_accel_signature hardcore_video_accel_arguments hardcore_video_accel_filter
+export -f hardcore_video_selection_prepare hardcore_video_selection_read hardcore_video_selection_write hardcore_video_selection_forget hardcore_video_speed_probe
 export -f hardcore_video_build_full_command hardcore_video_encode_attempt hardcore_video_encode_full
