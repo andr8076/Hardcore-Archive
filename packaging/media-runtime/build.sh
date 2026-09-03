@@ -114,7 +114,6 @@ fi
 
 FFMPEG_BUILD=$($OUT/runtime/bin/ffmpeg -hide_banner -version 2>&1 | head -n1)
 cat > "$OUT/runtime/runtime-manifest.txt" <<EOF_MANIFEST
-hca_media_runtime_revision=$HCA_MEDIA_RUNTIME_REVISION
 ffmpeg_version=$FFMPEG_VERSION
 ffmpeg_source=$FFMPEG_URL
 ffmpeg_build=$FFMPEG_BUILD
