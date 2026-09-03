@@ -7,7 +7,9 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/hardcore-runtime-bootstrap.XXXXXX")
 cleanup() { rm -rf -- "$TMP"; }
 trap cleanup EXIT
 
-TARGET=linux-x86_64
+# shellcheck source=/dev/null
+source "$ROOT/lib/runtime.sh"
+TARGET=$(hardcore_runtime_target)
 TEST_BASH=$BASH
 SOURCE="$TMP/source"
 RELEASE="$TMP/release"
@@ -88,8 +90,6 @@ wait "$second"
     exit 1
 }
 
-# shellcheck source=/dev/null
-source "$ROOT/lib/runtime.sh"
 hardcore_runtime_prepare_video_toolchain
 
 [[ ${HARDCORE_ARCHIVE_VIDEO_RUNTIME_MODE:-} == downloaded ]] || {
