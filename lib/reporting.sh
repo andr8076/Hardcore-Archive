@@ -88,6 +88,11 @@ hardcore_reporting_start() {
     printf 'Run diagnostics:    %s\n' "$HARDCORE_DIAGNOSTIC_DIR"
     printf 'Started:            %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
     printf 'Working directory:  %s\n' "$PWD"
+    printf 'Media runtime:      %s\n' "${HARDCORE_ARCHIVE_MEDIA_RUNTIME_SOURCE:-unselected}"
+    printf 'Media runtime ID:   %s\n' "${HARDCORE_ARCHIVE_MEDIA_RUNTIME_ID:-unselected}"
+    if [[ -n ${HARDCORE_ARCHIVE_MEDIA_RUNTIME_ROOT:-} ]]; then
+        printf 'Media runtime root: %s\n' "$HARDCORE_ARCHIVE_MEDIA_RUNTIME_ROOT"
+    fi
     printf 'Command:'
     printf ' %q' "$0" "$@"
     printf '\n\n'
