@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 # Loader for the strict source-specific capability doctor.
+# The frontend's macOS compatibility path setup may prepend Homebrew after the
+# release runtime was selected. Reassert the selected media bin directory before
+# any capability probe so doctor and create use the same FFmpeg/FFprobe pair.
+if [[ -n ${HARDCORE_ARCHIVE_MEDIA_RUNTIME_BIN_DIR:-} && -d $HARDCORE_ARCHIVE_MEDIA_RUNTIME_BIN_DIR ]]; then
+    PATH="$HARDCORE_ARCHIVE_MEDIA_RUNTIME_BIN_DIR${PATH:+:$PATH}"
+    export PATH
+fi
 DOCTOR_LIB_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 source "$DOCTOR_LIB_DIR/hardcore-archive-doctor-base.sh"
 source "$DOCTOR_LIB_DIR/hardcore-archive-doctor-checks.sh"
