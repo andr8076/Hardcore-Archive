@@ -36,7 +36,7 @@ while (( $# )); do
     esac
 done
 
-for tool in curl tar make cc pkg-config meson ninja python3; do
+for tool in curl tar make cc pkg-config meson ninja python3 xxd; do
     command -v "$tool" >/dev/null 2>&1 || {
         printf 'Error: required build tool is missing: %s\n' "$tool" >&2
         exit 3
