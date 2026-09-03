@@ -18,6 +18,9 @@ jobs:
       - name: Media runtime selection
         shell: bash
         run: bash tests/media-runtime.sh
+      - name: Release package naming
+        shell: bash
+        run: bash tests/package-release-name.sh
       - name: Existing FFmpeg detection regression
         shell: bash
         run: bash tests/ffmpeg-detection.sh
