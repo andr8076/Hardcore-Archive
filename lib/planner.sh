@@ -15,6 +15,7 @@ hardcore_planner_init_runtime_paths() {
     local required
     for required in \
         "$HARDCORE_POLICY_RUNNER" "$HARDCORE_CORE_SOURCE" \
+        "$HARDCORE_ROOT/lib/media-runtime.sh" \
         "$HARDCORE_ROOT/lib/calibration-identity.sh" "$HARDCORE_ROOT/lib/timing.sh" \
         "$HARDCORE_ROOT/lib/video-acceleration.sh" \
         "$HARDCORE_CONTAINER_HELPER" "$HARDCORE_METADATA_HELPER"
