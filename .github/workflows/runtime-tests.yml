@@ -1,0 +1,29 @@
+name: Runtime tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  shell-runtime:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install modern Bash on macOS
+        if: runner.os == 'macOS'
+        run: brew install bash
+      - name: Run runtime and layout tests
+        shell: bash
+        run: |
+          if [[ $RUNNER_OS == macOS ]]; then
+            BASH_BIN="$(brew --prefix)/bin/bash"
+          else
+            BASH_BIN=bash
+          fi
+          "$BASH_BIN" tests/module-layout.sh
+          "$BASH_BIN" tests/bundled-runtime.sh
+          "$BASH_BIN" tests/ffmpeg-detection.sh
