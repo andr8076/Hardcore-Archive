@@ -53,11 +53,6 @@ hardcore_runtime_activate_dir() {
 
     PATH="$dir:$PATH"
     export PATH
-    export HARDCORE_ARCHIVE_FFMPEG="$dir/ffmpeg"
-    export HARDCORE_ARCHIVE_FFPROBE="$dir/ffprobe"
-    export HARDCORE_ARCHIVE_VIDEO_RUNTIME_MODE=$mode
-    export HARDCORE_ARCHIVE_VIDEO_RUNTIME_ID
-    HARDCORE_ARCHIVE_VIDEO_RUNTIME_ID=$(hardcore_runtime_identity "$dir/ffmpeg" "$manifest")
 
     if [[ -d ${dir%/bin}/lib ]]; then
         case $(uname -s 2>/dev/null || true) in
@@ -71,6 +66,12 @@ hardcore_runtime_activate_dir() {
                 ;;
         esac
     fi
+
+    export HARDCORE_ARCHIVE_FFMPEG="$dir/ffmpeg"
+    export HARDCORE_ARCHIVE_FFPROBE="$dir/ffprobe"
+    export HARDCORE_ARCHIVE_VIDEO_RUNTIME_MODE=$mode
+    export HARDCORE_ARCHIVE_VIDEO_RUNTIME_ID
+    HARDCORE_ARCHIVE_VIDEO_RUNTIME_ID=$(hardcore_runtime_identity "$dir/ffmpeg" "$manifest")
     return 0
 }
 
