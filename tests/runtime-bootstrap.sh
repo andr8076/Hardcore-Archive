@@ -8,6 +8,7 @@ cleanup() { rm -rf -- "$TMP"; }
 trap cleanup EXIT
 
 TARGET=linux-x86_64
+TEST_BASH=$BASH
 SOURCE="$TMP/source"
 RELEASE="$TMP/release"
 MOCKBIN="$TMP/mockbin"
@@ -74,8 +75,8 @@ chmod 700 "$TMP/bootstrap-one.sh"
 
 # Two first runs sharing one empty cache must serialize the installation and
 # perform only one archive/checksum download pair.
-"$TMP/bootstrap-one.sh" & first=$!
-"$TMP/bootstrap-one.sh" & second=$!
+"$TEST_BASH" "$TMP/bootstrap-one.sh" & first=$!
+"$TEST_BASH" "$TMP/bootstrap-one.sh" & second=$!
 wait "$first"
 wait "$second"
 [[ $(wc -l < "$HCA_TEST_DOWNLOAD_LOG") == 3 ]] || {

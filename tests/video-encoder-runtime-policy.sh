@@ -5,6 +5,14 @@ IFS=$'\n\t'
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 MENU="$ROOT/lib/hardcore-archive-doctor-encoder-menu.sh"
 RUNTIME="$ROOT/lib/hardcore-archive-doctor-encoder-runtime.sh"
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/hardcore-encoder-runtime.XXXXXX")
+cleanup() { rm -rf -- "$TMP"; }
+trap cleanup EXIT
+mkdir -p "$TMP/bin"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/ffmpeg"
+chmod 700 "$TMP/bin/ffmpeg"
+PATH="$TMP/bin:$PATH"
+export PATH
 
 for required in "$MENU" "$RUNTIME"; do
     [[ -f $required ]] || { printf 'Missing encoder runtime test dependency: %s\n' "$required" >&2; exit 1; }
