@@ -79,11 +79,14 @@ chmod 700 "$TMP/bootstrap-one.sh"
 "$TEST_BASH" "$TMP/bootstrap-one.sh" & second=$!
 wait "$first"
 wait "$second"
-[[ $(wc -l < "$HCA_TEST_DOWNLOAD_LOG") == 3 ]] || {
-    printf 'Concurrent bootstraps downloaded the runtime more than once.\n' >&2
+[[ $(grep -Fxc "$VERSIONED" "$HCA_TEST_DOWNLOAD_LOG") == 1 ]] || {
+    printf 'Concurrent bootstraps downloaded the runtime payload more than once.\n' >&2
     exit 1
 }
-grep -Fqx "$VERSIONED" "$HCA_TEST_DOWNLOAD_LOG"
+[[ $(grep -Fxc "$VERSIONED.sha256" "$HCA_TEST_DOWNLOAD_LOG") == 1 ]] || {
+    printf 'Concurrent bootstraps downloaded the runtime checksum more than once.\n' >&2
+    exit 1
+}
 
 # shellcheck source=/dev/null
 source "$ROOT/lib/runtime.sh"
