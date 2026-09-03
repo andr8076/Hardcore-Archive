@@ -1,0 +1,23 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-policy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Module and shell layout
+        shell: bash
+        run: bash tests/module-layout.sh
+      - name: Media runtime selection
+        shell: bash
+        run: bash tests/media-runtime.sh
+      - name: Existing FFmpeg detection regression
+        shell: bash
+        run: bash tests/ffmpeg-detection.sh
