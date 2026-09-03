@@ -23,6 +23,8 @@ rm -rf -- "$WORK" "$OUT"
 mkdir -p "$WORK/src" "$WORK/prefix" "$OUT/runtime/bin" "$OUT/runtime/lib" "$OUT/runtime/licenses"
 
 printf 'Building libvmaf at %s\n' "$VMAF_COMMIT"
+VMAF_AVX512=false
+case $(uname -m) in x86_64|amd64) VMAF_AVX512=true ;; esac
 git clone --filter=blob:none "$VMAF_GIT_URL" "$WORK/src/vmaf"
 git -C "$WORK/src/vmaf" checkout --detach "$VMAF_COMMIT"
 [[ $(git -C "$WORK/src/vmaf" rev-parse HEAD) == "$VMAF_COMMIT" ]] || { printf 'VMAF pin mismatch.\n' >&2; exit 3; }
@@ -34,10 +36,21 @@ meson setup "$WORK/src/vmaf/libvmaf/build" "$WORK/src/vmaf/libvmaf" \
     --default-library shared \
     -Denable_tests=false \
     -Denable_docs=false \
-    -Denable_avx512=true \
+    -Denable_avx512="$VMAF_AVX512" \
     -Dbuilt_in_models=true
 ninja -C "$WORK/src/vmaf/libvmaf/build" -j "$JOBS"
 ninja -C "$WORK/src/vmaf/libvmaf/build" install
+
+if [[ $(uname -s) == Linux ]]; then
+    printf 'Installing pinned nv-codec-headers at %s\n' "$NV_CODEC_HEADERS_COMMIT"
+    git clone --filter=blob:none "$NV_CODEC_HEADERS_GIT_URL" "$WORK/src/nv-codec-headers"
+    git -C "$WORK/src/nv-codec-headers" checkout --detach "$NV_CODEC_HEADERS_COMMIT"
+    [[ $(git -C "$WORK/src/nv-codec-headers" rev-parse HEAD) == "$NV_CODEC_HEADERS_COMMIT" ]] || {
+        printf 'nv-codec-headers pin mismatch.\n' >&2
+        exit 3
+    }
+    make -C "$WORK/src/nv-codec-headers" PREFIX="$WORK/prefix" install
+fi
 
 printf 'Building FFmpeg %s\n' "$FFMPEG_VERSION"
 curl --fail --location --proto '=https' --tlsv1.2 "$FFMPEG_URL" -o "$WORK/ffmpeg.tar.xz"
@@ -58,10 +71,8 @@ COMMON_FLAGS=(
 case $(uname -s) in
     Linux)
         RPATH='-Wl,-rpath,$ORIGIN/../lib'
-        # These use host GPU/device libraries. Configure only capabilities whose
-        # development files are present on the release builder.
         pkg-config --exists libdrm libva && COMMON_FLAGS+=(--enable-libdrm --enable-vaapi)
-        pkg-config --exists ffnvcodec && COMMON_FLAGS+=(--enable-nvenc)
+        pkg-config --exists ffnvcodec && COMMON_FLAGS+=(--enable-nvenc --enable-cuvid)
         pkg-config --exists vpl && COMMON_FLAGS+=(--enable-libvpl)
         ;;
     Darwin)
@@ -109,6 +120,7 @@ ffmpeg_source=$FFMPEG_URL
 ffmpeg_build=$FFMPEG_BUILD
 vmaf_commit=$VMAF_COMMIT
 vmaf_model_policy=$VMAF_MODEL_POLICY
+nv_codec_headers_commit=${NV_CODEC_HEADERS_COMMIT:-none}
 platform=$(uname -s)
 architecture=$(uname -m)
 EOF_MANIFEST

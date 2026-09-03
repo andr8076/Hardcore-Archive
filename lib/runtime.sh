@@ -29,6 +29,17 @@ hardcore_runtime_hash_text() {
     fi
 }
 
+hardcore_runtime_hash_file() {
+    local file=$1
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum -- "$file" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 -- "$file" | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
 hardcore_runtime_identity() {
     local ffmpeg_bin=$1 manifest=${2:-} material hash
     if [[ -n $manifest && -r $manifest ]]; then
@@ -75,13 +86,112 @@ hardcore_runtime_activate_dir() {
     return 0
 }
 
+hardcore_runtime_revision() {
+    local root=$1 versions value
+    [[ -n ${HARDCORE_ARCHIVE_MEDIA_RUNTIME_REVISION:-} ]] && {
+        printf '%s\n' "$HARDCORE_ARCHIVE_MEDIA_RUNTIME_REVISION"
+        return 0
+    }
+    versions="$root/packaging/media-runtime/versions.env"
+    [[ -r $versions ]] || return 1
+    value=$(awk -F= '$1 == "HCA_MEDIA_RUNTIME_REVISION" {print $2; exit}' "$versions")
+    [[ $value =~ ^[1-9][0-9]*$ ]] || return 1
+    printf '%s\n' "$value"
+}
+
+hardcore_runtime_cache_root() {
+    if [[ $(uname -s 2>/dev/null || true) == Darwin ]]; then
+        printf '%s\n' "${XDG_CACHE_HOME:-$HOME/Library/Caches}/hardcore-archive/media-runtime"
+    else
+        printf '%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}/hardcore-archive/media-runtime"
+    fi
+}
+
+hardcore_runtime_download() {
+    local url=$1 output=$2
+    if command -v curl >/dev/null 2>&1; then
+        curl --fail --location --silent --show-error --retry 2 --connect-timeout 15 \
+            --output "$output" "$url"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --timeout=15 --tries=3 -O "$output" "$url"
+    else
+        return 1
+    fi
+}
+
+hardcore_runtime_auto_enabled() {
+    case ${HARDCORE_ARCHIVE_AUTO_RUNTIME:-1} in
+        0|false|FALSE|no|NO|off|OFF) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+hardcore_runtime_bootstrap() {
+    local root=$1 target=$2 revision cache_root final_root tag asset repo base_url tmp archive checksum expected actual
+    revision=$(hardcore_runtime_revision "$root" 2>/dev/null || true)
+    [[ -n $revision ]] || return 1
+
+    cache_root=$(hardcore_runtime_cache_root)
+    final_root="$cache_root/r$revision/$target/runtime"
+    if [[ -x $final_root/bin/ffmpeg && -x $final_root/bin/ffprobe ]]; then
+        hardcore_runtime_activate_dir "$final_root/bin" downloaded "$final_root/runtime-manifest.txt"
+        return $?
+    fi
+
+    hardcore_runtime_auto_enabled || return 1
+    case $target in
+        linux-x86_64|linux-arm64|macos-x86_64|macos-arm64) ;;
+        *) return 1 ;;
+    esac
+
+    repo=${HARDCORE_ARCHIVE_RUNTIME_REPOSITORY:-andr8076/Hardcore-Archive}
+    tag="media-runtime-r$revision"
+    asset="hardcore-archive-media-runtime-$target.tar.gz"
+    base_url="https://github.com/$repo/releases/download/$tag"
+
+    mkdir -p -- "$cache_root/r$revision/$target" || return 1
+    tmp=$(mktemp -d "$cache_root/r$revision/$target/.install.XXXXXX") || return 1
+    archive="$tmp/$asset"
+    checksum="$archive.sha256"
+
+    printf 'Hardcore Archive: fetching bundled FFmpeg/VMAF runtime for %s...\n' "$target" >&2
+    if ! hardcore_runtime_download "$base_url/$asset" "$archive" || \
+       ! hardcore_runtime_download "$base_url/$asset.sha256" "$checksum"; then
+        HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR="Could not download media runtime $tag for $target."
+        export HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR
+        rm -rf -- "$tmp"
+        return 1
+    fi
+
+    expected=$(awk 'NF {print $1; exit}' "$checksum")
+    actual=$(hardcore_runtime_hash_file "$archive" 2>/dev/null || true)
+    if [[ -z $expected || -z $actual || $expected != "$actual" ]]; then
+        HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR='Downloaded media runtime checksum did not match.'
+        export HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR
+        rm -rf -- "$tmp"
+        return 1
+    fi
+
+    if ! tar -xzf "$archive" -C "$tmp" || \
+       [[ ! -x $tmp/runtime/bin/ffmpeg || ! -x $tmp/runtime/bin/ffprobe ]]; then
+        HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR='Downloaded media runtime could not be extracted or was incomplete.'
+        export HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR
+        rm -rf -- "$tmp"
+        return 1
+    fi
+
+    rm -rf -- "$final_root"
+    mv -- "$tmp/runtime" "$final_root"
+    rm -rf -- "$tmp"
+    hardcore_runtime_activate_dir "$final_root/bin" downloaded "$final_root/runtime-manifest.txt"
+}
+
 hardcore_runtime_prepare_video_toolchain() {
-    local root target packaged_dir target_dir manifest
+    local root target packaged_dir target_dir manifest cache_root revision cached_dir
     root=${HARDCORE_ARCHIVE_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)}
     target=$(hardcore_runtime_target)
 
-    # Explicit escape hatch for developers and distro packages. It is opt-in so
-    # a release never silently changes quality behavior with the host FFmpeg.
+    # Explicit escape hatch for developers and distro packages.
     if [[ ${HARDCORE_ARCHIVE_USE_SYSTEM_FFMPEG:-0} == 1 ]]; then
         command -v ffmpeg >/dev/null 2>&1 || return 0
         export HARDCORE_ARCHIVE_FFMPEG
@@ -94,11 +204,9 @@ hardcore_runtime_prepare_video_toolchain() {
         return 0
     fi
 
-    # Release packages use runtime/bin. The target-specific location is useful
-    # in source checkouts and for multi-platform packaging workspaces.
+    # A packaged release carrying runtime/bin always wins and needs no network.
     packaged_dir="$root/runtime/bin"
     target_dir="$root/runtime/$target/bin"
-
     if [[ -x $packaged_dir/ffmpeg && -x $packaged_dir/ffprobe ]]; then
         manifest="$root/runtime/runtime-manifest.txt"
         hardcore_runtime_activate_dir "$packaged_dir" bundled "$manifest"
@@ -110,8 +218,24 @@ hardcore_runtime_prepare_video_toolchain() {
         return $?
     fi
 
-    # Source checkouts remain usable without a downloaded runtime. Releases are
-    # expected to contain runtime/bin, so this path is mainly for development.
+    # Source checkouts use the pinned prebuilt runtime from the project's
+    # media-runtime release. The download happens once and is cached per target
+    # and runtime revision.
+    revision=$(hardcore_runtime_revision "$root" 2>/dev/null || true)
+    if [[ -n $revision ]]; then
+        cache_root=$(hardcore_runtime_cache_root)
+        cached_dir="$cache_root/r$revision/$target/runtime"
+        if [[ -x $cached_dir/bin/ffmpeg && -x $cached_dir/bin/ffprobe ]]; then
+            hardcore_runtime_activate_dir "$cached_dir/bin" downloaded "$cached_dir/runtime-manifest.txt"
+            return $?
+        fi
+        if hardcore_runtime_bootstrap "$root" "$target"; then
+            return 0
+        fi
+    fi
+
+    # Offline/development fallback. The doctor still fails closed if the host
+    # FFmpeg lacks libvmaf or any hardware capability required by the source.
     export HARDCORE_ARCHIVE_VIDEO_RUNTIME_MODE=system-fallback
     if command -v ffmpeg >/dev/null 2>&1; then
         export HARDCORE_ARCHIVE_FFMPEG
