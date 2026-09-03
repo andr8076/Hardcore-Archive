@@ -12,7 +12,28 @@ permissions:
   contents: write
 
 jobs:
+  prepare-release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure pinned runtime release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          source packaging/media-runtime/versions.env
+          tag="media-runtime-r${HCA_MEDIA_RUNTIME_REVISION}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --target "$GITHUB_SHA" \
+              --title "Hardcore Archive media runtime r${HCA_MEDIA_RUNTIME_REVISION}" \
+              --notes "Pinned FFmpeg ${FFMPEG_VERSION} + VMAF runtime used by Hardcore Archive. Platform assets are uploaded independently after their smoke tests pass." \
+              --prerelease
+          fi
+
   build:
+    needs: prepare-release
     strategy:
       fail-fast: false
       matrix:
@@ -31,11 +52,15 @@ jobs:
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
+        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential curl git meson ninja-build pkg-config nasm yasm \
-            libdrm-dev libva-dev libvpl-dev
+            libdrm-dev libva-dev
+          # oneVPL is optional. Some runner architectures do not publish the
+          # development package; build.sh enables it only when pkg-config finds it.
+          sudo apt-get install -y libvpl-dev || true
 
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
@@ -62,35 +87,18 @@ jobs:
           mkdir -p release-assets
           mv "$asset" "$asset.sha256" release-assets/
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: media-runtime-${{ matrix.target }}
-          path: release-assets/*
-          if-no-files-found: error
-
-  publish:
-    needs: build
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: media-runtime-*
-          path: release-assets
-          merge-multiple: true
-
-      - name: Publish pinned media runtime release
+      - name: Upload platform runtime to pinned release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           source packaging/media-runtime/versions.env
           tag="media-runtime-r${HCA_MEDIA_RUNTIME_REVISION}"
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" \
-              --title "Hardcore Archive media runtime r${HCA_MEDIA_RUNTIME_REVISION}" \
-              --notes "Pinned FFmpeg ${FFMPEG_VERSION} + VMAF runtime used by Hardcore Archive. Generated from main and verified by the runtime smoke test." \
-              --prerelease
-          fi
           gh release upload "$tag" release-assets/* --clobber
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: media-runtime-${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: ignore
