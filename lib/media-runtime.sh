@@ -42,7 +42,7 @@ hardcore_media_runtime_resolve_layout() {
         HARDCORE_MEDIA_RUNTIME_ROOT=$candidate
         HARDCORE_MEDIA_RUNTIME_BIN_DIR="$candidate/bin"
     elif [[ -x $candidate/ffmpeg && -x $candidate/ffprobe ]]; then
-        HARDCORE_MEDIA_RUNTIME_ROOT=$(cd -- "$candidate/.." 2>/dev/null && pwd -P || printf '%s' "$candidate")
+        HARDCORE_MEDIA_RUNTIME_ROOT=$candidate
         HARDCORE_MEDIA_RUNTIME_BIN_DIR=$candidate
     else
         return 1
@@ -86,6 +86,14 @@ hardcore_media_runtime_select() {
     local root=${1:-${HARDCORE_ARCHIVE_ROOT:-$(hardcore_root_dir)}}
     local mode=${HARDCORE_MEDIA_RUNTIME:-auto}
     local key candidate custom=${HARDCORE_FFMPEG_DIR:-} version_line=''
+
+    HARDCORE_MEDIA_RUNTIME_SOURCE=unselected
+    HARDCORE_MEDIA_RUNTIME_ROOT=''
+    HARDCORE_MEDIA_RUNTIME_BIN_DIR=''
+    HARDCORE_MEDIA_RUNTIME_LIB_DIR=''
+    HARDCORE_MEDIA_RUNTIME_MODEL_DIR=''
+    HARDCORE_MEDIA_RUNTIME_ID='unselected'
+    unset HARDCORE_ARCHIVE_VMAF_MODEL_DIR
 
     case $mode in
         auto|bundled|system) ;;
@@ -147,7 +155,9 @@ hardcore_media_runtime_select() {
 
     HARDCORE_ARCHIVE_MEDIA_RUNTIME_SOURCE=$HARDCORE_MEDIA_RUNTIME_SOURCE
     HARDCORE_ARCHIVE_MEDIA_RUNTIME_ROOT=$HARDCORE_MEDIA_RUNTIME_ROOT
+    HARDCORE_ARCHIVE_MEDIA_RUNTIME_BIN_DIR=$HARDCORE_MEDIA_RUNTIME_BIN_DIR
     HARDCORE_ARCHIVE_MEDIA_RUNTIME_ID=$HARDCORE_MEDIA_RUNTIME_ID
-    export HARDCORE_ARCHIVE_MEDIA_RUNTIME_SOURCE HARDCORE_ARCHIVE_MEDIA_RUNTIME_ROOT HARDCORE_ARCHIVE_MEDIA_RUNTIME_ID
+    export HARDCORE_ARCHIVE_MEDIA_RUNTIME_SOURCE HARDCORE_ARCHIVE_MEDIA_RUNTIME_ROOT \
+        HARDCORE_ARCHIVE_MEDIA_RUNTIME_BIN_DIR HARDCORE_ARCHIVE_MEDIA_RUNTIME_ID
     return 0
 }
