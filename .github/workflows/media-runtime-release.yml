@@ -1,0 +1,90 @@
+name: Media runtime release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-15
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl xz-utils pkg-config meson ninja-build nasm yasm python3 \
+            libva-dev libdrm-dev libvpl-dev
+          # NVENC/NVDEC headers are optional at build time. The runtime keeps GPU
+          # drivers host-owned and HCA already rejects unsupported encoders.
+          sudo apt-get install -y libffnvcodec-dev || true
+
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: brew install meson ninja nasm yasm pkg-config
+
+      - name: Syntax and runtime-selection tests
+        shell: bash
+        run: |
+          bash tests/module-layout.sh
+          bash tests/media-runtime.sh
+
+      - name: Build FFmpeg/VMAF runtime
+        shell: bash
+        run: bash packaging/build-media-runtime.sh
+
+      - name: Verify bundled selection
+        shell: bash
+        run: |
+          HARDCORE_MEDIA_RUNTIME=bundled bash tests/media-runtime-release.sh
+
+      - name: Package release
+        id: package
+        shell: bash
+        env:
+          HCA_RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          archive=$(bash packaging/package-release.sh)
+          printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+          printf 'filename=%s\n' "$(basename "$archive")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.filename }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish immutable release artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber=false
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --title "$GITHUB_REF_NAME"
+          fi
