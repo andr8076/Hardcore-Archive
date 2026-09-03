@@ -4,6 +4,12 @@ IFS=$'\n\t'
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 VERSION=${HCA_RELEASE_VERSION:-${GITHUB_REF_NAME:-dev}}
+# PR refs can contain slashes (for example 1/merge). Keep package names a
+# single portable path component regardless of the CI/ref source.
+VERSION=${VERSION//[^A-Za-z0-9._+-]/-}
+VERSION=${VERSION#-}
+VERSION=${VERSION%-}
+[[ -n $VERSION ]] || VERSION=dev
 DEST=${HCA_RELEASE_DEST:-$ROOT/dist}
 
 kernel=$(uname -s 2>/dev/null || printf unknown)
