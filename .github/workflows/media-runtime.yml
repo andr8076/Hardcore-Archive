@@ -11,26 +11,31 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: media-runtime-latest
+  cancel-in-progress: true
+
 jobs:
   prepare-release:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
-      - name: Ensure pinned runtime release exists
+      - name: Reset rolling media runtime release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          source packaging/media-runtime/versions.env
-          tag="media-runtime-r${HCA_MEDIA_RUNTIME_REVISION}"
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" \
-              --target "$GITHUB_SHA" \
-              --title "Hardcore Archive media runtime r${HCA_MEDIA_RUNTIME_REVISION}" \
-              --notes "Pinned FFmpeg ${FFMPEG_VERSION} + VMAF runtime used by Hardcore Archive. Platform assets are uploaded independently after their smoke tests pass." \
-              --prerelease
+          tag=media-runtime-latest
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release delete "$tag" --yes --cleanup-tag
           fi
+          source packaging/media-runtime/versions.env
+          gh release create "$tag" \
+            --target "$GITHUB_SHA" \
+            --title "Hardcore Archive media runtime" \
+            --notes "Latest pinned FFmpeg ${FFMPEG_VERSION} + VMAF runtime used by Hardcore Archive. Platform assets are uploaded independently after their smoke tests pass." \
+            --prerelease
 
   build:
     needs: prepare-release
@@ -58,8 +63,6 @@ jobs:
           sudo apt-get install -y \
             build-essential curl git meson ninja-build pkg-config nasm yasm \
             libdrm-dev libva-dev
-          # oneVPL is optional. Some runner architectures do not publish the
-          # development package; build.sh enables it only when pkg-config finds it.
           sudo apt-get install -y libvpl-dev || true
 
       - name: Install macOS build dependencies
@@ -87,14 +90,12 @@ jobs:
           mkdir -p release-assets
           mv "$asset" "$asset.sha256" release-assets/
 
-      - name: Upload platform runtime to pinned release
+      - name: Upload platform runtime
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          source packaging/media-runtime/versions.env
-          tag="media-runtime-r${HCA_MEDIA_RUNTIME_REVISION}"
-          gh release upload "$tag" release-assets/* --clobber
+          gh release upload media-runtime-latest release-assets/* --clobber
 
       - uses: actions/upload-artifact@v4
         if: always()
