@@ -46,4 +46,13 @@ hardcore_runtime_prepare_video_toolchain
     exit 1
 }
 
+grep -Fq 'tag=media-runtime-latest' "$ROOT/lib/runtime.sh" || {
+    printf 'Runtime bootstrap does not use the rolling media-runtime-latest release.\n' >&2
+    exit 1
+}
+! grep -Fq 'HCA_MEDIA_RUNTIME_REVISION' "$ROOT/lib/runtime.sh" || {
+    printf 'Runtime bootstrap still depends on revision bookkeeping.\n' >&2
+    exit 1
+}
+
 printf 'Bundled media runtime tests passed.\n'
