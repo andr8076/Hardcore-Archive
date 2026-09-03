@@ -6,7 +6,7 @@
 HARDCORE_SCHEDULER_SH_LOADED=1
 
 HARDCORE_LIB_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-for module in common platform reporting inventory verify restore planner doctor images video nested containers visual archive; do
+for module in common platform reporting inventory verify restore planner doctor images video nested containers visual archive runtime; do
     # shellcheck source=/dev/null
     source "$HARDCORE_LIB_DIR/$module.sh"
 done
@@ -22,6 +22,7 @@ hardcore_runtime_main() {
     hardcore_require_bash || return 1
     hardcore_planner_init_runtime_paths || return 1
     hardcore_archive_static_engine_ready || return 1
+    hardcore_runtime_prepare_video_toolchain || return 1
 
     local rc
     if hardcore_planner_direct_policy_mode "$@"; then

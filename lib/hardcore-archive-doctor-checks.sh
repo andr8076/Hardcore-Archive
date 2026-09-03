@@ -44,10 +44,20 @@ check_video_capability() {
     if ! check_version_command FFmpeg ffmpeg ffmpeg 'Video transcoding requires FFmpeg.' -version; then return 0; fi
     if ! check_version_command FFprobe ffprobe ffmpeg 'Video stream validation requires FFprobe.' -version; then return 0; fi
 
+    if [[ ${HARDCORE_ARCHIVE_VIDEO_RUNTIME_MODE:-system-fallback} == bundled ]]; then
+        add_ready "Video runtime: bundled (${HARDCORE_ARCHIVE_VIDEO_RUNTIME_ID:-unknown})"
+    else
+        add_info "Video runtime: ${HARDCORE_ARCHIVE_VIDEO_RUNTIME_MODE:-system-fallback} (${HARDCORE_ARCHIVE_VIDEO_RUNTIME_ID:-unknown}). Release packages normally use the bundled runtime."
+    fi
+
     if $VIDEO_PREFLIGHT_ENABLED && [[ $QUALITY_CHECK_EFFECTIVE != off ]]; then
         if ! filter_available libvmaf; then
             add_failure UNSUPPORTED 'FFmpeg libvmaf filter' 'Video preflight quality validation is enabled, but this FFmpeg build lacks libvmaf. SSIM fallback is forbidden.' ffmpeg-vmaf
-        else add_ready 'Video quality filter: libvmaf'; fi
+        elif ! hardcore_runtime_probe_vmaf; then
+            add_failure BROKEN 'FFmpeg libvmaf runtime' "FFmpeg advertises libvmaf, but a real VMAF comparison failed: ${HARDCORE_ARCHIVE_VMAF_PROBE_ERROR//$'\n'/ }" ffmpeg-vmaf
+        else
+            add_ready 'Video quality filter: libvmaf (runtime probe passed)'
+        fi
     fi
 
     if [[ -n $REQUESTED_VIDEO_ENCODER ]]; then
@@ -141,4 +151,3 @@ check_strict_runtime_capabilities() {
     check_image_capabilities
     check_video_capability
 }
-

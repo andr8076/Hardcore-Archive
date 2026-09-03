@@ -1,0 +1,8 @@
+# Generated release/runtime artifacts
+/runtime/
+/dist/
+/.runtime-build/
+
+# Python/tooling noise
+__pycache__/
+*.pyc
