@@ -3492,7 +3492,8 @@ inspect_existing_archive() {
 }
 
 apply_sparse_manifest() {
-    local root=$1 manifest="$root/.hardcore-archive-metadata/sparse.tsv"
+    local root=$1 manifest
+    manifest="$root/.hardcore-archive-metadata/sparse.tsv"
     [[ -s $manifest ]] || return 0
     command -v python3 >/dev/null 2>&1 || \
         die "Critical dependency disappeared after preflight: python3"
@@ -3553,9 +3554,22 @@ for (rel,logical),holes in entries.items():
 PYSPARSERESTORE
 }
 
+cleanup_restore() {
+    local exit_status=$?
+    if [[ -n ${RESTORE_TEMP:-} && -d $RESTORE_TEMP && ${RESTORE_COMMITTED:-false} != true ]]; then
+        rm -rf --one-file-system -- "$RESTORE_TEMP" 2>/dev/null || true
+    fi
+    if [[ -n ${RESTORE_LOCK_FD:-} ]]; then
+        flock -u "$RESTORE_LOCK_FD" 2>/dev/null || true
+        eval "exec ${RESTORE_LOCK_FD}>&-" 2>/dev/null || true
+    fi
+    [[ -z ${RESTORE_LOCK_FILE:-} ]] || rm -f -- "$RESTORE_LOCK_FILE" 2>/dev/null || true
+    return "$exit_status"
+}
+
 restore_existing_archive() {
     local archive_input=${POSITIONAL[0]} destination_input=${POSITIONAL[1]:-} archive stem destination parent temp hashfile top_count top_name
-    local listed_size free required
+    local listed_size free required lockfile
     [[ -f $archive_input ]] || die "Archive does not exist: $archive_input"
     archive=$(realpath -e -- "$archive_input")
     stem=$(basename -- "$archive")
@@ -3569,35 +3583,50 @@ restore_existing_archive() {
     parent=$(dirname -- "$destination")
     mkdir -p -- "$parent"
 
-    RESTORE_LOCK_FILE="${destination}.restore.lock"
-    exec {RESTORE_LOCK_FD}>"$RESTORE_LOCK_FILE"
+    RESTORE_TEMP=""
+    RESTORE_LOCK_FILE=""
+    RESTORE_COMMITTED=false
+    trap cleanup_restore EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    lockfile="${destination}.restore.lock"
+    # Do not truncate or remove a lock belonging to another restore process.
+    exec {RESTORE_LOCK_FD}>>"$lockfile"
     flock -n "$RESTORE_LOCK_FD" || die "Another restore process is already targeting: $destination"
+    RESTORE_LOCK_FILE=$lockfile
     printf 'PID=%s\nStarted=%s\nArchive=%s\n' "$$" "$(date --iso-8601=seconds)" "$archive" > "$RESTORE_LOCK_FILE"
 
     printf 'Testing archive before restore...\n'
     "$SEVEN_ZIP" t "$archive" -bsp1 || die "Archive integrity testing failed; nothing was restored."
 
-    # Reject path traversal before extraction. 7-Zip listings are treated as data;
-    # no file from the archive is ever executed.
-    if ! "$SEVEN_ZIP" l -slt "$archive" 2>/dev/null | python3 -c '
-import os,sys
+    # -ba omits the archive header (whose Path is the absolute archive filename).
+    # Validate every member, including the first; use this same listing for the
+    # space estimate. A failed/partial listing must never authorize extraction.
+    if ! listed_size=$("$SEVEN_ZIP" l -slt -ba "$archive" | python3 -c '
+import sys
 bad=[]
+size=0
 for line in sys.stdin:
+    if line.startswith("Size = "):
+        value=line[7:].rstrip("\r\n")
+        if not value.isascii() or not value.isdecimal():
+            sys.exit("Invalid archive member size")
+        size+=int(value)
     if not line.startswith("Path = "): continue
     path=line[7:].rstrip("\r\n")
-    if not path: continue
     norm=path.replace("\\","/")
-    if norm.startswith("/") or (len(norm)>=2 and norm[1]==":") or any(p==".." for p in norm.split("/")):
+    if not path or norm.startswith("/") or (len(norm)>=2 and norm[1]==":") or any(p==".." for p in norm.split("/")):
         bad.append(path)
 if bad:
     print("Unsafe archive paths detected:", file=sys.stderr)
     for p in bad[:20]: print("  "+p, file=sys.stderr)
     sys.exit(1)
-'; then
-        die "Restore refused because the archive contains unsafe paths."
+print(size)
+'); then
+        die "Restore refused because the archive listing failed or contains unsafe paths or sizes."
     fi
 
-    listed_size=$("$SEVEN_ZIP" l -slt "$archive" 2>/dev/null | awk -F' = ' '/^Size = [0-9]+$/ {s+=$2} END{printf "%.0f",s+0}')
     free=$(df -PB1 -- "$parent" | awk 'NR==2 {print $4}')
     required=$((listed_size + listed_size / 20 + 256 * MIB))
     (( free >= required )) || die "Insufficient restore space: need approximately $(human_bytes "$required"), but only $(human_bytes "$free") is free."
@@ -4067,6 +4096,18 @@ done
     exit 1
 }
 
+# Read-only archive modes do not encode video. In particular, the public
+# default VIDEO_CODEC=auto need not resolve to a hardware codec for restoration.
+if [[ $COMMAND_MODE == inspect ]]; then
+    dependency_preflight_inspect
+    inspect_existing_archive
+    exit 0
+elif [[ $COMMAND_MODE == restore ]]; then
+    dependency_preflight_restore "${POSITIONAL[0]}"
+    restore_existing_archive
+    exit 0
+fi
+
 case "$EFFORT" in
     practical|extreme|insane) ;;
     *) die "Effort must be practical, extreme, or insane." ;;
@@ -4138,16 +4179,6 @@ fi
 LC_NUMERIC=C awk -v p="$VIDEO_MIN_SAVINGS_PERCENT" 'BEGIN {exit !(p >= 0 && p <= 100)}' ||     die "Video minimum savings must be between 0 and 100."
 [[ $VIDEO_MIN_VMAF =~ ^[0-9]+([.][0-9]+)?$ ]] || die "Video minimum VMAF must be numeric."
 LC_NUMERIC=C awk -v v="$VIDEO_MIN_VMAF" 'BEGIN {exit !(v >= 0 && v <= 100)}' || die "Video minimum VMAF must be between 0 and 100."
-
-if [[ $COMMAND_MODE == inspect ]]; then
-    dependency_preflight_inspect
-    inspect_existing_archive
-    exit 0
-elif [[ $COMMAND_MODE == restore ]]; then
-    dependency_preflight_restore "${POSITIONAL[0]}"
-    restore_existing_archive
-    exit 0
-fi
 
 dependency_preflight_create_critical
 

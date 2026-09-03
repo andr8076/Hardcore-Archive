@@ -326,6 +326,8 @@ bash hardcore-archive.sh --restore "/archives/Important.7z" "/restore/Important"
 
 Restore validates archive paths, extracts into a temporary destination, verifies embedded hashes when available, reconstructs sparse allocation, and reapplies modes, times, ownership where privileged, extended attributes, flags, and ACLs before committing the restored tree. ACL manifests are treated strictly as data: absolute/traversing paths, symlink leaves, malformed blocks, and unsupported entries are rejected before `setfacl` is invoked. If an archive contains extended ACLs and `setfacl` is unavailable, restore fails safely instead of silently dropping them.
 
+Choose a destination that does not already exist. Archive-member validation uses a headerless 7-Zip listing, so an absolute path to the archive itself is allowed while absolute or traversing member paths remain forbidden. A failed listing, integrity check, extraction, or metadata/hash check prevents committing the restored tree; temporary extraction data is cleaned up on failure or a handled interruption. Restore does not repeat video calibration or compression, and does not modify the archive or original source files.
+
 ## Benchmarks
 
 ### Resource-use audit
