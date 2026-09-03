@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+if [[ -n ${HARDCORE_ARCHIVE_MEDIA_RUNTIME_BIN_DIR:-} && -d $HARDCORE_ARCHIVE_MEDIA_RUNTIME_BIN_DIR ]]; then
+    PATH="$HARDCORE_ARCHIVE_MEDIA_RUNTIME_BIN_DIR${PATH:+:$PATH}"
+    export PATH
+fi
+
 # Metadata identity for calibration hints; this is not content verification.
 # Nested entries use the containing archive's identity and a relative path,
 # so random extraction/staging directories do not defeat reuse.
