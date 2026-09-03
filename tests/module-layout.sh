@@ -19,6 +19,8 @@ bash -n "$ROOT/lib/hardcore-archive-core.sh"
 bash -n "$ROOT/packaging/media-runtime/build.sh"
 bash -n "$ROOT/packaging/media-runtime/smoke-test.sh"
 bash -n "$ROOT/tests/bundled-runtime.sh"
+bash -n "$ROOT/tests/runtime-bootstrap.sh"
+bash -n "$ROOT/tests/runtime-build-safety.sh"
 
 # Public/compatibility entrypoints stay intentionally thin.
 (( $(wc -l < "$ROOT/hardcore-archive") < 40 )) || { printf 'hardcore-archive entrypoint grew too large.\n' >&2; exit 1; }

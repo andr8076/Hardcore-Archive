@@ -69,6 +69,7 @@ FAKEBIN="$TMP/bin"
 mkdir -p "$FAKELIB" "$FAKEBIN"
 cp -- "$SCHEDULER" "$FAKELIB/scheduler.sh"
 cp -- "$VERIFY" "$FAKELIB/verify.sh"
+cp -- "$ROOT/lib/runtime.sh" "$FAKELIB/runtime.sh"
 for module in common platform reporting inventory restore planner doctor images video nested containers visual archive; do
     : > "$FAKELIB/$module.sh"
 done

@@ -86,6 +86,17 @@ grep -Fq 'user:12345:r--' "$TMP/acl.capture"
 ! grep -Eq '^# (owner|group|flags):' "$TMP/acl.capture"
 [[ $(cat "$TMP/acl.cwd") == "$RESTORE" ]]
 
+# Metadata that cannot be decoded or applied must fail the restore rather than
+# being counted as successfully restored.
+cp -- "$META/xattrs.txt" "$TMP/xattrs.good"
+printf '{"path":"tree/file.txt","xattrs":{"user.bad":"not-base64!"},"flags":0}\n' > "$META/xattrs.txt"
+if PATH="$FAKEBIN:$PATH" python3 "$HELPER" --root "$RESTORE" --metadata-dir "$META" >"$TMP/bad-xattr.out" 2>&1; then
+    printf 'Malformed xattr metadata was silently accepted.\n' >&2
+    exit 1
+fi
+grep -Fq 'invalid xattr value' "$TMP/bad-xattr.out"
+mv -- "$TMP/xattrs.good" "$META/xattrs.txt"
+
 # Parent traversal and symlinks at either the leaf or any parent component must
 # be rejected before setfacl sees the path.
 printf 'outside\n' > "$TMP/outside"
@@ -120,7 +131,7 @@ if PATH="$FAKEBIN:$PATH" python3 "$HELPER" --root "$RESTORE" --metadata-dir "$ME
     printf 'ACL path through a symlinked parent was accepted.\n' >&2
     exit 1
 fi
-grep -Fq 'ACL path contains a symlink component' "$TMP/parent-symlink.out"
+grep -Fq 'metadata path contains a symlink component' "$TMP/parent-symlink.out"
 
 cat > "$META/acl.txt" <<'EOF_TRAVERSAL'
 # file: ../outside

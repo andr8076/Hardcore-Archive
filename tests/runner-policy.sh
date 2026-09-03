@@ -16,6 +16,7 @@ cp "$DOCTOR_LOADER" "$TMP/app/lib/hardcore-archive-doctor.sh"
 cp "$DOCTOR_BASE" "$TMP/app/lib/hardcore-archive-doctor-base.sh"
 cp "$DOCTOR_CHECKS" "$TMP/app/lib/hardcore-archive-doctor-checks.sh"
 cp "$DOCTOR_REPORT" "$TMP/app/lib/hardcore-archive-doctor-report.sh"
+cp "$(dirname -- "$DOCTOR_LOADER")/runtime.sh" "$TMP/app/lib/runtime.sh"
 for module in \
     hardcore-archive-doctor-video-fix.sh \
     hardcore-archive-doctor-video-auto.sh \
@@ -95,7 +96,9 @@ fi
 if [[ ${FAKE_HW_BROKEN:-0} == 1 ]]; then echo 'device initialization failed' >&2; exit 1; fi
 if [[ ${FAKE_AV1_INCOMPAT:-0} == 1 && " $* " == *" av1_vaapi "* ]]; then echo 'device does not support AV1' >&2; exit 1; fi
 last=${!#}
-if [[ " $* " == *" av1_vaapi "* ]]; then printf 'av1\n' > "$last"; else printf 'hevc\n' > "$last"; fi
+if [[ $last != - ]]; then
+    if [[ " $* " == *" av1_vaapi "* ]]; then printf 'av1\n' > "$last"; else printf 'hevc\n' > "$last"; fi
+fi
 exit 0
 EOF_TOOL
 cat > "$TMP/bin/ffprobe" <<'EOF_TOOL'

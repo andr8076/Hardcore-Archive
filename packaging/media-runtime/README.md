@@ -65,13 +65,13 @@ macos-x86_64
 macos-arm64
 ```
 
-The workflow replaces the contents of the rolling release:
+The workflow publishes through the rolling release:
 
 ```text
 media-runtime-latest
 ```
 
-Each `.tar.gz` has a companion SHA-256 file. Each platform uploads independently after its smoke test passes, so one unsupported/broken platform does not block working platforms.
+Each `.tar.gz` has a companion SHA-256 file. All four builds and smoke tests must pass before publication begins. The workflow uploads immutable, commit-addressed assets first and switches a small per-platform pointer only after the complete set is available, so a failed rebuild leaves the last working runtime selected.
 
 The Linux runtime includes pinned `nv-codec-headers`, so FFmpeg exposes NVENC/CUVID support without requiring those development headers on the user's machine. Actual NVIDIA, VAAPI, QSV, and VideoToolbox drivers/device access remain host responsibilities and are verified at runtime.
 

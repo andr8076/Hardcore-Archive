@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Loader for the strict source-specific capability doctor.
 DOCTOR_LIB_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+if ! declare -F hardcore_runtime_probe_vmaf >/dev/null 2>&1 && \
+   [[ -f $DOCTOR_LIB_DIR/runtime.sh ]]; then
+    source "$DOCTOR_LIB_DIR/runtime.sh"
+fi
 source "$DOCTOR_LIB_DIR/hardcore-archive-doctor-base.sh"
 source "$DOCTOR_LIB_DIR/hardcore-archive-doctor-checks.sh"
 # Compatibility/correctness overrides live separately so the stable doctor

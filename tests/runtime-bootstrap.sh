@@ -12,7 +12,6 @@ SOURCE="$TMP/source"
 RELEASE="$TMP/release"
 MOCKBIN="$TMP/mockbin"
 mkdir -p "$SOURCE/packaging/media-runtime" "$RELEASE/runtime/bin" "$MOCKBIN" "$TMP/home"
-printf 'HCA_MEDIA_RUNTIME_REVISION=99\n' > "$SOURCE/packaging/media-runtime/versions.env"
 
 cat > "$RELEASE/runtime/bin/ffmpeg" <<'EOF_FFMPEG'
 #!/usr/bin/env bash
@@ -32,8 +31,11 @@ printf 'revision=99\n' > "$RELEASE/runtime/runtime-manifest.txt"
     cd "$RELEASE"
     tar -czf "hardcore-archive-media-runtime-$TARGET.tar.gz" runtime
 )
-sha256sum "$RELEASE/hardcore-archive-media-runtime-$TARGET.tar.gz" > \
-    "$RELEASE/hardcore-archive-media-runtime-$TARGET.tar.gz.sha256"
+VERSION_SHA=0123456789abcdef0123456789abcdef01234567
+VERSIONED="hardcore-archive-media-runtime-$TARGET-$VERSION_SHA.tar.gz"
+mv -- "$RELEASE/hardcore-archive-media-runtime-$TARGET.tar.gz" "$RELEASE/$VERSIONED"
+sha256sum "$RELEASE/$VERSIONED" > "$RELEASE/$VERSIONED.sha256"
+printf '%s\n' "$VERSIONED" > "$RELEASE/hardcore-archive-media-runtime-$TARGET.current"
 
 cat > "$MOCKBIN/curl" <<'EOF_CURL'
 #!/usr/bin/env bash
@@ -48,6 +50,8 @@ while (( $# > 0 )); do
     esac
 done
 cp -- "$HCA_TEST_RELEASE/${url##*/}" "$out"
+printf '%s\n' "${url##*/}" >> "$HCA_TEST_DOWNLOAD_LOG"
+sleep 0.2
 EOF_CURL
 chmod +x "$MOCKBIN/curl"
 
@@ -55,8 +59,30 @@ HOME="$TMP/home"
 XDG_CACHE_HOME="$TMP/cache"
 HARDCORE_ARCHIVE_ROOT=$SOURCE
 HARDCORE_ARCHIVE_RUNTIME_REPOSITORY=test/repo
+HARDCORE_ARCHIVE_AUTO_RUNTIME=1
 PATH="$MOCKBIN:/usr/bin:/bin"
-export HOME XDG_CACHE_HOME HARDCORE_ARCHIVE_ROOT HARDCORE_ARCHIVE_RUNTIME_REPOSITORY PATH HCA_TEST_RELEASE="$RELEASE"
+export HOME XDG_CACHE_HOME HARDCORE_ARCHIVE_ROOT HARDCORE_ARCHIVE_RUNTIME_REPOSITORY HARDCORE_ARCHIVE_AUTO_RUNTIME PATH HCA_TEST_RELEASE="$RELEASE"
+export HCA_TEST_DOWNLOAD_LOG="$TMP/downloads.log"
+
+cat > "$TMP/bootstrap-one.sh" <<EOF_BOOTSTRAP
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source "$ROOT/lib/runtime.sh"
+hardcore_runtime_bootstrap "$TARGET"
+EOF_BOOTSTRAP
+chmod 700 "$TMP/bootstrap-one.sh"
+
+# Two first runs sharing one empty cache must serialize the installation and
+# perform only one archive/checksum download pair.
+"$TMP/bootstrap-one.sh" & first=$!
+"$TMP/bootstrap-one.sh" & second=$!
+wait "$first"
+wait "$second"
+[[ $(wc -l < "$HCA_TEST_DOWNLOAD_LOG") == 3 ]] || {
+    printf 'Concurrent bootstraps downloaded the runtime more than once.\n' >&2
+    exit 1
+}
+grep -Fqx "$VERSIONED" "$HCA_TEST_DOWNLOAD_LOG"
 
 # shellcheck source=/dev/null
 source "$ROOT/lib/runtime.sh"
@@ -70,7 +96,7 @@ hardcore_runtime_prepare_video_toolchain
     printf 'Downloaded FFmpeg was not activated.\n' >&2
     exit 1
 }
-[[ -x "$TMP/cache/hardcore-archive/media-runtime/r99/$TARGET/runtime/bin/ffmpeg" ]] || {
+[[ -x "$TMP/cache/hardcore-archive/media-runtime/$TARGET/runtime/bin/ffmpeg" ]] || {
     printf 'Downloaded runtime was not cached.\n' >&2
     exit 1
 }

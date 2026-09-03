@@ -7,19 +7,89 @@ ROOT=$(cd -- "$HERE/../.." && pwd -P)
 # shellcheck source=/dev/null
 source "$HERE/versions.env"
 
-WORK=${HCA_RUNTIME_WORK:-$ROOT/.runtime-build}
-OUT=${HCA_RUNTIME_OUT:-$ROOT/dist/media-runtime}
+DEFAULT_WORK="$ROOT/.runtime-build"
+DEFAULT_OUT="$ROOT/dist/media-runtime"
+WORK=${HCA_RUNTIME_WORK:-$DEFAULT_WORK}
+OUT=${HCA_RUNTIME_OUT:-$DEFAULT_OUT}
 JOBS=${HCA_RUNTIME_JOBS:-}
 if [[ -z $JOBS ]]; then
     if command -v nproc >/dev/null 2>&1; then JOBS=$(nproc)
     else JOBS=$(sysctl -n hw.logicalcpu 2>/dev/null || printf 4); fi
 fi
+[[ $JOBS =~ ^[1-9][0-9]*$ ]] || { printf 'HCA_RUNTIME_JOBS must be a positive integer.\n' >&2; exit 2; }
+
+command -v python3 >/dev/null 2>&1 || { printf 'Missing build dependency: python3\n' >&2; exit 2; }
+canonical_path() {
+    python3 - "$1" <<'PY'
+import os, sys
+print(os.path.realpath(os.path.abspath(sys.argv[1])))
+PY
+}
+
+WORK=$(canonical_path "$WORK")
+OUT=$(canonical_path "$OUT")
+DEFAULT_WORK=$(canonical_path "$DEFAULT_WORK")
+DEFAULT_OUT=$(canonical_path "$DEFAULT_OUT")
+BUILD_HOME=$(canonical_path "${HOME:-/nonexistent}")
+if [[ $DEFAULT_WORK != "$ROOT/.runtime-build" || $DEFAULT_OUT != "$ROOT/dist/media-runtime" ]]; then
+    printf 'Refusing runtime build defaults that resolve outside the repository.\n' >&2
+    exit 2
+fi
+
+validate_build_root() {
+    local path=$1 label=$2 default_path=$3 marker
+    marker="$path/.hardcore-archive-runtime-build-root"
+    case $path in
+        /|"$BUILD_HOME"|"$ROOT")
+            printf 'Refusing unsafe %s directory: %s\n' "$label" "$path" >&2
+            exit 2
+            ;;
+    esac
+    if [[ $ROOT == "$path/"* ]]; then
+        printf 'Refusing %s directory that contains the repository: %s\n' "$label" "$path" >&2
+        exit 2
+    fi
+    if [[ -e $path && ! -d $path ]]; then
+        printf 'Runtime %s path exists but is not a directory: %s\n' "$label" "$path" >&2
+        exit 2
+    fi
+    if [[ -d $path && $path != "$default_path" && ! -f $marker ]] && \
+       [[ -n $(find "$path" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
+        printf 'Refusing to clean unmarked non-empty runtime %s directory: %s\n' "$label" "$path" >&2
+        exit 2
+    fi
+}
+
+validate_build_root "$WORK" work "$DEFAULT_WORK"
+validate_build_root "$OUT" output "$DEFAULT_OUT"
+if [[ $WORK == "$OUT" || $WORK == "$OUT/"* || $OUT == "$WORK/"* ]]; then
+    printf 'Runtime work and output directories must not overlap.\n' >&2
+    exit 2
+fi
+
+prepare_build_root() {
+    local path=$1 default_path=$2 label=$3 marker
+    marker="$path/.hardcore-archive-runtime-build-root"
+    if [[ -e $path && ! -d $path ]]; then
+        printf 'Runtime %s path exists but is not a directory: %s\n' "$label" "$path" >&2
+        exit 2
+    fi
+    if [[ -d $path && $path != "$default_path" && ! -f $marker ]] && \
+       [[ -n $(find "$path" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
+        printf 'Refusing to clean unmarked non-empty runtime %s directory: %s\n' "$label" "$path" >&2
+        exit 2
+    fi
+    rm -rf -- "$path"
+    mkdir -p -- "$path"
+    : > "$marker"
+}
 
 for cmd in git meson ninja pkg-config curl tar make; do
     command -v "$cmd" >/dev/null 2>&1 || { printf 'Missing build dependency: %s\n' "$cmd" >&2; exit 2; }
 done
 
-rm -rf -- "$WORK" "$OUT"
+prepare_build_root "$WORK" "$DEFAULT_WORK" work
+prepare_build_root "$OUT" "$DEFAULT_OUT" output
 mkdir -p "$WORK/src" "$WORK/prefix" "$OUT/runtime/bin" "$OUT/runtime/lib" "$OUT/runtime/licenses"
 
 printf 'Building libvmaf at %s\n' "$VMAF_COMMIT"

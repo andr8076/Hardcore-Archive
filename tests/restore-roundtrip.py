@@ -130,6 +130,17 @@ restore_existing_archive
             hashlib.sha256(self.content).hexdigest() + f"  source/{self.name}\n"
         )
 
+    def rename_source_root(self, name):
+        old_tree = self.tree
+        self.tree = self.payload / name
+        old_tree.rename(self.tree)
+        self.file = self.tree / self.name
+        manifest = self.meta / "files.tsv"
+        manifest.write_text(manifest.read_text().replace("source/", f"{name}/"))
+        self.listing.write_text(
+            f"Path = {name}/{self.name}\nSize = {len(self.content)}\n\n"
+        )
+
     def test_absolute_archive_path_and_metadata_roundtrip(self):
         self.assert_restored(self.run_restore())
         self.assertEqual(self.calls(), ["t", "l", "x"])
@@ -152,6 +163,17 @@ restore_existing_archive
         result = self.run_restore()
         self.assert_restored(result)
         self.assertNotIn("Verifying extracted file hashes", result.stdout)
+
+    def test_legitimate_internal_prefix_source_name_is_restored(self):
+        self.rename_source_root(".hardcore-archive-photos")
+        self.assert_restored(self.run_restore())
+
+    def test_invalid_file_metadata_fails_before_commit(self):
+        manifest = self.meta / "files.tsv"
+        manifest.write_text(manifest.read_text().replace("\t640\t", "\t999\t"))
+        result = self.run_restore()
+        self.assert_failed(result, before_extraction=False)
+        self.assertIn("invalid mode", result.stderr)
 
     def test_corrupt_extracted_content_is_not_committed(self):
         self.add_hashes()
@@ -239,6 +261,14 @@ restore_existing_archive
         )
         self.assert_restored(self.run_restore())
         self.assertEqual((self.destination / "sparse.bin").read_bytes(), content)
+
+    def test_malformed_sparse_metadata_fails_before_commit(self):
+        (self.meta / "sparse.tsv").write_text(
+            "path\tlogical_size\tstart\tlength\nsource/file.bin\tnot-a-size\t0\t1\n"
+        )
+        result = self.run_restore()
+        self.assert_failed(result, before_extraction=False)
+        self.assertIn("invalid sparse metadata", result.stderr)
 
     @unittest.skipUnless(SEVEN_ZIP, "7-Zip is not installed; controlled-backend restore tests still run")
     def test_real_7zip_metadata_and_hash_roundtrip(self):

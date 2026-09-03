@@ -113,8 +113,41 @@ hardcore_runtime_auto_enabled() {
     esac
 }
 
+hardcore_runtime_acquire_install_lock() {
+    local lock_dir=$1 final_root=$2 attempt owner stale
+    for ((attempt=0; attempt<600; attempt++)); do
+        if mkdir -- "$lock_dir" 2>/dev/null; then
+            printf '%s\n' "$$" > "$lock_dir/pid"
+            return 0
+        fi
+        # Another process may have completed while this process was waiting.
+        [[ -x $final_root/bin/ffmpeg && -x $final_root/bin/ffprobe ]] && return 2
+
+        owner=$(cat -- "$lock_dir/pid" 2>/dev/null || true)
+        if [[ $owner =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+            # Rename first so only one contender can remove a stale lock.
+            stale="${lock_dir}.stale.$$.$attempt"
+            if mv -- "$lock_dir" "$stale" 2>/dev/null; then
+                rm -rf -- "$stale"
+                continue
+            fi
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+hardcore_runtime_release_install_lock() {
+    local lock_dir=$1 owner
+    owner=$(cat -- "$lock_dir/pid" 2>/dev/null || true)
+    [[ $owner == "$$" ]] || return 0
+    rm -f -- "$lock_dir/pid"
+    rmdir -- "$lock_dir" 2>/dev/null || true
+}
+
 hardcore_runtime_bootstrap() {
     local target=$1 cache_root final_root tag asset repo base_url tmp archive checksum expected actual
+    local lock_dir lock_status candidate pointer selected
 
     cache_root=$(hardcore_runtime_cache_root)
     final_root="$cache_root/$target/runtime"
@@ -135,7 +168,38 @@ hardcore_runtime_bootstrap() {
     base_url="https://github.com/$repo/releases/download/$tag"
 
     mkdir -p -- "$cache_root/$target" || return 1
-    tmp=$(mktemp -d "$cache_root/$target/.install.XXXXXX") || return 1
+    lock_dir="$cache_root/$target/.install.lock"
+    lock_status=0
+    hardcore_runtime_acquire_install_lock "$lock_dir" "$final_root" || lock_status=$?
+    if (( lock_status == 2 )); then
+        hardcore_runtime_activate_dir "$final_root/bin" downloaded "$final_root/runtime-manifest.txt"
+        return $?
+    elif (( lock_status != 0 )); then
+        HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR="Timed out waiting for another media runtime installation for $target."
+        export HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR
+        return 1
+    fi
+
+    # Recheck under the lock in case it appeared between the fast path and lock.
+    if [[ -x $final_root/bin/ffmpeg && -x $final_root/bin/ffprobe ]]; then
+        hardcore_runtime_release_install_lock "$lock_dir"
+        hardcore_runtime_activate_dir "$final_root/bin" downloaded "$final_root/runtime-manifest.txt"
+        return $?
+    fi
+
+    if ! tmp=$(mktemp -d "$cache_root/$target/.install.XXXXXX"); then
+        hardcore_runtime_release_install_lock "$lock_dir"
+        return 1
+    fi
+    pointer="$tmp/hardcore-archive-media-runtime-$target.current"
+    # New releases publish immutable, versioned assets first and switch this
+    # tiny pointer last. The fixed-name asset remains a compatibility fallback.
+    if hardcore_runtime_download "$base_url/${pointer##*/}" "$pointer"; then
+        selected=$(head -n 1 "$pointer" | tr -d '\r\n')
+        if [[ $selected =~ ^hardcore-archive-media-runtime-${target}-[0-9a-f]{40}\.tar\.gz$ ]]; then
+            asset=$selected
+        fi
+    fi
     archive="$tmp/$asset"
     checksum="$archive.sha256"
 
@@ -145,29 +209,58 @@ hardcore_runtime_bootstrap() {
         HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR="Latest media runtime is not currently available for $target."
         export HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR
         rm -rf -- "$tmp"
+        hardcore_runtime_release_install_lock "$lock_dir"
         return 1
     fi
 
     expected=$(awk 'NF {print $1; exit}' "$checksum")
     actual=$(hardcore_runtime_hash_file "$archive" 2>/dev/null || true)
-    if [[ -z $expected || -z $actual || $expected != "$actual" ]]; then
+    if [[ ! $expected =~ ^[0-9a-fA-F]{64}$ || ! $actual =~ ^[0-9a-fA-F]{64}$ || ${expected,,} != ${actual,,} ]]; then
         HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR='Downloaded media runtime checksum did not match.'
         export HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR
         rm -rf -- "$tmp"
+        hardcore_runtime_release_install_lock "$lock_dir"
         return 1
     fi
 
-    if ! tar -xzf "$archive" -C "$tmp" || \
+    if ! tar -tzf "$archive" | awk '
+        BEGIN { ok=1 }
+        {
+            path=$0
+            sub(/^\.\//, "", path)
+            if (path != "runtime" && path !~ /^runtime\//) ok=0
+            count=split(path, parts, "/")
+            for (i=1; i<=count; i++) if (parts[i] == "..") ok=0
+        }
+        END { exit !ok }
+    ' || ! tar -xzf "$archive" -C "$tmp" || \
        [[ ! -x $tmp/runtime/bin/ffmpeg || ! -x $tmp/runtime/bin/ffprobe ]]; then
         HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR='Downloaded media runtime could not be extracted or was incomplete.'
         export HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR
         rm -rf -- "$tmp"
+        hardcore_runtime_release_install_lock "$lock_dir"
         return 1
     fi
 
+    candidate="$cache_root/$target/.runtime.new.$$"
+    rm -rf -- "$candidate"
+    if ! mv -- "$tmp/runtime" "$candidate"; then
+        HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR='Downloaded media runtime could not be staged atomically.'
+        export HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR
+        rm -rf -- "$tmp" "$candidate"
+        hardcore_runtime_release_install_lock "$lock_dir"
+        return 1
+    fi
     rm -rf -- "$final_root"
-    mv -- "$tmp/runtime" "$final_root"
+    if ! mv -- "$candidate" "$final_root"; then
+        HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR='Downloaded media runtime could not be installed atomically.'
+        export HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR
+        rm -rf -- "$tmp" "$candidate"
+        hardcore_runtime_release_install_lock "$lock_dir"
+        return 1
+    fi
     rm -rf -- "$tmp"
+    hardcore_runtime_release_install_lock "$lock_dir"
     hardcore_runtime_activate_dir "$final_root/bin" downloaded "$final_root/runtime-manifest.txt"
 }
 

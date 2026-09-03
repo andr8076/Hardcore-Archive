@@ -3502,14 +3502,19 @@ import os, shutil, sys, tempfile
 root=os.path.realpath(sys.argv[1]); manifest=sys.argv[2]
 entries={}
 with open(manifest,'r',encoding='utf-8',errors='surrogateescape') as f:
-    for line in f:
+    header=f.readline().rstrip('\n')
+    if header != 'path\tlogical_size\tstart\tlength':
+        raise ValueError('invalid sparse metadata header')
+    for line_number,line in enumerate(f,2):
         line=line.rstrip('\n')
-        if not line or line.startswith('path\t'): continue
+        if not line: continue
         try:
             rel, logical, start, length=line.split('\t',3)
             logical=int(logical); start=int(start); length=int(length)
-        except Exception:
-            continue
+        except Exception as exc:
+            raise ValueError(f'invalid sparse metadata row {line_number}') from exc
+        if logical < 0 or start < 0 or length <= 0 or start + length > logical:
+            raise ValueError(f'invalid sparse range on row {line_number}')
         entries.setdefault((rel,logical),[]).append((start,start+length))
 
 def copy_range(src,dst,start,end):
@@ -3522,7 +3527,7 @@ def copy_range(src,dst,start,end):
 for (rel,logical),holes in entries.items():
     path=os.path.realpath(os.path.join(root,rel))
     if not (path == root or path.startswith(root+os.sep)) or not os.path.isfile(path):
-        continue
+        raise ValueError(f'unsafe or missing sparse metadata path: {rel!r}')
     holes=sorted((max(0,a),min(logical,b)) for a,b in holes if b>a)
     merged=[]
     for a,b in holes:
@@ -3540,17 +3545,11 @@ for (rel,logical),holes in entries.items():
             if pos<logical: copy_range(src,dst,pos,logical)
             dst.flush(); os.fsync(dst.fileno())
         shutil.copystat(path,tmp,follow_symlinks=False)
-        if hasattr(os,'listxattr'):
-            try:
-                for name in os.listxattr(path,follow_symlinks=False):
-                    try: os.setxattr(tmp,name,os.getxattr(path,name,follow_symlinks=False),follow_symlinks=False)
-                    except OSError: pass
-            except OSError: pass
         os.replace(tmp,path)
     except Exception as exc:
         try: os.unlink(tmp)
         except OSError: pass
-        print(f'Warning: could not restore sparse layout for {rel}: {exc}',file=sys.stderr)
+        raise RuntimeError(f'could not restore sparse layout for {rel}: {exc}') from exc
 PYSPARSERESTORE
 }
 
@@ -3565,6 +3564,34 @@ cleanup_restore() {
     fi
     [[ -z ${RESTORE_LOCK_FILE:-} ]] || rm -f -- "$RESTORE_LOCK_FILE" 2>/dev/null || true
     return "$exit_status"
+}
+
+hardcore_archive_internal_root_name() {
+    case $1 in
+        .hardcore-archive-metadata|\
+        .hardcore-archive-sha256.txt|\
+        .hardcore-archive-video-manifest.txt|\
+        .hardcore-archive-image-manifest.txt|\
+        .hardcore-archive-container-manifest.txt|\
+        .hardcore-archive-nested-manifest.txt) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+remove_hardcore_archive_internal_entries() {
+    local root=$1 name
+    [[ -n $root && -d $root && $root != / ]] || \
+        die "Refusing to clean internal entries from an unsafe directory: ${root:-empty}"
+    for name in \
+        .hardcore-archive-metadata \
+        .hardcore-archive-sha256.txt \
+        .hardcore-archive-video-manifest.txt \
+        .hardcore-archive-image-manifest.txt \
+        .hardcore-archive-container-manifest.txt \
+        .hardcore-archive-nested-manifest.txt
+    do
+        rm -rf --one-file-system -- "$root/$name"
+    done
 }
 
 restore_existing_archive() {
@@ -3660,9 +3687,13 @@ print(size)
         (cd -- "$temp" && sha256sum -c --quiet '.hardcore-archive-sha256.txt') || die "Final restored content verification failed."
     fi
 
-    top_count=$(find "$temp" -mindepth 1 -maxdepth 1 ! -name '.hardcore-archive-*' -printf '.' | wc -c)
+    # Remove only the exact private entries created by Hardcore Archive. A
+    # blanket prefix filter would silently discard legitimate user content such
+    # as a top-level directory named .hardcore-archive-photos.
+    remove_hardcore_archive_internal_entries "$temp"
+    top_count=$(find "$temp" -mindepth 1 -maxdepth 1 -printf '.' | wc -c)
     if (( top_count == 1 )); then
-        top_name=$(find "$temp" -mindepth 1 -maxdepth 1 ! -name '.hardcore-archive-*' -printf '%f' | head -n1)
+        top_name=$(find "$temp" -mindepth 1 -maxdepth 1 -printf '%f' | head -n1)
         if [[ -d $temp/$top_name ]]; then
             mv -- "$temp/$top_name" "$destination"
         else
@@ -3671,7 +3702,7 @@ print(size)
         fi
     else
         mkdir -- "$destination"
-        find "$temp" -mindepth 1 -maxdepth 1 ! -name '.hardcore-archive-*' -exec mv -t "$destination" -- {} +
+        find "$temp" -mindepth 1 -maxdepth 1 -exec mv -t "$destination" -- {} +
     fi
     sync "$destination" 2>/dev/null || true
     RESTORE_COMMITTED=true
@@ -4778,6 +4809,8 @@ SOURCE=$(realpath -e -- "$SOURCE_INPUT")
 export HARDCORE_ARCHIVE_CALIBRATION_SOURCE_ROOT="$SOURCE"
 SOURCE_PARENT=$(dirname -- "$SOURCE")
 SOURCE_NAME=$(basename -- "$SOURCE")
+hardcore_archive_internal_root_name "$SOURCE_NAME" && \
+    die "The source name is reserved for internal archive metadata: $SOURCE_NAME"
 if [[ -z $OUTPUT_INPUT ]]; then
     OUTPUT_INPUT="$SOURCE_PARENT/${SOURCE_NAME}.7z"
     OUTPUT_WAS_AUTOMATIC=true
@@ -6824,12 +6857,14 @@ prepare_and_add_nested_archives() {
                 fi
                 if (( rc == 0 )); then
                     # Remove the child's random extraction-root directory while retaining
-                    # all transformed payload and internal manifests.
+                    # all transformed payload. Child manifests must not become user data
+                    # in the normalized nested archive.
                     local root_count root_entry content_root
-                    root_count=$(find "$normalized" -mindepth 1 -maxdepth 1 ! -name '.hardcore-archive-*' -printf '.' | wc -c)
+                    remove_hardcore_archive_internal_entries "$normalized"
+                    root_count=$(find "$normalized" -mindepth 1 -maxdepth 1 -printf '.' | wc -c)
                     content_root="$normalized"
                     if (( root_count == 1 )); then
-                        root_entry=$(find "$normalized" -mindepth 1 -maxdepth 1 ! -name '.hardcore-archive-*' -printf '%f' | head -n1)
+                        root_entry=$(find "$normalized" -mindepth 1 -maxdepth 1 -printf '%f' | head -n1)
                         [[ -d $normalized/$root_entry ]] && content_root="$normalized/$root_entry"
                     fi
                     (cd -- "$content_root" && "$SEVEN_ZIP" a "$full_output" -t7z -m0=lzma2 -mx=9 -ms=on -mmt=on -spd -scsUTF-8 -bsp1 -y .) >>"$SEVEN_ZIP_LOG" 2>&1 || rc=94

@@ -8,6 +8,7 @@ on:
 jobs:
   shell-runtime:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
@@ -28,3 +29,13 @@ jobs:
           "$BASH_BIN" tests/bundled-runtime.sh
           "$BASH_BIN" tests/runtime-bootstrap.sh
           "$BASH_BIN" tests/ffmpeg-detection.sh
+
+  frontend-policy:
+    runs-on: ubuntu-latest
+    env:
+      HARDCORE_ARCHIVE_AUTO_RUNTIME: 0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run complete policy suite
+        shell: bash
+        run: bash tests/frontend-policy.sh

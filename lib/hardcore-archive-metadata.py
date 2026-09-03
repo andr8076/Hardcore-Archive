@@ -106,7 +106,7 @@ def safe_existing_path(
             current = current / part
             if current.is_symlink():
                 raise MetadataError(
-                    f"ACL path contains a symlink component: {relative!r}"
+                    f"metadata path contains a symlink component: {relative!r}"
                 )
 
     resolved_parent = pathlib.Path(os.path.realpath(candidate.parent))
@@ -125,33 +125,86 @@ def restore_file_metadata(root: pathlib.Path, metadata_dir: pathlib.Path) -> int
     manifest = metadata_dir / "files.tsv"
     if not manifest.is_file():
         return 0
-    rows: list[tuple[pathlib.Path, str, str, str, str]] = []
+    rows: list[tuple[pathlib.Path, str, int, int, int, int]] = []
+    seen: set[pathlib.Path] = set()
     with manifest.open("r", encoding="utf-8", errors="surrogateescape") as handle:
-        next(handle, None)
+        header = next(handle, "").rstrip("\n")
+        if header != "type\tmode\tuid\tgid\tmtime_epoch\tpath\tlink_target":
+            raise MetadataError("invalid files.tsv header")
         for line_number, line in enumerate(handle, 2):
             parts = line.rstrip("\n").split("\t", 6)
             if len(parts) != 7:
                 raise MetadataError(f"invalid files.tsv row {line_number}")
-            _kind, mode, uid, gid, mtime, relative, _target = parts
-            path = safe_existing_path(root, relative)
-            rows.append((path, mode, uid, gid, mtime))
+            kind, mode_text, uid_text, gid_text, mtime_text, relative, target = parts
+            path = safe_existing_path(root, relative, reject_parent_symlinks=True)
+            if path in seen:
+                raise MetadataError(f"duplicate files.tsv path on row {line_number}: {relative!r}")
+            seen.add(path)
+            if not re.fullmatch(r"[0-7]{3,4}", mode_text):
+                raise MetadataError(f"invalid mode on files.tsv row {line_number}")
+            if not uid_text.isascii() or not uid_text.isdecimal():
+                raise MetadataError(f"invalid uid on files.tsv row {line_number}")
+            if not gid_text.isascii() or not gid_text.isdecimal():
+                raise MetadataError(f"invalid gid on files.tsv row {line_number}")
+            if not re.fullmatch(r"-?[0-9]+", mtime_text, flags=re.ASCII):
+                raise MetadataError(f"invalid mtime on files.tsv row {line_number}")
 
-    rows.sort(key=lambda row: (row[0].is_dir(), -len(row[0].parts)))
-    for path, mode, uid, gid, mtime in rows:
-        try:
-            os.chmod(path, int(mode, 8), follow_symlinks=False)
-        except (OSError, NotImplementedError, ValueError):
-            pass
-        try:
-            timestamp = int(mtime)
-            os.utime(path, (timestamp, timestamp), follow_symlinks=False)
-        except (OSError, NotImplementedError, ValueError):
-            pass
+            info = path.lstat()
+            expected_kinds = {
+                "regular file": stat.S_ISREG,
+                "regular empty file": stat.S_ISREG,
+                "file": stat.S_ISREG,  # Compatibility with early manifests.
+                "directory": stat.S_ISDIR,
+                "symbolic link": stat.S_ISLNK,
+                "fifo": stat.S_ISFIFO,
+                "socket": stat.S_ISSOCK,
+                "block special file": stat.S_ISBLK,
+                "character special file": stat.S_ISCHR,
+            }
+            matcher = expected_kinds.get(kind)
+            if matcher is None or not matcher(info.st_mode):
+                raise MetadataError(
+                    f"restored object type does not match files.tsv row {line_number}"
+                )
+            if kind == "regular empty file" and info.st_size != 0:
+                raise MetadataError(f"restored file is not empty on files.tsv row {line_number}")
+            if kind == "symbolic link":
+                if os.readlink(path) != target:
+                    raise MetadataError(f"symlink target does not match files.tsv row {line_number}")
+            elif target:
+                raise MetadataError(f"unexpected link target on files.tsv row {line_number}")
+            rows.append(
+                (
+                    path,
+                    kind,
+                    int(mode_text, 8),
+                    int(uid_text),
+                    int(gid_text),
+                    int(mtime_text),
+                )
+            )
+
+    # Restore children before directories so each directory timestamp is the
+    # final operation affecting it. Validate every row before mutating anything.
+    rows.sort(key=lambda row: (row[1] == "directory", -len(row[0].parts)))
+    for path, kind, mode, uid, gid, mtime in rows:
         if os.geteuid() == 0:
             try:
-                os.chown(path, int(uid), int(gid), follow_symlinks=False)
-            except (OSError, NotImplementedError, ValueError):
-                pass
+                os.chown(path, uid, gid, follow_symlinks=False)
+            except (OSError, NotImplementedError, OverflowError, ValueError) as exc:
+                raise MetadataError(f"could not restore ownership for {path}: {exc}") from exc
+
+        # Unix symlink permissions are not mutable on the supported platforms;
+        # chmod would either follow the link or report an unsupported operation.
+        if kind != "symbolic link":
+            try:
+                os.chmod(path, mode, follow_symlinks=False)
+            except (OSError, NotImplementedError, OverflowError, ValueError) as exc:
+                raise MetadataError(f"could not restore mode for {path}: {exc}") from exc
+        try:
+            os.utime(path, (mtime, mtime), follow_symlinks=False)
+        except (OSError, NotImplementedError, OverflowError, ValueError) as exc:
+            raise MetadataError(f"could not restore timestamp for {path}: {exc}") from exc
     return len(rows)
 
 
@@ -171,18 +224,32 @@ def load_xattrs(
                 record = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise MetadataError(f"invalid xattrs.txt row {line_number}") from exc
-            path = safe_existing_path(root, str(record.get("path", "")))
+            path = safe_existing_path(
+                root, str(record.get("path", "")), reject_parent_symlinks=True
+            )
             attributes = record.get("xattrs", {})
             if not isinstance(attributes, dict):
                 raise MetadataError(f"invalid xattr map on row {line_number}")
-            if hasattr(os, "setxattr"):
-                for name, encoded in attributes.items():
-                    try:
-                        value = base64.b64decode(encoded, validate=True)
-                        os.setxattr(path, str(name), value, follow_symlinks=False)
-                        restored += 1
-                    except (OSError, ValueError, TypeError):
-                        pass
+            if attributes and not hasattr(os, "setxattr"):
+                raise MetadataError(
+                    f"archive contains xattrs on row {line_number}, but this platform cannot restore them"
+                )
+            for name, encoded in attributes.items():
+                if not isinstance(name, str) or not name or "\x00" in name:
+                    raise MetadataError(f"invalid xattr name on row {line_number}")
+                if not isinstance(encoded, str):
+                    raise MetadataError(f"invalid xattr value on row {line_number}")
+                try:
+                    value = base64.b64decode(encoded, validate=True)
+                except (ValueError, TypeError) as exc:
+                    raise MetadataError(f"invalid xattr value on row {line_number}") from exc
+                try:
+                    os.setxattr(path, name, value, follow_symlinks=False)
+                except (OSError, NotImplementedError, OverflowError, ValueError) as exc:
+                    raise MetadataError(
+                        f"could not restore xattr {name!r} for {path}: {exc}"
+                    ) from exc
+                restored += 1
             if record.get("flags"):
                 try:
                     flags.append((path, int(record["flags"])))
@@ -295,15 +362,19 @@ def restore_acl(root: pathlib.Path, metadata_dir: pathlib.Path) -> int:
 
 
 def restore_flags(flags: list[tuple[pathlib.Path, int]]) -> int:
-    if not hasattr(os, "chflags"):
+    if flags and not hasattr(os, "chflags"):
+        raise MetadataError(
+            "the archive contains file flags, but this platform cannot restore them"
+        )
+    if not flags:
         return 0
     restored = 0
     for path, value in flags:
         try:
             os.chflags(path, value, follow_symlinks=False)
             restored += 1
-        except OSError:
-            pass
+        except (OSError, NotImplementedError, OverflowError, ValueError) as exc:
+            raise MetadataError(f"could not restore file flags for {path}: {exc}") from exc
     return restored
 
 
