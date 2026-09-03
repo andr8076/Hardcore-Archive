@@ -167,8 +167,12 @@ cp -- "$FFSRC/ffmpeg" "$OUT/runtime/bin/ffmpeg"
 cp -- "$FFSRC/ffprobe" "$OUT/runtime/bin/ffprobe"
 if [[ $(uname -s) == Darwin ]]; then
     cp -P -- "$WORK/prefix/lib/"libvmaf*.dylib "$OUT/runtime/lib/"
+    DYLD_LIBRARY_PATH="$OUT/runtime/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+    export DYLD_LIBRARY_PATH
 else
     cp -P -- "$WORK/prefix/lib/"libvmaf.so* "$OUT/runtime/lib/"
+    LD_LIBRARY_PATH="$OUT/runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export LD_LIBRARY_PATH
 fi
 cp -- "$FFSRC/LICENSE.md" "$OUT/runtime/licenses/FFmpeg-LICENSE.md"
 cp -- "$WORK/src/vmaf/LICENSE" "$OUT/runtime/licenses/VMAF-LICENSE"
@@ -177,7 +181,11 @@ if "$OUT/runtime/bin/ffmpeg" -hide_banner -buildconf 2>&1 | grep -F -- '--enable
     printf 'Refusing to package an FFmpeg build configured --enable-nonfree.\n' >&2
     exit 4
 fi
-if ! "$OUT/runtime/bin/ffmpeg" -hide_banner -filters 2>/dev/null | grep -E '(^|[[:space:]])libvmaf([[:space:]]|$)' >/dev/null; then
+if ! FFMPEG_FILTERS=$("$OUT/runtime/bin/ffmpeg" -hide_banner -filters 2>&1); then
+    printf 'Built FFmpeg could not start with its bundled libraries:\n%s\n' "$FFMPEG_FILTERS" >&2
+    exit 4
+fi
+if ! grep -E '(^|[[:space:]])libvmaf([[:space:]]|$)' <<< "$FFMPEG_FILTERS" >/dev/null; then
     printf 'Built FFmpeg does not expose libvmaf.\n' >&2
     exit 4
 fi
