@@ -38,7 +38,7 @@ probe_hardware_encoder() {
         *_nvenc)
             cmd+=(
                 -f lavfi -i "color=c=black:s=${HARDCORE_ENCODER_PROBE_SIZE}:r=30" -t 0.25
-                -c:v "$encoder" -cq:v 33 -preset:v p4
+                -c:v "$encoder" -gpu:v "${HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE:-0}" -cq:v 33 -preset:v p4
             )
             ;;
         *_qsv)

@@ -40,7 +40,8 @@ assert_lacks() {
 assert_has '# HARDCORE_HARDWARE_ONLY_VIDEO_V1'
 assert_has 'video_encoder_is_hardware "$VIDEO_ENCODER"'
 assert_has 'inherited+=(--video-encoder "$VIDEO_ENCODER")'
-assert_has "printf 'FFmpeg command:'"
+assert_has 'hardcore_video_encode_full'
+rg -Fq "printf 'FFmpeg command:'" "$ROOT/lib/video-acceleration.sh"
 assert_has 'VIDEO_LOG=$(component_log_path video.log)'
 assert_has "Hardware video encoder locked: %s"
 assert_lacks 'VIDEO_ENCODER=libsvtav1'

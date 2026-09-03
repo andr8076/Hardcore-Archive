@@ -166,6 +166,38 @@ Video transcoding is hardware-only. CPU encoders are never accepted as dependenc
 
 `VIDEO_CODEC=auto` is the default. When both working AV1 and HEVC hardware encoders are available, Hardcore Archive checks them against the same VMAF floor and minimum-savings target for each video, then uses the candidate predicted to be smaller. `--video-codec av1` and `--video-codec hevc` remain explicit overrides.
 
+### GPU decoding and filtering
+
+`VIDEO_ACCELERATION=auto` enables preprocessing acceleration alongside the existing hardware encoder:
+
+| Encoder backend | Preferred preprocessing | Compatible fallback |
+| --- | --- | --- |
+| AMD/Linux VAAPI | VAAPI decoding and `scale_vaapi` high-quality scaling/format conversion | VAAPI decoding with CPU filters, then CPU decoding and filters |
+| NVIDIA NVENC | CUDA decoding and `scale_cuda` Lanczos scaling/format conversion | CUDA decoding with CPU filters, then CPU decoding and filters |
+| Other hardware backends / unsupported source pixel formats | Existing CPU decoding and filtering | Existing hardware encoding policy |
+
+The accelerated paths support probed 8-bit and 10-bit 4:2:0 source formats. Actual calibration encodes exercise the decoder, filters and encoder together; merely having a filter or encoder listed by FFmpeg does not count as a successful probe. Missing GPU filters select CPU filtering directly. Denoising retains the existing CPU `hqdn3d` filter, using hardware decoding where possible. With quality checks disabled, GPU scaling is not selected because there is no quality comparison available.
+
+**Compression takes priority over GPU utilization.** When resizing with GPU filters, the program also searches the quality-valid boundary using CPU Lanczos. Both paths use the same unmodified software VMAF reference and audio/savings policy. The candidate with greater predicted savings wins; ties prefer GPU filtering. AV1 and HEVC then compete as before. Each path retains its own cache, so subsequent runs usually need one fresh sample per tested path rather than repeating the boundary searches. This comparison adds work on a first run and does not guarantee a smaller final file than every possible encoding.
+
+Sample encoding/probe failures, failed quality checks, and insufficient savings retry progressively more conservative preprocessing, ending with the existing CPU path. If an accelerated full encode or its decode audit fails, its partial output is removed and that encoder is recalibrated with CPU preprocessing before retrying. Full encoding is capped at three attempts per video across AUTO's two encoders. Hardware video encoding remains mandatory throughout; failure of the encoder itself never starts a software encoder.
+
+VMAF scoring and the final full decode audit remain on the CPU. The audit treats decoder errors as fatal (`-xerror`). Stream-count, codec, duration, final size and archive verification checks remain in place. Acceleration does not change the VMAF target, sampling timestamps or audio/subtitle/attachment/chapter mappings.
+
+Configuration (also inherited by batch/nested jobs):
+
+```ini
+VIDEO_ACCELERATION=auto
+VIDEO_GPU_FILTERS=auto
+VIDEO_CUDA_DEVICE=0
+```
+
+Use `VIDEO_GPU_FILTERS=off` to try hardware decoding with the existing CPU filters. Use `VIDEO_ACCELERATION=cpu` to restore CPU decoding and filtering while retaining the hardware encoder. `VIDEO_CUDA_DEVICE` selects the NVIDIA GPU index for capability probes, sample/full encoding and CUDA decoding; VAAPI uses the existing selected render device. No additional GPU filtering package is required for the CPU fallback paths.
+
+The video log prints the selected preprocessing path, path comparisons, fallbacks and complete full-encode commands. Acceleration work is included in the existing calibration/encoding phase timings. Calibration keys include the actual decode/filter path and CUDA device. Completed-output resume keys include the preprocessing policy; toggling it cannot silently reuse an output from the previous policy. Entries from before preprocessing-aware cache keys are ignored, so the first run after this update learns fresh settings. Real speed and size gains depend on the source, FFmpeg build and driver and should be checked with the small video corpus before a full archive run.
+
+### Calibration reuse
+
 Hardware calibration (VAAPI, NVENC and QSV) prioritizes compression at your configured `QUALITY_CHECK` target. A cached setting is a search hint until a compression boundary has been found for that exact video:
 
 - **First file in a group:** binary-search the encoder's quality range using three 3-second segments (one for clips shorter than 9 seconds), seeking the highest compression setting that passes every tested segment.
@@ -174,9 +206,9 @@ Hardware calibration (VAAPI, NVENC and QSV) prioritizes compression at your conf
 - **Plateau detection:** three failed trials spanning at least four quality steps, varying by no more than 0.25 VMAF and remaining at least 5 points below target trigger a check at the encoder's highest-quality endpoint, at the failing sample position. If that check passes, continue searching; a plateau alone no longer rejects the codec.
 - **Confirmed codec rejection:** only a measured failure at the highest-quality endpoint is remembered, for that exact video and codec. A repeat run rechecks the same failing position at that setting once. If it still fails, skip the repeated search; if it recovers or measurement fails, search afresh. Another codec can still qualify. Probe/encoder errors are never stored as quality rejections, and a rejection is never shared with other videos.
 
-The cache groups sources by codec/profile, resolution, pixel format/bit depth, frame rate, interlacing, aspect ratio and color metadata. Keys also include the output codec, hardware encoder, selected VAAPI device, FFmpeg build, actual scaling/denoising filters and VMAF target. Successful boundary searches update the group hint and per-video record; successful repeat validation refreshes only that video's record. The selected candidate reuses those measurements instead of repeating the separate three-segment preflight. Final codec, duration, stream-count, full-decode and actual-size checks remain in place.
+The cache groups sources by codec/profile, resolution, pixel format/bit depth, frame rate, interlacing, aspect ratio and color metadata. Keys also include the output codec, hardware encoder, selected device, preprocessing path, FFmpeg build, actual scaling/denoising filters and VMAF target. Successful boundary searches update the group hint and per-video record; successful repeat validation refreshes only that video's record. The selected candidate reuses those measurements instead of repeating the separate three-segment preflight. Final codec, duration, stream-count, full-decode and actual-size checks remain in place.
 
-Per-video identity uses the original resolved path, device/inode, size, and nanosecond modification/change times, plus the exact source profile and encoding policy. Staging symlinks resolve to that original. Nested videos use the containing archive's identity plus their relative path, size and stored modification time, so fresh extraction directories do not defeat reuse. This is a fast metadata identity for hints, not a content-hash guarantee; fresh quality/size validation is still required. Changed source metadata or encoding policy invalidates the per-video entry. Old group and per-video entries remain usable as search hints but must undergo a boundary search before one-shot reuse. Previous reports are not imported.
+Per-video identity uses the original resolved path, device/inode, size, and nanosecond modification/change times, plus the exact source profile and encoding policy. Staging symlinks resolve to that original. Nested videos use the containing archive's identity plus their relative path, size and stored modification time, so fresh extraction directories do not defeat reuse. This is a fast metadata identity for hints, not a content-hash guarantee; fresh quality/size validation is still required. Changed source metadata or encoding policy invalidates the per-video entry. Within the same preprocessing policy, legacy per-video records remain search hints and must undergo a boundary search before one-shot reuse. Previous reports are not imported.
 
 For cache grouping only, average and declared frame rates each use the nearest whole-number rate when within 1% of it. For example, 59.9386 and 60.0053 fps share the 60 fps group; 30, 50 and 60 fps remain separate. Rates outside that tolerance retain their exact rational value, and invalid rates disable cache reuse. Video timestamps, encoding and VMAF sampling are unchanged.
 
@@ -300,7 +332,7 @@ High overall CPU usage is not guaranteed, and is not a reliable throughput measu
 | --- | --- | --- |
 | LZMA2 compression | Two threads by default; explicit `THREADS` / `--threads` override | More threads can split independent blocks, increase RAM use and change compression ratio. |
 | Match-cycle tuning | Four bounded trials, sequential, two threads each | Startup work; small inputs skip it. |
-| Video encoding | Hardware encoder; sequential files; can overlap LZMA2/images | A busy video engine may not show as GPU 3D utilization. Decode/filter work remains on the CPU. |
+| Video encoding | Hardware encoder; VAAPI/CUDA preprocessing where accepted; sequential files; can overlap LZMA2/images | GPU/CPU scaling compete on quality and predicted compression. Unsupported acceleration falls back to CPU preprocessing. VMAF and the final decode audit remain on CPU. |
 | VMAF scoring | Up to eight CPU workers by default | Configurable with `VIDEO_QUALITY_THREADS`; keeps the same samples and scoring resolution. |
 | Images | Up to four file workers in auto mode; two Oxipng threads each | Bounded by CPU/file count and the parallel-memory plan; `IMAGE_JOBS` overrides file workers. |
 | Container and nested-archive repacking | Sequential files | Still a utilization limit; independent-file concurrency needs a memory/storage budget. |

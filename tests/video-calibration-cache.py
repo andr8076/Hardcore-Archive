@@ -15,6 +15,7 @@ FUNCTIONS = CORE.split("\nHARDCORE_AUTO_CODEC_MODE=", 1)[1].split(
 )[0]
 FUNCTIONS = (f'source {shlex.quote(str(ROOT / "lib/calibration-identity.sh"))}\n'
              f'source {shlex.quote(str(ROOT / "lib/timing.sh"))}\n'
+             f'source {shlex.quote(str(ROOT / "lib/video-acceleration.sh"))}\n'
              "HARDCORE_AUTO_CODEC_MODE=" + FUNCTIONS)
 
 FIXTURE = r'''
@@ -135,6 +136,7 @@ class CalibrationTests(unittest.TestCase):
         env.update(TEST_ROOT=str(self.root),
                    HARDCORE_ARCHIVE_CALIBRATION_CACHE_DIR=str(self.cache),
                    HARDCORE_ARCHIVE_CALIBRATION_CACHE="true",
+                   HARDCORE_ARCHIVE_VIDEO_ACCELERATION="cpu",
                    HARDCORE_ARCHIVE_CALIBRATION_POLICY_INHERITED="0",
                    HARDCORE_ARCHIVE_CALIBRATION_EARLY_ABORT="true")
         env.update({key: str(value) for key, value in changes.items()})

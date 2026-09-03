@@ -53,6 +53,14 @@ QUALITY_CHECK=92
 # VMAF CPU workers: auto uses available logical CPUs, capped at 8.
 # Set 1..64 to override (still capped at the CPUs available to the process).
 VIDEO_QUALITY_THREADS=auto
+# Prefer AMD VAAPI / NVIDIA CUDA decoding, falling back to CPU preprocessing.
+# Set cpu to use software decoding/filtering with the existing hardware encoder.
+VIDEO_ACCELERATION=auto
+# Compare GPU scaling with CPU Lanczos; retain the better accepted compression.
+# Set off to retain CPU filters while still trying hardware decoding.
+VIDEO_GPU_FILTERS=auto
+# NVIDIA CUDA/NVENC device index; ignored by AMD VAAPI encoding.
+VIDEO_CUDA_DEVICE=0
 # Search from similar-video hints; reuse exact-video boundaries after a fresh sample.
 # Cache entries expire after 30 days. Set false to search every file in full.
 VIDEO_CALIBRATION_CACHE=true

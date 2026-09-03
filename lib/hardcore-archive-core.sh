@@ -70,6 +70,7 @@ PROGRAM_NAME=${0##*/}
 SCRIPT_START_SECONDS=$SECONDS
 source "$(dirname -- "${BASH_SOURCE[0]}")/calibration-identity.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/timing.sh"
+source "$(dirname -- "${BASH_SOURCE[0]}")/video-acceleration.sh"
 hardcore_timing_init
 SCRIPT_VERSION="2026-09-01"
 METADATA_HELPER=${HARDCORE_ARCHIVE_METADATA_HELPER:-}
@@ -899,6 +900,17 @@ load_config_file() {
                 fi
                 export HARDCORE_ARCHIVE_VIDEO_QUALITY_THREADS=$value
                 ;;
+            VIDEO_ACCELERATION|VIDEO_GPU_FILTERS|VIDEO_CUDA_DEVICE)
+                [[ ${HARDCORE_ARCHIVE_CALIBRATION_POLICY_INHERITED:-0} == 1 ]] && continue
+                case "$key:$value" in
+                    VIDEO_ACCELERATION:auto|VIDEO_ACCELERATION:cpu) export HARDCORE_ARCHIVE_VIDEO_ACCELERATION=$value ;;
+                    VIDEO_GPU_FILTERS:auto|VIDEO_GPU_FILTERS:off) export HARDCORE_ARCHIVE_VIDEO_GPU_FILTERS=$value ;;
+                    VIDEO_CUDA_DEVICE:*)
+                        [[ $value =~ ^(0|[1-9][0-9]{0,2})$ ]] || die 'VIDEO_CUDA_DEVICE must be a GPU index from 0 to 999.'
+                        export HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE=$value ;;
+                    *) die "Invalid $key: $value" ;;
+                esac
+                ;;
             VERIFY_MODE) VERIFY_MODE=${value,,} ;;
             WORK_DIR) WORK_DIR_OVERRIDE=$value ;;
             BATCH_ROOT_FILES) BATCH_ROOT_FILES=${value,,} ;;
@@ -1560,6 +1572,8 @@ determine_encoder() {
         local va_args=()
         if [[ "$enc" == *_vaapi ]]; then
             va_args=("-init_hw_device" "vaapi=va:${HARDCORE_ARCHIVE_VAAPI_DEVICE:-}" "-filter_hw_device" "va" "-vf" "format=nv12,hwupload")
+        elif [[ "$enc" == *_nvenc ]]; then
+            va_args=(-gpu:v "${HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE:-0}")
         fi
 
         if ffmpeg -hide_banner -v error -y -t 2 -i "$sample" "${va_args[@]}" -map '0:V:0' \
@@ -2276,7 +2290,7 @@ calibration_cache_prepare() {
     key=$(printf '%s\0' 'calibration-v3-nominal-fps-nearest-timestamps-center-validation' \
         "$codec" "$encoder" "${HARDCORE_ARCHIVE_VAAPI_DEVICE:-}" \
         "$profile" "$ffmpeg_build" "$CAL_FILTER_CHAIN" \
-        "$quality_vmaf_threshold" | sha256sum | awk '{print $1}') || return 0
+        "$quality_vmaf_threshold" "$(hardcore_video_accel_signature "$encoder")" | sha256sum | awk '{print $1}') || return 0
     [[ $key =~ ^[a-f0-9]{64}$ ]] || return 0
     (umask 077; mkdir -p -- "$directory") 2>/dev/null || return 0
     [[ -d $directory && ! -L $directory && -O $directory && -w $directory ]] || return 0
@@ -2410,36 +2424,29 @@ calibration_apply_quality() {
 }
 
 calibration_build_filter_chain() {
-    local encoder=$1
-    local -a filters=()
-    [[ "$apply_denoise" == true ]] && filters+=("$DENOISE_FILTER")
-    [[ "$apply_scaling" == true ]] && filters+=("scale=-2:${TARGET_HEIGHT}:flags=lanczos")
-    if [[ $encoder == *_vaapi ]]; then
-        filters+=("format=nv12" "hwupload")
-    fi
-    CAL_FILTER_CHAIN=''
-    ((${#filters[@]} > 0)) && CAL_FILTER_CHAIN=$(IFS=,; printf '%s' "${filters[*]}")
-    return 0
+    hardcore_video_accel_filter "$1"
 }
 
 calibration_candidate_command() {
     local encoder=$1 quality=$2 start=$3 sample_length=$4 sample_file=$5
     local CAL_FILTER_CHAIN=''
     calibration_build_filter_chain "$encoder"
+    hardcore_video_accel_arguments "$encoder"
     CAL_COMMAND=(ffmpeg -hide_banner -v error -nostdin -y)
-    [[ $encoder == *_vaapi ]] && CAL_COMMAND+=(-init_hw_device "vaapi=va:${HARDCORE_ARCHIVE_VAAPI_DEVICE:-}" -filter_hw_device va)
+    CAL_COMMAND+=("${HARDCORE_VIDEO_DEVICE_ARGS[@]}")
     CAL_COMMAND+=(
-        -ss "$start" -i "$input" -t "$sample_length"
+        -ss "$start" "${HARDCORE_VIDEO_INPUT_ARGS[@]}" -i "$input" -t "$sample_length"
         -map '0:V:0' -an -sn -dn
         -c:v "$encoder"
     )
     case "$encoder" in
         av1_vaapi|hevc_vaapi) CAL_COMMAND+=(-rc_mode CQP -global_quality:v "$quality") ;;
-        av1_nvenc|hevc_nvenc) CAL_COMMAND+=(-cq:v "$quality" -preset:v p4 -pix_fmt:v p010le) ;;
-        av1_qsv|hevc_qsv) CAL_COMMAND+=(-global_quality:v "$quality" -preset:v balanced -pix_fmt:v p010le) ;;
+        av1_nvenc|hevc_nvenc) CAL_COMMAND+=(-cq:v "$quality" -preset:v p4) ;;
+        av1_qsv|hevc_qsv) CAL_COMMAND+=(-global_quality:v "$quality" -preset:v balanced) ;;
         *) return 1 ;;
     esac
     [[ -n "$CAL_FILTER_CHAIN" ]] && CAL_COMMAND+=(-vf "$CAL_FILTER_CHAIN")
+    CAL_COMMAND+=("${HARDCORE_VIDEO_OUTPUT_ARGS[@]}")
     CAL_COMMAND+=(-f matroska "$sample_file")
 }
 
@@ -2519,7 +2526,45 @@ evaluate_hardware_quality() {
 }
 
 calibrate_hardware_candidate() {
-    hardcore_timed video_calibration calibrate_hardware_candidate_impl "$@"
+    hardcore_timed video_calibration calibrate_hardware_candidate_accelerated "$@"
+}
+
+calibrate_hardware_candidate_accelerated() {
+    local codec=$1 encoder=$2 rc mode compare=false gpu_valid=false
+    local CAL_PIPELINE_HINT=''
+    local -a gpu_result=()
+    hardcore_video_accel_prepare "$encoder"
+    while :; do
+        mode=$(hardcore_video_accel_mode "$encoder")
+        if calibrate_hardware_candidate_impl "$codec" "$encoder"; then rc=0; else rc=$?; fi
+        if (( rc == 1 || rc == 2 || rc == 3 )) && hardcore_video_accel_demote "$encoder"; then
+            continue
+        fi
+        if [[ $mode == gpu && $apply_scaling == true ]]; then
+            # GPU and software scalers need not produce identical pixels.
+            # Search both boundaries and compare the three-segment estimates.
+            compare=true
+            if (( rc == 0 )); then
+                gpu_valid=true
+                gpu_result=("$CAL_BEST_QUALITY" "$CAL_PREDICTED_SAVINGS" "$CAL_REQUIRED_SAVINGS" "$CAL_REASON" "$CAL_QUALITY_LABEL")
+                CAL_PIPELINE_HINT=$CAL_BEST_QUALITY
+            fi
+            HARDCORE_VIDEO_PIPELINES[$encoder]=hybrid
+            printf 'Comparing GPU scaling against CPU Lanczos for quality and compression.\n'
+            continue
+        fi
+        if [[ $compare == true && $gpu_valid == true ]]; then
+            if (( rc != 0 )) || LC_NUMERIC=C awk -v gpu="${gpu_result[1]}" -v cpu="$CAL_PREDICTED_SAVINGS" 'BEGIN {exit !(gpu>=cpu)}'; then
+                HARDCORE_VIDEO_PIPELINES[$encoder]=gpu
+                CAL_BEST_QUALITY=${gpu_result[0]}; CAL_PREDICTED_SAVINGS=${gpu_result[1]}
+                CAL_REQUIRED_SAVINGS=${gpu_result[2]}; CAL_REASON=${gpu_result[3]}; CAL_QUALITY_LABEL=${gpu_result[4]}
+                printf 'GPU scaling selected: its accepted candidate predicts equal or better compression.\n'
+                return 0
+            fi
+        fi
+        [[ $compare != true || $rc != 0 ]] || printf 'CPU filtering selected for its accepted compression result.\n'
+        return "$rc"
+    done
 }
 
 calibrate_hardware_candidate_impl() {
@@ -2601,6 +2646,11 @@ calibrate_hardware_candidate_impl() {
             cache_source=legacy-video
         else
             cached_quality=$(calibration_cache_read "$low" "$high") || cached_quality=''
+        fi
+        if [[ -z $cached_quality && ${CAL_PIPELINE_HINT:-} =~ ^[1-9][0-9]{0,2}$ ]] &&
+           (( CAL_PIPELINE_HINT >= low && CAL_PIPELINE_HINT <= high )); then
+            cached_quality=$CAL_PIPELINE_HINT
+            cache_source=other-pipeline
         fi
         if [[ -n $cached_quality ]]; then
             printf 'Calibration cache source: %s.\n' "$cache_source"
@@ -2860,6 +2910,9 @@ run_video_preflight() {
         if [[ "$video_encoder" != *_vaapi ]]; then
             sample_command+=(-pix_fmt:v "$video_pix_fmt")
         fi
+        if [[ "$video_encoder" == *_nvenc ]]; then
+            sample_command+=(-gpu:v "${HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE:-0}")
+        fi
         [[ -n "$filter_chain" ]] && sample_command+=(-vf "$filter_chain")
         sample_command+=("$sample_file")
 
@@ -3006,47 +3059,10 @@ if [[ "$assume_yes" != true ]]; then
     ask_yes_no 'Start compression?' y || { printf 'Cancelled.\n'; exit 0; }
 fi
 
-rm -f -- "$temporary"
-
-# Construct FFmpeg execution command. VA-API device setup is global;
-# quality options remain attached to the selected encoder.
-command=(ffmpeg -hide_banner -nostdin -y)
-if [[ "$video_encoder" == *_vaapi ]]; then
-    command+=(-init_hw_device "vaapi=va:${HARDCORE_ARCHIVE_VAAPI_DEVICE:-}" -filter_hw_device va)
-fi
-command+=(
-    -i "$input"
-    -map '0:V:0' -map '0:a?' -map '0:s?' -map '0:t?'
-    -map_metadata 0 -map_chapters 0
-    -c:v "$video_encoder" "${encoder_args[@]}"
-)
-if [[ "$video_encoder" != *_vaapi ]]; then
-    command+=(-pix_fmt:v "$video_pix_fmt")
-fi
-command+=(-c:s copy -c:t copy -max_muxing_queue_size 4096)
-
-[[ -n "$filter_chain" ]] && command+=(-vf "$filter_chain")
-command+=("${audio_args[@]}" "$temporary")
-printf 'FFmpeg command:'
-printf ' %q' "${command[@]}"
-printf '\n'
-
-printf '\nStarting FFmpeg\n'
-printf '%s\n' '────────────────────────────────────────────────────────────'
-if ! hardcore_timed video_encoding "${command[@]}"; then rm -f -- "$temporary"; temporary=''; die 'Encoding failed.'; fi
-
-actual_codec=$(ffprobe -v error -select_streams V:0 -show_entries stream=codec_name -of default=nw=1:nk=1 "$temporary" | head -n1)
-[[ "$actual_codec" == "$expected_codec" ]] || { rm -f -- "$temporary"; die "Codec validation failed."; }
-
-output_duration=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$temporary" | head -n1)
-duration_difference=$(LC_NUMERIC=C awk -v original="${duration:-0}" -v output="${output_duration:-0}" 'BEGIN {d=original-output; if(d<0)d=-d; printf "%.6f",d}')
-if LC_NUMERIC=C awk -v difference="$duration_difference" 'BEGIN {exit !(difference>2.0)}'; then
-    rm -f -- "$temporary"; die "Output duration validation failed."
-fi
-
-printf '\nEncoding completed. Running full decode validation...\n'
-if ! hardcore_timed video_decode_validation ffmpeg -v error -nostdin -i "$temporary" -map '0:V:0' -map '0:a?' -f null -; then
-    rm -f -- "$temporary"; die 'The output failed full decode validation.'
+if ! hardcore_video_encode_full; then
+    rm -f -- "$temporary"
+    temporary=''
+    die 'Video encoding or validation failed after compatible preprocessing retries.'
 fi
 
 output_video_stream_count=$(stream_count_file V "$temporary")
@@ -3586,6 +3602,12 @@ fi
 export HARDCORE_ARCHIVE_CALIBRATION_CACHE=${HARDCORE_ARCHIVE_CALIBRATION_CACHE:-true}
 export HARDCORE_ARCHIVE_CALIBRATION_EARLY_ABORT=${HARDCORE_ARCHIVE_CALIBRATION_EARLY_ABORT:-true}
 export HARDCORE_ARCHIVE_VIDEO_QUALITY_THREADS=${HARDCORE_ARCHIVE_VIDEO_QUALITY_THREADS:-auto}
+export HARDCORE_ARCHIVE_VIDEO_ACCELERATION=${HARDCORE_ARCHIVE_VIDEO_ACCELERATION:-auto}
+export HARDCORE_ARCHIVE_VIDEO_GPU_FILTERS=${HARDCORE_ARCHIVE_VIDEO_GPU_FILTERS:-auto}
+export HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE=${HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE:-0}
+[[ $HARDCORE_ARCHIVE_VIDEO_ACCELERATION == auto || $HARDCORE_ARCHIVE_VIDEO_ACCELERATION == cpu ]] || die 'VIDEO_ACCELERATION must be auto or cpu.'
+[[ $HARDCORE_ARCHIVE_VIDEO_GPU_FILTERS == auto || $HARDCORE_ARCHIVE_VIDEO_GPU_FILTERS == off ]] || die 'VIDEO_GPU_FILTERS must be auto or off.'
+[[ $HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE =~ ^(0|[1-9][0-9]{0,2})$ ]] || die 'VIDEO_CUDA_DEVICE must be a GPU index from 0 to 999.'
 export HARDCORE_ARCHIVE_CALIBRATION_POLICY_INHERITED=1
 
 # Read enough flags before argument parsing to decide whether an inhibitor is
@@ -4868,6 +4890,9 @@ cleanup() {
             printf 'video_codec=%s\n' "${VIDEO_CODEC:-unknown}"
             printf 'video_encoder=%s\n' "${VIDEO_ENCODER:-unset}"
             printf 'video_vaapi_device=%s\n' "${HARDCORE_ARCHIVE_VAAPI_DEVICE:-auto}"
+            printf 'video_acceleration=%s\n' "${HARDCORE_ARCHIVE_VIDEO_ACCELERATION:-auto}"
+            printf 'video_gpu_filters=%s\n' "${HARDCORE_ARCHIVE_VIDEO_GPU_FILTERS:-auto}"
+            printf 'video_cuda_device=%s\n' "${HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE:-0}"
             printf 'video_pipeline_pid=%s\n' "${VIDEO_PIPELINE_PID:-none}"
             printf 'video_completed=%s\n' "${VIDEO_COMPRESSED_COUNT:-0}"
             printf 'video_preserved=%s\n' "${VIDEO_FALLBACK_COUNT:-0}"
@@ -5124,7 +5149,7 @@ probe_parent_video_encoder() {
         case $candidate in
             *_videotoolbox) command+=( -c:v "$candidate" -q:v 65 -pix_fmt nv12 ) ;;
             *_vaapi) command+=( -vf 'format=nv12,hwupload' -c:v "$candidate" -rc_mode CQP -global_quality:v 33 ) ;;
-            *_nvenc) command+=( -c:v "$candidate" -cq:v 33 -preset:v p4 ) ;;
+            *_nvenc) command+=( -c:v "$candidate" -gpu:v "${HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE:-0}" -cq:v 33 -preset:v p4 ) ;;
             *_qsv) command+=( -c:v "$candidate" -global_quality:v 33 -preset:v balanced ) ;;
         esac
         command+=( -f matroska "$probe" )
@@ -6103,7 +6128,9 @@ video_cache_key() {
     printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' \
         "$SCRIPT_VERSION" "$relative" "$stat_value" "$source_hash" "$stream_signature" \
         "$VIDEO_CODEC" "$VIDEO_ENCODER" "$VIDEO_MODE" "$VIDEO_MIN_VMAF" "$VIDEO_MIN_SAVINGS_PERCENT" \
-        "$VIDEO_NO_SCALE" "$VIDEO_NO_DENOISE" "$VIDEO_AUDIO_COPY" "$QUALITY_CHECK" "$ffmpeg_version" | \
+        "$VIDEO_NO_SCALE" "$VIDEO_NO_DENOISE" "$VIDEO_AUDIO_COPY" "$QUALITY_CHECK" "$ffmpeg_version" \
+        "video-preprocessing-v1" "${HARDCORE_ARCHIVE_VIDEO_ACCELERATION:-auto}" \
+        "${HARDCORE_ARCHIVE_VIDEO_GPU_FILTERS:-auto}" "${HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE:-0}" | \
         sha256sum | awk '{print $1}'
 }
 
