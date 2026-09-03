@@ -56,6 +56,8 @@ VERIFY_MODE_EFFECTIVE=integrity
 EFFORT=extreme
 MC_AUTO=false
 HARDCORE_ARCHIVE_DIAGNOSTIC_DIR="$TEST_ROOT/diagnostics"
+mkdir -p "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR"
+printf 'parent calibration\n' > "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/video.log"
 ARCHIVE_MANIFEST_STAGE="$TEST_ROOT/manifests"
 mkdir -p "$ARCHIVE_MANIFEST_STAGE"
 NESTED_MANIFEST_FILE="$ARCHIVE_MANIFEST_STAGE/.hardcore-archive-nested-manifest.txt"
@@ -141,6 +143,8 @@ class NestedWorkTests(unittest.TestCase):
         child.write_text('''#!/usr/bin/env bash
 set -eu
 printf '%s\\n' "$@" > "$TEST_ROOT/child-args"
+[[ $HARDCORE_ARCHIVE_LIVE_LOG == "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/run.log" ]]
+printf 'child calibration\\n' > "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/video.log"
 printf '%s\\n' "$CHILD_ERROR"
 exit "$CHILD_RC"
 ''')
@@ -151,6 +155,11 @@ exit "$CHILD_RC"
         self.assertEqual(work.name, "child-work")
         self.assertEqual(args[args.index("--verify") + 1], "integrity")
         self.assertEqual((self.root / "source/photos.zip").read_text(), "original payload")
+        diagnostic = self.root / "diagnostics"
+        child_diagnostic = diagnostic / "nested/depth-1/source/photos.zip"
+        self.assertEqual((diagnostic / "video.log").read_text(), "parent calibration\n")
+        self.assertEqual((child_diagnostic / "video.log").read_text(), "child calibration\n")
+        self.assertIn(f"Exit status: {rc}\n", (child_diagnostic / "run.log").read_text())
         return output
 
     def test_space_failure_is_reported_and_original_preserved(self):

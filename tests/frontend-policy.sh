@@ -12,6 +12,7 @@ DOCTOR_REPORT="$ROOT/lib/hardcore-archive-doctor-report.sh" \
     bash "$ROOT/tests/runner-policy.sh"
 
 bash "$ROOT/tests/module-layout.sh"
+python3 "$ROOT/tests/destination-logs.py"
 bash "$ROOT/tests/config-layer.sh"
 bash "$ROOT/tests/hash-verification-policy.sh"
 bash "$ROOT/tests/metadata-roundtrip.sh"

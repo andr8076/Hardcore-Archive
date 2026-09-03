@@ -41,7 +41,7 @@ assert_has '# HARDCORE_HARDWARE_ONLY_VIDEO_V1'
 assert_has 'video_encoder_is_hardware "$VIDEO_ENCODER"'
 assert_has 'inherited+=(--video-encoder "$VIDEO_ENCODER")'
 assert_has "printf 'FFmpeg command:'"
-assert_has 'HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/video.log'
+assert_has 'VIDEO_LOG=$(component_log_path video.log)'
 assert_has "Hardware video encoder locked: %s"
 assert_lacks 'VIDEO_ENCODER=libsvtav1'
 assert_lacks 'VIDEO_ENCODER=libx265'

@@ -288,7 +288,7 @@ Safety, recovery, and storage:
   --keep-work              Keep work files even after success.
   --one-file-system        Exclude nested mounts. Default.
   --cross-filesystems      Include nested mounted filesystems.
-  --report / --no-report   Write OUTPUT.report.txt. Default: report.
+  --report / --no-report   Write report.txt in the run's log folder. Default: report.
   --config FILE            Read defaults from FILE.
   --no-config              Ignore ~/.config/hardcore-archive/config.
 
@@ -1135,9 +1135,23 @@ choose_work_root() {
 }
 
 archive_report_path() {
+    if [[ -n ${HARDCORE_ARCHIVE_DIAGNOSTIC_DIR:-} ]]; then
+        printf '%s/report.txt' "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR"
+        return
+    fi
     local stem=$ARCHIVE
     [[ $stem == *.7z ]] && stem=${stem%.7z}
     printf '%s.report.txt' "$stem"
+}
+
+component_log_path() {
+    if [[ -n ${HARDCORE_ARCHIVE_DIAGNOSTIC_DIR:-} ]]; then
+        mkdir -p -- "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR" || return 1
+        : > "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/$1" || return 1
+        printf '%s/%s' "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR" "$1"
+    else
+        mktemp
+    fi
 }
 
 human_bytes() {
@@ -3987,7 +4001,7 @@ run_batch_mode() {
     local -a children=() sources=() names=() archives=() kinds=() item_args=()
     local -a plan_dict=() plan_ram=() plan_cpu=() plan_gpu=() plan_image_jobs=() plan_video_parallel=() plan_source_dev=() plan_output_dev=()
     local -a failed_names=() skipped_names=() pids=() pid_names=() pid_sources=() pid_archives=() pid_kinds=() pid_logs=() pid_indexes=()
-    local logs_dir='' item_log='' index total_index
+    local logs_dir='' item_log='' item_diagnostics='' item_slug='' index total_index
 
     [[ -d $parent_input ]] || die "Batch parent is not a directory: $parent_input"
     parent=$(realpath -e -- "$parent_input")
@@ -4006,6 +4020,8 @@ run_batch_mode() {
     fi
 
     mkdir -p -- "$output_dir"
+    logs_dir="${HARDCORE_ARCHIVE_DIAGNOSTIC_DIR:-$output_dir/hardcore-archive-logs}/batch"
+    mkdir -p -- "$logs_dir"
     script_path=$(resolve_current_script) || \
         die "Could not locate the running script for batch child jobs."
 
@@ -4133,11 +4149,17 @@ run_batch_mode() {
     for ((index=0; index<total; index++)); do
         child=${sources[index]}
         archive=${archives[index]}
-        plan_log=$(mktemp)
+        item_slug=$(safe_slug "${names[index]}")
+        item_diagnostics="$logs_dir/$((index + 1))-${item_slug:0:80}"
+        mkdir -p -- "$item_diagnostics/planning"
+        plan_log="$item_diagnostics/planning/run.log"
         plan_rc=0
         env HARDCORE_ARCHIVE_INHIBITED=1 HARDCORE_ARCHIVE_DEPENDENCIES_APPROVED=1 LC_ALL=C \
+            HARDCORE_ARCHIVE_DIAGNOSTIC_DIR="$item_diagnostics/planning" \
+            HARDCORE_ARCHIVE_LIVE_LOG="$plan_log" \
             bash "$script_path" "${BATCH_CHILD_ARGS[@]}" --analyze-only --force --yes \
             "$child" "$archive" >"$plan_log" 2>&1 || plan_rc=$?
+        printf '\nExit status: %s\n' "$plan_rc" >> "$plan_log"
 
         if (( plan_rc == 0 )); then
             dict=$(awk -F: '/^Dictionary:/ {gsub(/[^0-9]/,"",$2); print $2; exit}' "$plan_log")
@@ -4198,7 +4220,6 @@ run_batch_mode() {
             image_workers=1
             video_execution=Sequential
         fi
-        rm -f -- "$plan_log"
 
         src_dev=$(storage_lane_key "$child")
         dst_dev=$(storage_lane_key "$output_dir")
@@ -4226,10 +4247,6 @@ run_batch_mode() {
     fi
     (( max_parallel < 1 )) && max_parallel=1
     jobs=$max_parallel
-    if (( jobs > 1 )); then
-        logs_dir="$output_dir/.hardcore-batch-logs"
-        mkdir -p -- "$logs_dir"
-    fi
     printf '\nBatch archive plan\n'
     printf '════════════════════════════════════════════════════════════════\n'
     printf 'Parent folder:           %s\n' "$parent"
@@ -4368,6 +4385,7 @@ printf 'Dependency preflight:    %s\n' "$DEPENDENCY_PREFLIGHT_SUMMARY"
         wait "$pid"
         item_rc=$?
         set -e
+        printf '\nExit status: %s\n' "$item_rc" >> "${pid_logs[chosen]}"
         finish_item "$item_rc" "${pid_names[chosen]}" "${pid_sources[chosen]}"             "${pid_archives[chosen]}" "${pid_kinds[chosen]}" "${pid_logs[chosen]}"
         release_index_resources "$idx"
 
@@ -4429,19 +4447,25 @@ printf 'Dependency preflight:    %s\n' "$DEPENDENCY_PREFLIGHT_SUMMARY"
             item_args+=(--video-sequential)
         fi
 
+        item_slug=$(safe_slug "$child_name")
+        item_diagnostics="$logs_dir/$((index + 1))-${item_slug:0:80}"
+        item_log="$item_diagnostics/run.log"
+        printf 'Batch item log: %s\n' "$item_log"
         if (( jobs == 1 )); then
             rc=0
             env HARDCORE_ARCHIVE_INHIBITED="${HARDCORE_ARCHIVE_INHIBITED:-0}" HARDCORE_ARCHIVE_DEPENDENCIES_APPROVED=1 \
-                bash "$script_path" "${item_args[@]}" "$child" "$archive" || rc=$?
-            finish_item "$rc" "$child_name" "$child" "$archive" "$kind"
+                HARDCORE_ARCHIVE_DIAGNOSTIC_DIR="$item_diagnostics" HARDCORE_ARCHIVE_LIVE_LOG="$item_log" \
+                bash "$script_path" "${item_args[@]}" "$child" "$archive" 2>&1 | tee "$item_log" || rc=$?
+            printf '\nExit status: %s\n' "$rc" >> "$item_log"
+            finish_item "$rc" "$child_name" "$child" "$archive" "$kind" "$item_log"
         else
             while ! can_launch_index "$index"; do
                 wait_one_parallel
             done
-            item_log="$logs_dir/$(safe_slug "$child_name")-$(date '+%Y%m%d-%H%M%S').log"
             printf 'Launching with pinned resources: dictionary=%s MiB, RAM=%s MiB, CPU=%s, GPU=%s\n' \
                 "${plan_dict[index]}" "${plan_ram[index]}" "${plan_cpu[index]}" "${plan_gpu[index]}"
             env HARDCORE_ARCHIVE_INHIBITED="${HARDCORE_ARCHIVE_INHIBITED:-0}" HARDCORE_ARCHIVE_DEPENDENCIES_APPROVED=1 \
+                HARDCORE_ARCHIVE_DIAGNOSTIC_DIR="$item_diagnostics" HARDCORE_ARCHIVE_LIVE_LOG="$item_log" \
                 bash "$script_path" "${item_args[@]}" "$child" "$archive" >"$item_log" 2>&1 &
             pids+=("$!")
             BATCH_CHILD_PIDS+=("$!")
@@ -4548,10 +4572,10 @@ CONTAINER_FALLBACK_LIST=$(mktemp)
 COPY_LIST=$(mktemp)
 SNAPSHOT_BEFORE=$(mktemp)
 SNAPSHOT_AFTER=$(mktemp)
-SEVEN_ZIP_LOG=$(mktemp)
+SEVEN_ZIP_LOG=$(component_log_path 7zip.log)
 INVENTORY_RAW=$(mktemp)
-VIDEO_LOG=$(mktemp)
-IMAGE_LOG=$(mktemp)
+VIDEO_LOG=$(component_log_path video.log)
+IMAGE_LOG=$(component_log_path image.log)
 VIDEO_COMPRESSED_LIST=$(mktemp)
 VIDEO_FALLBACK_LIST=$(mktemp)
 VIDEO_RESULT_MANIFEST=$(mktemp)
@@ -4561,11 +4585,11 @@ IMAGE_FALLBACK_LIST=$(mktemp)
 NESTED_RESULT_MANIFEST=$(mktemp)
 NESTED_REPACKED_LIST=$(mktemp)
 NESTED_FALLBACK_LIST=$(mktemp)
-MC_TUNING_LOG=$(mktemp)
+MC_TUNING_LOG=$(component_log_path match-cycle.log)
 EXPECTED_PATHS=$(mktemp)
 ARCHIVE_PATHS=$(mktemp)
 HASH_MANIFEST=$(mktemp)
-HASH_VERIFY_LOG=$(mktemp)
+HASH_VERIFY_LOG=$(component_log_path hash-verification.log)
 SPECIAL_FILES_LIST=$(mktemp)
 NESTED_MOUNTS_LIST=$(mktemp)
 RESUME_MAP=$(mktemp)
@@ -4600,6 +4624,9 @@ choose_failed_output_paths() {
             FAILED_LOG_PATH="${stem}.${context}-${timestamp}-${suffix}.log"
         fi
 
+        if [[ -n ${HARDCORE_ARCHIVE_DIAGNOSTIC_DIR:-} ]]; then
+            FAILED_LOG_PATH="$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/${FAILED_LOG_PATH##*/}"
+        fi
         [[ ! -e $FAILED_ARCHIVE_PATH && ! -e $FAILED_LOG_PATH ]] && break
         ((suffix++))
     done
@@ -4703,12 +4730,8 @@ cleanup() {
     fi
 
 
-    if (( exit_status != 0 )) && [[ -n ${HARDCORE_ARCHIVE_DIAGNOSTIC_DIR:-} ]]; then
+    if [[ -n ${HARDCORE_ARCHIVE_DIAGNOSTIC_DIR:-} ]]; then
         mkdir -p -- "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR" 2>/dev/null || true
-        [[ -s ${VIDEO_LOG:-} ]] && cp -- "$VIDEO_LOG" "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/video.log" 2>/dev/null || true
-        [[ -s ${IMAGE_LOG:-} ]] && cp -- "$IMAGE_LOG" "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/image.log" 2>/dev/null || true
-        [[ -s ${SEVEN_ZIP_LOG:-} ]] && cp -- "$SEVEN_ZIP_LOG" "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/7zip.log" 2>/dev/null || true
-        [[ -s ${MC_TUNING_LOG:-} ]] && cp -- "$MC_TUNING_LOG" "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/match-cycle.log" 2>/dev/null || true
         {
             printf 'exit_status=%s\n' "$exit_status"
             printf 'failure_context=%s\n' "${FAILURE_CONTEXT:-unknown}"
@@ -4724,12 +4747,15 @@ cleanup() {
         } > "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/state.txt" 2>/dev/null || true
     fi
 
-    rm -f -- "$VIDEO_LIST" "$IMAGE_LIST" "$NESTED_LIST" "$CONTAINER_LIST" "$COPY_LIST" "$SNAPSHOT_BEFORE" "$SNAPSHOT_AFTER" "$SEVEN_ZIP_LOG" \
-        "$INVENTORY_RAW" "$VIDEO_LOG" "$IMAGE_LOG" "$VIDEO_COMPRESSED_LIST" "$VIDEO_FALLBACK_LIST" \
+    if [[ -z ${HARDCORE_ARCHIVE_DIAGNOSTIC_DIR:-} ]]; then
+        rm -f -- "$SEVEN_ZIP_LOG" "$VIDEO_LOG" "$IMAGE_LOG" "$MC_TUNING_LOG" "$HASH_VERIFY_LOG"
+    fi
+    rm -f -- "$VIDEO_LIST" "$IMAGE_LIST" "$NESTED_LIST" "$CONTAINER_LIST" "$COPY_LIST" "$SNAPSHOT_BEFORE" "$SNAPSHOT_AFTER" \
+        "$INVENTORY_RAW" "$VIDEO_COMPRESSED_LIST" "$VIDEO_FALLBACK_LIST" \
         "$VIDEO_RESULT_MANIFEST" "$IMAGE_RESULT_MANIFEST" "$IMAGE_OPTIMIZED_LIST" "$IMAGE_FALLBACK_LIST" \
         "$NESTED_RESULT_MANIFEST" "$NESTED_REPACKED_LIST" "$NESTED_FALLBACK_LIST" \
         "$CONTAINER_RESULT_MANIFEST" "$CONTAINER_REPACKED_LIST" "$CONTAINER_FALLBACK_LIST" \
-        "${MC_TUNING_LOG:-}" "$EXPECTED_PATHS" "$ARCHIVE_PATHS" "$HASH_MANIFEST" "$HASH_VERIFY_LOG" \
+        "$EXPECTED_PATHS" "$ARCHIVE_PATHS" "$HASH_MANIFEST" \
         "$SPECIAL_FILES_LIST" "$NESTED_MOUNTS_LIST" "$RESUME_MAP"
 
 
@@ -6502,7 +6528,7 @@ prepare_and_add_nested_archives() {
             elif ! "$SEVEN_ZIP" x -y -spd -o"$extracted" "$input" >>"$SEVEN_ZIP_LOG" 2>&1; then rc=91
             else
                 if [[ -n ${HARDCORE_ARCHIVE_DIAGNOSTIC_DIR:-} ]]; then
-                    child_log="$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/nested/depth-$((depth + 1))/${relative}.child.log"
+                    child_log="$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/nested/depth-$((depth + 1))/${relative}/run.log"
                     mkdir -p -- "$(dirname -- "$child_log")"
                 else
                     child_log="$NESTED_STAGE_PARENT/.child-$RANDOM-$$.log"
@@ -6517,6 +6543,8 @@ prepare_and_add_nested_archives() {
                 env HARDCORE_ARCHIVE_INHIBITED=1 \
                     HARDCORE_ARCHIVE_DEPENDENCIES_APPROVED=1 \
                     HARDCORE_ARCHIVE_NESTED_CHILD=1 \
+                    HARDCORE_ARCHIVE_DIAGNOSTIC_DIR="$(dirname -- "$child_log")" \
+                    HARDCORE_ARCHIVE_LIVE_LOG="$child_log" \
                     HARDCORE_ARCHIVE_HARDWARE_ENCODER_LOCKED="${VIDEO_ENCODER:-}" \
                     HARDCORE_ARCHIVE_NESTED_DEPTH=$((depth + 1)) \
                     bash "$(resolve_current_script)" "${inherited[@]}" "$extracted" "$child_archive" >>"$child_log" 2>&1 || rc=$?

@@ -209,13 +209,26 @@ Set it to any value from 0 through 100. A higher value preserves more visual fid
 
 ## Persistent diagnostics
 
-Every create run starts a persistent transcript before dependency checks. On Linux it is stored under:
+Every create run puts its logs in a visible `hardcore-archive-logs` folder in the destination directory. For example, creating `/mnt/SSD/test-compress.7z` creates:
 
 ```text
-~/.local/state/hardcore-archive/runs/<timestamp>-<pid>/run.log
+/mnt/SSD/hardcore-archive-logs/test-compress.7z-<timestamp>-<unique-id>/
+    run.log
+    report.txt
+    video.log
+    image.log
+    7zip.log
+    match-cycle.log
+    hash-verification.log
+    state.txt
+    nested/depth-1/<nested-archive-path>/run.log
 ```
 
-On interruption or failure, component logs and state are preserved beside it when available (`video.log`, `image.log`, `7zip.log`, `match-cycle.log`, `state.txt`). The video log records the exact FFmpeg command used for full transcodes, including the selected VAAPI render node when one is locked.
+The transcript starts before dependency checks and includes stdout, stderr, and the exit status. Component logs are written there while the job runs and retained on success as well as failure; unused components may have empty logs. `7zip.log` contains the latest archive stage; the full transcript retains earlier stages. `report.txt` is the optional success report (`--no-report` disables it). Failure reports also stay in this folder; a preserved failed archive stays beside the requested archive.
+
+Nested jobs have their own component logs beside their `run.log`, including detailed video calibration even when the nested job uses `--no-report`. Batch runs use the same visible folder inside the batch destination, with each item's logs and planning output under `batch/<item>/`. Each top-level run has a unique directory, so reruns keep previous logs. Without an explicit destination, logs go beside the automatically chosen archive (or inside the automatic batch output directory).
+
+The start of the run prints the exact log directory. Upload that run's folder to include the parent and child diagnostics together. The video log records the exact FFmpeg command used for full transcodes, including the selected VAAPI render node when one is locked. Existing logs and already-running jobs keep their original locations.
 
 ## Image optimization
 
