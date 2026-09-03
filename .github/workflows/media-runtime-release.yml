@@ -35,10 +35,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential curl xz-utils pkg-config meson ninja-build nasm yasm python3 xxd \
-            libva-dev libdrm-dev libvpl-dev
-          # NVENC/NVDEC headers are optional at build time. The runtime keeps GPU
-          # drivers host-owned and HCA already rejects unsupported encoders.
-          sudo apt-get install -y libffnvcodec-dev || true
+            libva-dev libdrm-dev
+          if [[ $(uname -m) == x86_64 ]]; then
+            sudo apt-get install -y libvpl-dev
+            # NVENC/NVDEC headers are optional at build time. The runtime keeps
+            # NVIDIA drivers host-owned and HCA already rejects unsupported encoders.
+            sudo apt-get install -y libffnvcodec-dev || true
+          fi
 
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
