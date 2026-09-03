@@ -86,19 +86,6 @@ hardcore_runtime_activate_dir() {
     return 0
 }
 
-hardcore_runtime_revision() {
-    local root=$1 versions value
-    [[ -n ${HARDCORE_ARCHIVE_MEDIA_RUNTIME_REVISION:-} ]] && {
-        printf '%s\n' "$HARDCORE_ARCHIVE_MEDIA_RUNTIME_REVISION"
-        return 0
-    }
-    versions="$root/packaging/media-runtime/versions.env"
-    [[ -r $versions ]] || return 1
-    value=$(awk -F= '$1 == "HCA_MEDIA_RUNTIME_REVISION" {print $2; exit}' "$versions")
-    [[ $value =~ ^[1-9][0-9]*$ ]] || return 1
-    printf '%s\n' "$value"
-}
-
 hardcore_runtime_cache_root() {
     if [[ $(uname -s 2>/dev/null || true) == Darwin ]]; then
         printf '%s\n' "${XDG_CACHE_HOME:-$HOME/Library/Caches}/hardcore-archive/media-runtime"
@@ -110,10 +97,10 @@ hardcore_runtime_cache_root() {
 hardcore_runtime_download() {
     local url=$1 output=$2
     if command -v curl >/dev/null 2>&1; then
-        curl --fail --location --silent --show-error --retry 2 --connect-timeout 15 \
-            --output "$output" "$url"
+        curl --fail --location --silent --retry 2 --connect-timeout 15 \
+            --output "$output" "$url" 2>/dev/null
     elif command -v wget >/dev/null 2>&1; then
-        wget -q --timeout=15 --tries=3 -O "$output" "$url"
+        wget -q --timeout=15 --tries=3 -O "$output" "$url" 2>/dev/null
     else
         return 1
     fi
@@ -127,12 +114,10 @@ hardcore_runtime_auto_enabled() {
 }
 
 hardcore_runtime_bootstrap() {
-    local root=$1 target=$2 revision cache_root final_root tag asset repo base_url tmp archive checksum expected actual
-    revision=$(hardcore_runtime_revision "$root" 2>/dev/null || true)
-    [[ -n $revision ]] || return 1
+    local target=$1 cache_root final_root tag asset repo base_url tmp archive checksum expected actual
 
     cache_root=$(hardcore_runtime_cache_root)
-    final_root="$cache_root/r$revision/$target/runtime"
+    final_root="$cache_root/$target/runtime"
     if [[ -x $final_root/bin/ffmpeg && -x $final_root/bin/ffprobe ]]; then
         hardcore_runtime_activate_dir "$final_root/bin" downloaded "$final_root/runtime-manifest.txt"
         return $?
@@ -145,19 +130,19 @@ hardcore_runtime_bootstrap() {
     esac
 
     repo=${HARDCORE_ARCHIVE_RUNTIME_REPOSITORY:-andr8076/Hardcore-Archive}
-    tag="media-runtime-r$revision"
+    tag=media-runtime-latest
     asset="hardcore-archive-media-runtime-$target.tar.gz"
     base_url="https://github.com/$repo/releases/download/$tag"
 
-    mkdir -p -- "$cache_root/r$revision/$target" || return 1
-    tmp=$(mktemp -d "$cache_root/r$revision/$target/.install.XXXXXX") || return 1
+    mkdir -p -- "$cache_root/$target" || return 1
+    tmp=$(mktemp -d "$cache_root/$target/.install.XXXXXX") || return 1
     archive="$tmp/$asset"
     checksum="$archive.sha256"
 
-    printf 'Hardcore Archive: fetching bundled FFmpeg/VMAF runtime for %s...\n' "$target" >&2
+    printf 'Hardcore Archive: downloading media runtime for %s...\n' "$target" >&2
     if ! hardcore_runtime_download "$base_url/$asset" "$archive" || \
        ! hardcore_runtime_download "$base_url/$asset.sha256" "$checksum"; then
-        HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR="Could not download media runtime $tag for $target."
+        HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR="Latest media runtime is not currently available for $target."
         export HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR
         rm -rf -- "$tmp"
         return 1
@@ -187,7 +172,7 @@ hardcore_runtime_bootstrap() {
 }
 
 hardcore_runtime_prepare_video_toolchain() {
-    local root target packaged_dir target_dir manifest cache_root revision cached_dir
+    local root target packaged_dir target_dir manifest cache_root cached_dir
     root=${HARDCORE_ARCHIVE_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)}
     target=$(hardcore_runtime_target)
 
@@ -218,20 +203,16 @@ hardcore_runtime_prepare_video_toolchain() {
         return $?
     fi
 
-    # Source checkouts use the pinned prebuilt runtime from the project's
-    # media-runtime release. The download happens once and is cached per target
-    # and runtime revision.
-    revision=$(hardcore_runtime_revision "$root" 2>/dev/null || true)
-    if [[ -n $revision ]]; then
-        cache_root=$(hardcore_runtime_cache_root)
-        cached_dir="$cache_root/r$revision/$target/runtime"
-        if [[ -x $cached_dir/bin/ffmpeg && -x $cached_dir/bin/ffprobe ]]; then
-            hardcore_runtime_activate_dir "$cached_dir/bin" downloaded "$cached_dir/runtime-manifest.txt"
-            return $?
-        fi
-        if hardcore_runtime_bootstrap "$root" "$target"; then
-            return 0
-        fi
+    # A source checkout downloads the newest HCA-managed runtime exactly once.
+    # Once present, that cached copy remains static and is reused on every run.
+    cache_root=$(hardcore_runtime_cache_root)
+    cached_dir="$cache_root/$target/runtime"
+    if [[ -x $cached_dir/bin/ffmpeg && -x $cached_dir/bin/ffprobe ]]; then
+        hardcore_runtime_activate_dir "$cached_dir/bin" downloaded "$cached_dir/runtime-manifest.txt"
+        return $?
+    fi
+    if hardcore_runtime_bootstrap "$target"; then
+        return 0
     fi
 
     # Offline/development fallback. The doctor still fails closed if the host
