@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise nested staging selection and the real recursive failure path."""
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import tempfile
@@ -8,7 +9,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = (ROOT / "lib/hardcore-archive-core.sh").read_text()
-FUNCTIONS = "choose_nested_work_root() {" + CORE.split(
+FUNCTIONS = f'source {shlex.quote(str(ROOT / "lib/calibration-identity.sh"))}\n' + "choose_nested_work_root() {" + CORE.split(
     "choose_nested_work_root() {", 1
 )[1].split("\nbuild_sparse_manifest() {", 1)[0]
 
@@ -144,6 +145,7 @@ class NestedWorkTests(unittest.TestCase):
 set -eu
 printf '%s\\n' "$@" > "$TEST_ROOT/child-args"
 [[ $HARDCORE_ARCHIVE_LIVE_LOG == "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/run.log" ]]
+[[ $HARDCORE_ARCHIVE_CALIBRATION_NAMESPACE =~ ^[a-f0-9]{64}$ ]]
 printf 'child calibration\\n' > "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/video.log"
 printf '%s\\n' "$CHILD_ERROR"
 exit "$CHILD_RC"

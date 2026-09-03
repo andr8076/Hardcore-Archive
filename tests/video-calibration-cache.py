@@ -13,10 +13,12 @@ CORE = (ROOT / "lib/hardcore-archive-core.sh").read_text()
 FUNCTIONS = CORE.split("\nHARDCORE_AUTO_CODEC_MODE=", 1)[1].split(
     "\ncalibrate_and_choose_video_codec\n", 1
 )[0]
-FUNCTIONS = "HARDCORE_AUTO_CODEC_MODE=" + FUNCTIONS
+FUNCTIONS = (f'source {shlex.quote(str(ROOT / "lib/calibration-identity.sh"))}\n'
+             f'source {shlex.quote(str(ROOT / "lib/timing.sh"))}\n'
+             "HARDCORE_AUTO_CODEC_MODE=" + FUNCTIONS)
 
 FIXTURE = r'''
-input="$TEST_ROOT/source.mov"
+input="${INPUT_PATH:-$TEST_ROOT/source.mov}"
 output_dir="$TEST_ROOT"
 output_name=source
 duration=${DURATION:-120}
@@ -148,6 +150,127 @@ printf 'RESULT:%s:%s:%s\n' "$rc" "$CAL_BEST_QUALITY" "$CAL_REASON"
         self.assertIn("RESULT:0:18:cache-validated", output)
         self.assertEqual(len(encodes), 1)
         self.assertEqual(measures, ["58.500\t3"])
+
+    def test_video_keeps_own_setting_after_harder_file_changes_group(self):
+        easy = self.root / "easy.mov"
+        hard = self.root / "hard.mov"
+        easy.write_bytes(b"easy source")
+        hard.write_bytes(b"hard source")
+        output, _, _ = self.run_calibration(INPUT_PATH=easy)
+        self.assertIn("RESULT:0:18:candidate-valid", output)
+        output, _, _ = self.run_calibration(INPUT_PATH=hard, CURVE="hard")
+        self.assertIn("Calibration cache source: group", output)
+        self.assertIn("RESULT:0:13:candidate-valid", output)
+        for path, curve, quality in ((easy, "normal", 18), (hard, "hard", 13),
+                                     (easy, "normal", 18)):
+            output, encodes, _ = self.run_calibration(INPUT_PATH=path, CURVE=curve)
+            self.assertIn("Calibration cache source: video", output)
+            self.assertIn(f"RESULT:0:{quality}:cache-validated", output)
+            self.assertEqual(len(encodes), 1)
+
+    def test_group_hit_is_pinned_and_staging_symlinks_keep_identity(self):
+        self.seed()
+        original = self.root / "actual.mov"
+        original.write_bytes(b"source")
+        for name, expected_source in (("stage1.mov", "group"), ("stage2.mov", "video")):
+            staged = self.root / name
+            staged.symlink_to(original)
+            output, encodes, _ = self.run_calibration(INPUT_PATH=staged)
+            self.assertIn(f"Calibration cache source: {expected_source}", output)
+            self.assertEqual(len(encodes), 1)
+
+    def test_source_change_and_replacement_invalidate_video_hint(self):
+        source = self.root / "actual.mov"
+        source.write_bytes(b"before")
+        self.run_calibration(INPUT_PATH=source)
+        original_time = source.stat().st_mtime_ns
+        source.write_bytes(b"after!")  # Same size and restored mtime; ctime still changes.
+        os.utime(source, ns=(original_time, original_time))
+        output, _, _ = self.run_calibration(INPUT_PATH=source)
+        self.assertIn("Calibration cache source: group", output)
+        replacement = self.root / "replacement"
+        replacement.write_bytes(b"after!")
+        os.utime(replacement, ns=(original_time, original_time))
+        replacement.replace(source)
+        output, _, _ = self.run_calibration(INPUT_PATH=source)
+        self.assertIn("Calibration cache source: group", output)
+
+    def test_video_hint_invalidates_for_policy_and_raw_profile_changes(self):
+        source = self.root / "actual.mov"
+        source.write_bytes(b"source")
+        self.run_calibration(INPUT_PATH=source)
+        for changes in ({"TARGET": 99}, {"BUILD": "new-build"}, {"SCALING": "true"},
+                        {"DENOISE": "true"}, {"HARDCORE_ARCHIVE_VAAPI_DEVICE": "/dev/dri/renderD129"},
+                        {"PROFILE": "codec_name=h264|profile=High|width=1920|height=1080|pix_fmt=yuv420p|avg_frame_rate=2999/100"}):
+            with self.subTest(changes=changes):
+                output, _, _ = self.run_calibration(INPUT_PATH=source, **changes)
+                self.assertNotIn("Calibration cache source: video", output)
+
+    def test_bad_video_hint_revalidates_then_recalibrates_without_group_shortcut(self):
+        source = self.root / "actual.mov"
+        source.write_bytes(b"source")
+        self.run_calibration(INPUT_PATH=source)
+        output, encodes, _ = self.run_calibration(INPUT_PATH=source, CURVE="hard")
+        self.assertIn("Calibration cache source: video", output)
+        self.assertIn("RESULT:0:13:candidate-valid", output)
+        self.assertNotIn("Calibration cache source: group", output)
+        self.assertGreater(len(encodes), 1)
+        for curve in ("unavailable", "nan", "flat"):
+            output, _, _ = self.run_calibration(INPUT_PATH=source, CURVE=curve)
+            self.assertNotIn("RESULT:0:", output)
+
+    def test_video_hint_rechecks_savings_and_malformed_or_symlink_entries(self):
+        source = self.root / "actual.mov"
+        source.write_bytes(b"source")
+        self.run_calibration(INPUT_PATH=source)
+        output, _, _ = self.run_calibration(INPUT_PATH=source, AUDIO_BPS=10000000)
+        self.assertIn("RESULT:3:18:minimum-saving-not-met", output)
+        entry = next(self.cache.glob("video-*"))
+        entry.write_text("malformed")
+        output, _, _ = self.run_calibration(INPUT_PATH=source)
+        self.assertIn("Calibration cache source: group", output)
+        outside = self.root / "outside"
+        outside.write_text("must not change")
+        entry.unlink()
+        entry.symlink_to(outside)
+        output, _, _ = self.run_calibration(INPUT_PATH=source)
+        self.assertIn("Calibration cache source: group", output)
+        self.assertEqual(outside.read_text(), "must not change")
+
+    def test_nested_identity_survives_fresh_extraction_and_changes_with_archive(self):
+        for name, namespace, expected_source in (("extract-A", "archive-v1", None),
+                                                 ("extract-B", "archive-v1", "video"),
+                                                 ("extract-C", "archive-v2", "group")):
+            root = self.root / name
+            source = root / "London/clip.mov"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"same archived video")
+            os.utime(source, ns=(1000000000, 1000000000))
+            output, encodes, _ = self.run_calibration(
+                INPUT_PATH=source, HARDCORE_ARCHIVE_CALIBRATION_NAMESPACE=namespace,
+                HARDCORE_ARCHIVE_CALIBRATION_SOURCE_ROOT=root)
+            if expected_source:
+                self.assertIn(f"Calibration cache source: {expected_source}", output)
+                self.assertEqual(len(encodes), 1)
+
+    def test_both_codecs_keep_video_settings_and_emit_independent_timings(self):
+        source = self.root / "actual.mov"
+        source.write_bytes(b"source")
+        timings = self.root / "timings.tsv"
+        timings.write_text("phase\telapsed_ns\texit_status\n")
+        body = "calibrate_and_choose_video_codec\n"
+        env = dict(INPUT_PATH=source, HARDCORE_ARCHIVE_VIDEO_CODEC_AUTO=1,
+                   HARDCORE_ARCHIVE_AUTO_AV1_ENCODER="av1_vaapi",
+                   HARDCORE_ARCHIVE_AUTO_HEVC_ENCODER="hevc_vaapi",
+                   HARDCORE_ARCHIVE_TIMING_FILE=timings)
+        self.run_calibration(body, **env)
+        output, encodes, _ = self.run_calibration(body, **env)
+        self.assertEqual(output.count("Calibration cache source: video"), 2)
+        self.assertEqual(len(encodes), 2)
+        rows = [line.split("\t") for line in timings.read_text().splitlines()[1:]]
+        self.assertEqual(len(rows), 4)
+        self.assertTrue(all(phase == "video_calibration" and int(ns) > 0 and rc == "0"
+                            for phase, ns, rc in rows))
 
     def test_failed_cached_quality_recalibrates_and_updates(self):
         self.seed()

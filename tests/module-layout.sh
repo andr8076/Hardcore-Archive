@@ -4,7 +4,7 @@ IFS=$'\n\t'
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 
 required=(
-    common platform config doctor inventory planner scheduler archive video images
+    common platform config doctor inventory planner scheduler archive video images timing calibration-identity
     containers nested verify restore reporting visual
 )
 for module in "${required[@]}"; do

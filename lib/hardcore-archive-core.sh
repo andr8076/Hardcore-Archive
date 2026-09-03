@@ -68,6 +68,9 @@ fi
 
 PROGRAM_NAME=${0##*/}
 SCRIPT_START_SECONDS=$SECONDS
+source "$(dirname -- "${BASH_SOURCE[0]}")/calibration-identity.sh"
+source "$(dirname -- "${BASH_SOURCE[0]}")/timing.sh"
+hardcore_timing_init
 SCRIPT_VERSION="2026-09-01"
 METADATA_HELPER=${HARDCORE_ARCHIVE_METADATA_HELPER:-}
 MIB=$((1024 * 1024))
@@ -1274,6 +1277,9 @@ run_logged_stage() {
     shift 2
     local started=$SECONDS
     local job_pid heartbeat_pid='' rc
+    local timing_started timing_phase=archive_write
+    timing_started=$(hardcore_timing_now 2>/dev/null) || timing_started=0
+    [[ $stage == 'archive integrity test' ]] && timing_phase=archive_verification
 
     : > "$logfile"
 
@@ -1298,6 +1304,10 @@ run_logged_stage() {
     fi
     set -e
 
+    # Strong verification is timed around extraction plus hashing as a whole.
+    if [[ $stage != 'single-pass hash extraction' ]]; then
+        hardcore_timing_record "$timing_phase" "$timing_started" "$rc"
+    fi
     printf '\n%s finished after %s.\n' "$stage" "$(format_duration "$((SECONDS - started))")"
     return "$rc"
 }
@@ -2208,6 +2218,7 @@ CAL_REASON=''
 CAL_QUALITY_LABEL=''
 CAL_SELECTED_VALIDATED=false
 CAL_CACHE_FILE=''
+CAL_FILE_CACHE_FILE=''
 
 # Cache entries are hints, never evidence that a different file meets VMAF.
 # Version this key when sampling, VMAF normalization or encoder policy changes.
@@ -2245,9 +2256,10 @@ PYCALPROFILE
 }
 
 calibration_cache_prepare() {
-    local codec=$1 encoder=$2 directory profile ffmpeg_build key
+    local codec=$1 encoder=$2 directory profile raw_profile ffmpeg_build key identity file_key
     local CAL_FILTER_CHAIN=''
     CAL_CACHE_FILE=''
+    CAL_FILE_CACHE_FILE=''
     [[ ${HARDCORE_ARCHIVE_CALIBRATION_CACHE:-true} == true ]] || return 0
     directory=${HARDCORE_ARCHIVE_CALIBRATION_CACHE_DIR:-}
     [[ -n $directory ]] || return 0
@@ -2255,6 +2267,7 @@ calibration_cache_prepare() {
         stream=codec_name,profile,width,height,pix_fmt,bits_per_raw_sample,avg_frame_rate,r_frame_rate,field_order,sample_aspect_ratio,color_range,color_space,color_transfer,color_primaries \
         -of compact=p=0:nk=0 "$input" 2>/dev/null) || return 0
     [[ -n $profile ]] || return 0
+    raw_profile=$profile
     profile=$(calibration_cache_profile "$profile") || return 0
     ffmpeg_build=$(ffmpeg -version 2>/dev/null) || return 0
     [[ -n $ffmpeg_build ]] || return 0
@@ -2267,10 +2280,17 @@ calibration_cache_prepare() {
     (umask 077; mkdir -p -- "$directory") 2>/dev/null || return 0
     [[ -d $directory && ! -L $directory && -O $directory && -w $directory ]] || return 0
     CAL_CACHE_FILE="$directory/$key"
+    identity=$(hardcore_calibration_identity "$input" 2>/dev/null) || return 0
+    [[ $identity =~ ^[a-f0-9]{64}$ ]] || return 0
+    file_key=$(printf '%s\0' 'per-video-calibration-v1' "$key" "$raw_profile" "$identity" |
+        sha256sum | awk '{print $1}') || return 0
+    [[ $file_key =~ ^[a-f0-9]{64}$ ]] || return 0
+    CAL_FILE_CACHE_FILE="$directory/video-$file_key"
 }
 
 calibration_cache_read() {
     local low=$1 high=$2 version quality timestamp extra now size
+    local CAL_CACHE_FILE=${3-$CAL_CACHE_FILE}
     [[ -n $CAL_CACHE_FILE && -f $CAL_CACHE_FILE && ! -L $CAL_CACHE_FILE && -O $CAL_CACHE_FILE ]] || return 1
     size=$(stat -c '%s' -- "$CAL_CACHE_FILE" 2>/dev/null) || return 1
     (( size > 0 && size <= 128 )) || return 1
@@ -2285,6 +2305,7 @@ calibration_cache_read() {
 
 calibration_cache_write() {
     local quality=$1 temporary_cache timestamp
+    local CAL_CACHE_FILE=${2-$CAL_CACHE_FILE}
     [[ -n $CAL_CACHE_FILE ]] || return 0
     timestamp=$(date +%s) || return 0
     temporary_cache=$(mktemp "${CAL_CACHE_FILE}.XXXXXX" 2>/dev/null) || return 0
@@ -2461,9 +2482,13 @@ evaluate_hardware_quality() {
 }
 
 calibrate_hardware_candidate() {
+    hardcore_timed video_calibration calibrate_hardware_candidate_impl "$@"
+}
+
+calibrate_hardware_candidate_impl() {
     local codec=$1 encoder=$2
     local range low high quality_label mid best_quality=0 best_video_bps=0
-    local source_average_bps required_savings cached_quality='' count
+    local source_average_bps required_savings cached_quality='' cache_source=group count
     local -a failed_qualities=() failed_scores=()
 
     CAL_BEST_QUALITY=''
@@ -2500,8 +2525,13 @@ calibrate_hardware_candidate() {
         "$encoder" "$quality_label" "$low" "$high" "$quality_vmaf_threshold"
 
     calibration_cache_prepare "$codec" "$encoder"
-    cached_quality=$(calibration_cache_read "$low" "$high") || cached_quality=''
+    if cached_quality=$(calibration_cache_read "$low" "$high" "$CAL_FILE_CACHE_FILE"); then
+        cache_source=video
+    else
+        cached_quality=$(calibration_cache_read "$low" "$high") || cached_quality=''
+    fi
     if [[ -n $cached_quality ]]; then
+        printf 'Calibration cache source: %s.\n' "$cache_source"
         printf 'Cached %s %s: validating one 3s center sample for this file.\n' "$quality_label" "$cached_quality"
         if evaluate_hardware_quality "$codec" "$encoder" "$cached_quality" one-shot && calibration_score_passes; then
             calibration_predict_savings "$CAL_AVG_VIDEO_BPS" "$source_average_bps"
@@ -2510,6 +2540,9 @@ calibrate_hardware_candidate() {
                 CAL_REASON='cache-validated'
                 printf 'Cached setting passed: VMAF %s >= %s; predicted saving %s%% (required %s%%).\n' \
                     "$CAL_MIN_VMAF" "$quality_vmaf_threshold" "$CAL_PREDICTED_SAVINGS" "$required_savings"
+                # Pin this video's successful setting without replacing the
+                # group representative every time an existing video is seen.
+                calibration_cache_write "$cached_quality" "$CAL_FILE_CACHE_FILE"
                 return 0
             fi
         fi
@@ -2561,6 +2594,7 @@ calibrate_hardware_candidate() {
         return 3
     fi
     calibration_cache_write "$best_quality"
+    calibration_cache_write "$best_quality" "$CAL_FILE_CACHE_FILE"
     CAL_REASON='candidate-valid'
     return 0
 }
@@ -2909,7 +2943,7 @@ printf '\n'
 
 printf '\nStarting FFmpeg\n'
 printf '%s\n' '────────────────────────────────────────────────────────────'
-if ! "${command[@]}"; then rm -f -- "$temporary"; temporary=''; die 'Encoding failed.'; fi
+if ! hardcore_timed video_encoding "${command[@]}"; then rm -f -- "$temporary"; temporary=''; die 'Encoding failed.'; fi
 
 actual_codec=$(ffprobe -v error -select_streams V:0 -show_entries stream=codec_name -of default=nw=1:nk=1 "$temporary" | head -n1)
 [[ "$actual_codec" == "$expected_codec" ]] || { rm -f -- "$temporary"; die "Codec validation failed."; }
@@ -2921,7 +2955,7 @@ if LC_NUMERIC=C awk -v difference="$duration_difference" 'BEGIN {exit !(differen
 fi
 
 printf '\nEncoding completed. Running full decode validation...\n'
-if ! ffmpeg -v error -nostdin -i "$temporary" -map '0:V:0' -map '0:a?' -f null -; then
+if ! hardcore_timed video_decode_validation ffmpeg -v error -nostdin -i "$temporary" -map '0:V:0' -map '0:a?' -f null -; then
     rm -f -- "$temporary"; die 'The output failed full decode validation.'
 fi
 
@@ -4519,6 +4553,7 @@ OUTPUT_INPUT=${POSITIONAL[1]:-}
 [[ -d $SOURCE_INPUT ]] || die "Source is not a directory: $SOURCE_INPUT"
 
 SOURCE=$(realpath -e -- "$SOURCE_INPUT")
+export HARDCORE_ARCHIVE_CALIBRATION_SOURCE_ROOT="$SOURCE"
 SOURCE_PARENT=$(dirname -- "$SOURCE")
 SOURCE_NAME=$(basename -- "$SOURCE")
 if [[ -z $OUTPUT_INPUT ]]; then
@@ -4721,6 +4756,10 @@ cleanup() {
 
     cache_completed_video_results 2>/dev/null || true
 
+    if [[ -n ${NESTED_TIMING_STARTED:-} ]]; then
+        hardcore_timing_record nested_processing "$NESTED_TIMING_STARTED" "$exit_status"
+    fi
+
     if [[ -n ${TEMP_ARCHIVE:-} && -e $TEMP_ARCHIVE ]]; then
         if (( exit_status == 0 )); then
             rm -f -- "$TEMP_ARCHIVE"
@@ -4745,6 +4784,7 @@ cleanup() {
             printf 'nested_repacked=%s\n' "${NESTED_REPACKED_COUNT:-0}"
             printf 'nested_preserved=%s\n' "${NESTED_FALLBACK_COUNT:-0}"
         } > "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/state.txt" 2>/dev/null || true
+        hardcore_timing_summary > "$HARDCORE_ARCHIVE_DIAGNOSTIC_DIR/timings.txt" 2>/dev/null || true
     fi
 
     if [[ -z ${HARDCORE_ARCHIVE_DIAGNOSTIC_DIR:-} ]]; then
@@ -6543,6 +6583,7 @@ prepare_and_add_nested_archives() {
                 env HARDCORE_ARCHIVE_INHIBITED=1 \
                     HARDCORE_ARCHIVE_DEPENDENCIES_APPROVED=1 \
                     HARDCORE_ARCHIVE_NESTED_CHILD=1 \
+                    HARDCORE_ARCHIVE_CALIBRATION_NAMESPACE="$(hardcore_calibration_identity "$input" || true)" \
                     HARDCORE_ARCHIVE_DIAGNOSTIC_DIR="$(dirname -- "$child_log")" \
                     HARDCORE_ARCHIVE_LIVE_LOG="$child_log" \
                     HARDCORE_ARCHIVE_HARDWARE_ENCODER_LOCKED="${VIDEO_ENCODER:-}" \
@@ -6936,6 +6977,8 @@ write_success_report() {
         printf 'Destination free at start: %s\n' "$DESTINATION_FREE_BYTES"
         printf 'Destination conservative requirement: %s\n' "$DESTINATION_REQUIRED_BYTES"
         printf 'Working filesystem: %s\n' "$(filesystem_type "$WORK_ROOT")"
+        printf '\n===== Phase timings =====\n'
+        hardcore_timing_summary
         if [[ -s $VIDEO_RESULT_MANIFEST ]]; then
             printf '\n===== Video decisions =====\n'
             printf 'action\toriginal path\tarchived path\toriginal bytes\tarchived bytes\n'
@@ -7056,7 +7099,12 @@ else
     printf '\nStage 6/8: No JPEG or PNG files need separate handling.\n'
 fi
 
+# This function can terminate the process on a fatal archive error, so keep
+# its existing errexit behavior instead of invoking it inside an if-wrapper.
+NESTED_TIMING_STARTED=$(hardcore_timing_now 2>/dev/null) || NESTED_TIMING_STARTED=0
 prepare_and_add_nested_archives
+hardcore_timing_record nested_processing "$NESTED_TIMING_STARTED" 0
+NESTED_TIMING_STARTED=''
 
 printf '\nAdding completeness, hash, and Linux metadata manifests...\n'
 add_safety_manifests_to_archive
@@ -7077,18 +7125,18 @@ else
 fi
 
 FAILURE_CONTEXT="completeness-test"
-verify_archive_completeness || \
+hardcore_timed archive_verification verify_archive_completeness || \
     die "Archive completeness verification failed. The archive is intact but does not contain every expected path."
 
 case "$VERIFY_MODE_EFFECTIVE" in
     hashes)
         FAILURE_CONTEXT="hash-verification"
-        verify_archive_hashes_single_pass || \
+        hardcore_timed archive_verification verify_archive_hashes_single_pass || \
             die "Archive hash verification failed. The failed archive and diagnostic log will be preserved."
         ;;
     extract)
         FAILURE_CONTEXT="full-extraction-verification"
-        verify_archive_by_extraction || \
+        hardcore_timed archive_verification verify_archive_by_extraction || \
             die "Full extraction verification failed. The failed archive and diagnostic log will be preserved."
         ;;
 esac

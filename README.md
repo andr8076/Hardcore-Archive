@@ -166,13 +166,16 @@ Video transcoding is hardware-only. CPU encoders are never accepted as dependenc
 
 `VIDEO_CODEC=auto` is the default. When both working AV1 and HEVC hardware encoders are available, Hardcore Archive checks them against the same VMAF floor and minimum-savings target for each video, then uses the candidate predicted to be smaller. `--video-codec av1` and `--video-codec hevc` remain explicit overrides.
 
-Hardware calibration (VAAPI, NVENC and QSV) now reuses successful settings for similar videos:
+Hardware calibration (VAAPI, NVENC and QSV) remembers each video's successful settings, with a shared cache for similar unfamiliar videos:
 
 - **First file in a group:** search the encoder's quality range using three 3-second segments (one for clips shorter than 9 seconds).
-- **Cache hit:** encode and measure one 3-second center segment from the current video at the cached setting. Both your configured `QUALITY_CHECK` VMAF target and predicted minimum savings must pass. A failed check, unavailable measurement, or insufficient saving triggers full calibration.
+- **Previously seen video:** prefer its own cached setting for each codec, so a harder video updating the group cache cannot silently replace it with a more conservative setting.
+- **Group or per-video cache hit:** encode and measure one 3-second center segment from the current video at the cached setting. Both your configured `QUALITY_CHECK` VMAF target and predicted minimum savings must pass. A failed check, unavailable measurement, or insufficient saving triggers full calibration.
 - **Early stopping:** if three failed trials span at least four quality steps, vary by no more than 0.25 VMAF, and remain at least 5 points below your target, stop that codec's search. Another available codec can still qualify; otherwise the original is preserved. This is a conservative rejection heuristic, not proof that higher quality could never pass.
 
-The cache groups sources by codec/profile, resolution, pixel format/bit depth, frame rate, interlacing, aspect ratio and color metadata. Keys also include the output codec, hardware encoder, selected VAAPI device, FFmpeg build, actual scaling/denoising filters and VMAF target. Only a successful full calibration writes a quality setting; failures are never cached. Every cache hit measures the new file, and its savings estimate includes that file's audio. The selected candidate reuses those measurements instead of repeating the separate three-segment preflight. Final codec, duration, stream-count, full-decode and actual-size checks remain in place.
+The cache groups sources by codec/profile, resolution, pixel format/bit depth, frame rate, interlacing, aspect ratio and color metadata. Keys also include the output codec, hardware encoder, selected VAAPI device, FFmpeg build, actual scaling/denoising filters and VMAF target. Successful full calibration updates the group and per-video entries; successful cache validation updates only that video's entry. Failures are never stored as accepted settings. Every cache hit measures the current file, and its savings estimate includes that file's audio. The selected candidate reuses those measurements instead of repeating the separate three-segment preflight. Final codec, duration, stream-count, full-decode and actual-size checks remain in place.
+
+Per-video identity uses the original resolved path, device/inode, size, and nanosecond modification/change times, plus the exact source profile and encoding policy. Staging symlinks resolve to that original. Nested videos use the containing archive's identity plus their relative path, size and stored modification time, so fresh extraction directories do not defeat reuse. This is a fast metadata identity for hints, not a content-hash guarantee; fresh quality/size validation is still required. Changed source metadata or encoding policy invalidates the per-video entry. Existing group entries remain usable and acquire per-video entries as files are processed; previous reports are not imported. The first cached setting learned for a video may still compress less than a fresh full search.
 
 For cache grouping only, average and declared frame rates each use the nearest whole-number rate when within 1% of it. For example, 59.9386 and 60.0053 fps share the 60 fps group; 30, 50 and 60 fps remain separate. Rates outside that tolerance retain their exact rational value, and invalid rates disable cache reuse. This avoids a fresh calibration for every camera clip whose measured average frame rate differs slightly. Video timestamps, encoding and VMAF sampling are unchanged; the cached setting still has to pass a fresh quality and savings check on the current file.
 
@@ -182,7 +185,7 @@ VMAF scoring runs on the **CPU**, separately from hardware encoding. `VIDEO_QUAL
 
 VMAF compares frames using a common time base and nearest-timestamp matching. Matroska sample timestamps are rounded to milliseconds; FFmpeg's default matching can otherwise pair a sample frame with the preceding reference frame and report falsely low quality even for a lossless sample. This keeps the original frame cadence and quality target. Calibration keys include this matching policy, so older cached settings are not reused after the correction. The real-FFmpeg regression uses SSIM's shared frame-matching machinery to check lossless and deliberately shifted samples even where libvmaf is unavailable.
 
-Settings persist across runs and are shared with batch/nested children. They expire after 30 days and are separated by quality target and processing settings. The default directory is `~/.cache/hardcore-archive/video-calibration-v1` on Linux or `~/Library/Caches/hardcore-archive/video-calibration-v1` on macOS (`XDG_CACHE_HOME` is respected). Override it with `VIDEO_CALIBRATION_CACHE_DIR`; deleting its contents forces fresh calibration. Cache writes are atomic, and unavailable or malformed cache entries simply fall back to full calibration.
+Settings persist across runs and are shared with batch/nested children. Entries expire after 30 days; successful per-video validation refreshes that video's entry. The default directory is `~/.cache/hardcore-archive/video-calibration-v1` on Linux or `~/Library/Caches/hardcore-archive/video-calibration-v1` on macOS (`XDG_CACHE_HOME` is respected). Override it with `VIDEO_CALIBRATION_CACHE_DIR`; deleting its contents forces fresh calibration. Cache writes are atomic. Missing or malformed per-video entries fall back to the shared group; without a usable group entry, full calibration runs. `--no-resume` disables reuse of completed video outputs but keeps calibration hints enabled.
 
 Before an interactive create run starts, Hardcore Archive prints the available AV1/HEVC FFmpeg encoders in two groups:
 
@@ -221,6 +224,8 @@ Every create run puts its logs in a visible `hardcore-archive-logs` folder in th
     match-cycle.log
     hash-verification.log
     state.txt
+    timings.tsv
+    timings.txt
     nested/depth-1/<nested-archive-path>/run.log
 ```
 
@@ -229,6 +234,8 @@ The transcript starts before dependency checks and includes stdout, stderr, and 
 Nested jobs have their own component logs beside their `run.log`, including detailed video calibration even when the nested job uses `--no-report`. Batch runs use the same visible folder inside the batch destination, with each item's logs and planning output under `batch/<item>/`. Each top-level run has a unique directory, so reruns keep previous logs. Without an explicit destination, logs go beside the automatically chosen archive (or inside the automatic batch output directory).
 
 The start of the run prints the exact log directory. Upload that run's folder to include the parent and child diagnostics together. The video log records the exact FFmpeg command used for full transcodes, including the selected VAAPI render node when one is locked. Existing logs and already-running jobs keep their original locations.
+
+The success report includes phase timings recorded directly with a monotonic clock: calibration/sample validation, full video encoding, full video decode validation, archive writing, archive verification (including strong extraction/hashing when selected), and nested processing. `timings.tsv` retains individual durations and exit statuses; `timings.txt` summarizes them even for children using `--no-report` and runs that fail after cleanup is installed. These measurements do not depend on parsing `run.log`. Each archive has its own journal. Worker phases can overlap, and the parent's nested-processing duration includes child work and parent archive updates, so the phase totals must not be added to infer wall time. Inventory, staging, and other preparation/finalization work are outside these measured phases.
 
 ## Image optimization
 

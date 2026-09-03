@@ -113,11 +113,14 @@ exit 7
         self.assertTrue(contents.endswith("Exit status: 7\n"))
 
     def test_component_logs_live_and_preserved_after_success_and_failure(self):
-        functions = function("component_log_path") + function("archive_report_path") + function("cleanup")
+        functions = (f'source {shlex.quote(str(ROOT / "lib/timing.sh"))}\n' +
+                     function("component_log_path") + function("archive_report_path") + function("cleanup"))
         for status in (0, 7):
             diagnostic = self.destination / f"run-{status}"
             script = functions + r'''
 export HARDCORE_ARCHIVE_DIAGNOSTIC_DIR=$1
+hardcore_timing_init
+hardcore_timed video_encoding true
 VIDEO_LOG=$(component_log_path video.log)
 IMAGE_LOG=$(component_log_path image.log)
 SEVEN_ZIP_LOG=$(component_log_path 7zip.log)
@@ -142,6 +145,8 @@ exit "$2"
             for name in ("video.log", "image.log", "7zip.log", "match-cycle.log", "hash-verification.log"):
                 self.assertEqual((diagnostic / name).read_text(), "component output\n")
             self.assertIn(f"exit_status={status}\n", (diagnostic / "state.txt").read_text())
+            self.assertIn("Full video encoding:", (diagnostic / "timings.txt").read_text())
+            self.assertIn("operations=1", (diagnostic / "timings.txt").read_text())
 
     def test_runtime_keeps_preflight_failure_and_exit_status(self):
         policy = self.root / "failed-policy.sh"
