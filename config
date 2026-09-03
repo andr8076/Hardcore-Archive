@@ -53,10 +53,10 @@ QUALITY_CHECK=92
 # VMAF CPU workers: auto uses available logical CPUs, capped at 8.
 # Set 1..64 to override (still capped at the CPUs available to the process).
 VIDEO_QUALITY_THREADS=auto
-# Reuse settings for similar source formats, after one fresh 3s sample passes.
+# Search from similar-video hints; reuse exact-video boundaries after a fresh sample.
 # Cache entries expire after 30 days. Set false to search every file in full.
 VIDEO_CALIBRATION_CACHE=true
-# Stop searches that plateau far below the VMAF target; preserve the original.
+# On a far-below-target plateau, check highest quality before rejecting the codec.
 VIDEO_CALIBRATION_EARLY_ABORT=true
 # Optional shared directory (default: platform cache/hardcore-archive/video-calibration-v1).
 # VIDEO_CALIBRATION_CACHE_DIR=/path/to/calibration-cache

@@ -2211,6 +2211,7 @@ HARDCORE_AUTO_AV1_ENCODER=${HARDCORE_ARCHIVE_AUTO_AV1_ENCODER:-}
 HARDCORE_AUTO_HEVC_ENCODER=${HARDCORE_ARCHIVE_AUTO_HEVC_ENCODER:-}
 CAL_MIN_VMAF=''
 CAL_AVG_VIDEO_BPS=''
+CAL_WORST_POSITION=''
 CAL_BEST_QUALITY=''
 CAL_PREDICTED_SAVINGS=''
 CAL_REQUIRED_SAVINGS=''
@@ -2311,6 +2312,37 @@ calibration_cache_write() {
     temporary_cache=$(mktemp "${CAL_CACHE_FILE}.XXXXXX" 2>/dev/null) || return 0
     if ! printf 'v1\t%s\t%s\n' "$quality" "$timestamp" > "$temporary_cache" || \
        ! mv -fT -- "$temporary_cache" "$CAL_CACHE_FILE" 2>/dev/null; then
+        rm -f -- "$temporary_cache"
+    fi
+    return 0
+}
+
+# Only v2 per-video records certify that a boundary was searched for this file.
+# Legacy v1 records remain useful starting hints, including pinned group hits.
+calibration_video_cache_read() {
+    local low=$1 high=$2 version kind quality timestamp position bps extra size now
+    [[ -n $CAL_FILE_CACHE_FILE && -f $CAL_FILE_CACHE_FILE && ! -L $CAL_FILE_CACHE_FILE && -O $CAL_FILE_CACHE_FILE ]] || return 1
+    size=$(stat -c '%s' -- "$CAL_FILE_CACHE_FILE" 2>/dev/null) || return 1
+    (( size > 0 && size <= 128 )) || return 1
+    IFS=$'\t' read -r version kind quality timestamp position bps extra < "$CAL_FILE_CACHE_FILE" || return 1
+    [[ $version == v2 && -z $extra && $kind =~ ^(boundary|rejected)$ &&
+       $quality =~ ^[1-9][0-9]{0,2}$ && $timestamp =~ ^[1-9][0-9]{0,10}$ &&
+       $position =~ ^0\.(10|50|90)$ && $bps =~ ^[1-9][0-9]{0,14}$ ]] || return 1
+    (( quality >= low && quality <= high )) || return 1
+    # Rejection must have been witnessed at the encoder's highest quality.
+    [[ $kind != rejected ]] || (( quality == low )) || return 1
+    now=$(date +%s) || return 1
+    (( timestamp <= now && now - timestamp <= 2592000 )) || return 1
+    printf '%s\t%s\t%s\t%s' "$kind" "$quality" "$position" "$bps"
+}
+
+calibration_video_cache_write() {
+    local kind=$1 quality=$2 position=$3 bps=$4 temporary_cache timestamp
+    [[ -n $CAL_FILE_CACHE_FILE ]] || return 0
+    timestamp=$(date +%s) || return 0
+    temporary_cache=$(mktemp "${CAL_FILE_CACHE_FILE}.XXXXXX" 2>/dev/null) || return 0
+    if ! printf 'v2\t%s\t%s\t%s\t%s\t%s\n' "$kind" "$quality" "$timestamp" "$position" "$bps" > "$temporary_cache" || \
+       ! mv -fT -- "$temporary_cache" "$CAL_FILE_CACHE_FILE" 2>/dev/null; then
         rm -f -- "$temporary_cache"
     fi
     return 0
@@ -2420,8 +2452,12 @@ evaluate_hardware_quality() {
     local -a CAL_COMMAND=()
     CAL_MIN_VMAF=''
     CAL_AVG_VIDEO_BPS=''
+    CAL_WORST_POSITION=''
 
-    [[ $mode == one-shot ]] && positions=(0.50)
+    if [[ $mode == one-shot ]]; then
+        [[ ${5:-0.50} =~ ^0\.(10|50|90)$ ]] || return 1
+        positions=("${5:-0.50}")
+    fi
 
     if LC_NUMERIC=C awk -v d="$duration" 'BEGIN {exit !(d<9)}'; then
         positions=(0.50)
@@ -2471,6 +2507,7 @@ evaluate_hardware_quality() {
         if LC_NUMERIC=C awk -v a="$MEASURED_QUALITY_SCORE" -v b="$minimum_vmaf" \
             'BEGIN {exit !(a<b)}'; then
             minimum_vmaf=$MEASURED_QUALITY_SCORE
+            CAL_WORST_POSITION=$position
         fi
         rm -f -- "$sample_file" "${sample_file}.vmaf.json"
     done
@@ -2487,8 +2524,9 @@ calibrate_hardware_candidate() {
 
 calibrate_hardware_candidate_impl() {
     local codec=$1 encoder=$2
-    local range low high quality_label mid best_quality=0 best_video_bps=0
-    local source_average_bps required_savings cached_quality='' cache_source=group count
+    local range low high endpoint quality_label mid best_quality=0 best_video_bps=0 best_position=''
+    local source_average_bps required_savings cached_quality='' cache_source=group count next_quality=''
+    local record='' cache_kind cached_position cached_bps plateau_checked=false
     local -a failed_qualities=() failed_scores=()
 
     CAL_BEST_QUALITY=''
@@ -2503,6 +2541,7 @@ calibrate_hardware_candidate_impl() {
     }
     range=$(calibration_quality_range "$encoder") || return 4
     IFS=' ' read -r low high quality_label <<< "$range"
+    endpoint=$low
     CAL_QUALITY_LABEL=$quality_label
 
     source_average_bps=$(LC_NUMERIC=C awk -v bytes="$original_size" -v seconds="$duration" \
@@ -2525,33 +2564,69 @@ calibrate_hardware_candidate_impl() {
         "$encoder" "$quality_label" "$low" "$high" "$quality_vmaf_threshold"
 
     calibration_cache_prepare "$codec" "$encoder"
-    if cached_quality=$(calibration_cache_read "$low" "$high" "$CAL_FILE_CACHE_FILE"); then
-        cache_source=video
-    else
-        cached_quality=$(calibration_cache_read "$low" "$high") || cached_quality=''
-    fi
-    if [[ -n $cached_quality ]]; then
-        printf 'Calibration cache source: %s.\n' "$cache_source"
-        printf 'Cached %s %s: validating one 3s center sample for this file.\n' "$quality_label" "$cached_quality"
-        if evaluate_hardware_quality "$codec" "$encoder" "$cached_quality" one-shot && calibration_score_passes; then
-            calibration_predict_savings "$CAL_AVG_VIDEO_BPS" "$source_average_bps"
-            if calibration_savings_pass; then
-                CAL_BEST_QUALITY=$cached_quality
-                CAL_REASON='cache-validated'
-                printf 'Cached setting passed: VMAF %s >= %s; predicted saving %s%% (required %s%%).\n' \
-                    "$CAL_MIN_VMAF" "$quality_vmaf_threshold" "$CAL_PREDICTED_SAVINGS" "$required_savings"
-                # Pin this video's successful setting without replacing the
-                # group representative every time an existing video is seen.
-                calibration_cache_write "$cached_quality" "$CAL_FILE_CACHE_FILE"
-                return 0
+    if record=$(calibration_video_cache_read "$low" "$high"); then
+        IFS=$'\t' read -r cache_kind cached_quality cached_position cached_bps <<< "$record"
+        printf 'Calibration cache source: video (%s).\n' "$cache_kind"
+        printf 'Cached %s %s: validating one 3s segment at the previously worst position %s.\n' \
+            "$quality_label" "$cached_quality" "$cached_position"
+        if evaluate_hardware_quality "$codec" "$encoder" "$cached_quality" one-shot "$cached_position"; then
+            if [[ $cache_kind == rejected ]] && ! calibration_score_passes; then
+                CAL_REASON='cached-quality-rejection-confirmed'
+                printf 'Highest-quality setting still fails VMAF (%s < %s); skipping repeated codec search.\n' \
+                    "$CAL_MIN_VMAF" "$quality_vmaf_threshold"
+                calibration_video_cache_write rejected "$cached_quality" "$CAL_WORST_POSITION" "$CAL_AVG_VIDEO_BPS"
+                return 2
+            fi
+            if [[ $cache_kind == boundary ]] && calibration_score_passes; then
+                calibration_predict_savings "$CAL_AVG_VIDEO_BPS" "$source_average_bps"
+                if calibration_savings_pass; then
+                    # Keep the three-segment bitrate estimate for fair codec
+                    # competition; one difficult scene is not representative.
+                    calibration_predict_savings "$cached_bps" "$source_average_bps"
+                    if calibration_savings_pass; then
+                        CAL_BEST_QUALITY=$cached_quality
+                        CAL_REASON='cache-validated'
+                        printf 'Cached setting passed: VMAF %s >= %s; predicted saving %s%% (required %s%%).\n' \
+                            "$CAL_MIN_VMAF" "$quality_vmaf_threshold" "$CAL_PREDICTED_SAVINGS" "$required_savings"
+                        calibration_video_cache_write boundary "$cached_quality" "$cached_position" "$cached_bps"
+                        return 0
+                    fi
+                fi
             fi
         fi
-        printf 'Cached setting did not pass quality/size validation; running full calibration.\n'
+        printf 'Cached result needs a fresh search; running full calibration.\n'
         CAL_PREDICTED_SAVINGS=''
+    else
+        if cached_quality=$(calibration_cache_read "$low" "$high" "$CAL_FILE_CACHE_FILE"); then
+            cache_source=legacy-video
+        else
+            cached_quality=$(calibration_cache_read "$low" "$high") || cached_quality=''
+        fi
+        if [[ -n $cached_quality ]]; then
+            printf 'Calibration cache source: %s.\n' "$cache_source"
+            printf 'Using cached %s %s as a search hint; checking all segments and seeking the compression boundary.\n' \
+                "$quality_label" "$cached_quality"
+            if evaluate_hardware_quality "$codec" "$encoder" "$cached_quality"; then
+                if calibration_score_passes; then
+                    best_quality=$cached_quality
+                    best_video_bps=$CAL_AVG_VIDEO_BPS
+                    best_position=$CAL_WORST_POSITION
+                    low=$((cached_quality + 1))
+                    # Usually the group hint is already near the boundary.
+                    # Check its neighbor before bisecting the remaining range.
+                    next_quality=$low
+                else
+                    high=$((cached_quality - 1))
+                fi
+            else
+                printf 'Cached hint measurement unavailable; running full calibration.\n'
+            fi
+        fi
     fi
 
     while (( low <= high )); do
-        mid=$(((low + high) / 2))
+        if [[ -n $next_quality ]]; then mid=$next_quality; next_quality=''
+        else mid=$(((low + high) / 2)); fi
         if ! evaluate_hardware_quality "$codec" "$encoder" "$mid"; then
             CAL_REASON="sample-probe-failed-at-${mid}"
             return 1
@@ -2560,19 +2635,31 @@ calibrate_hardware_candidate_impl() {
         if calibration_score_passes; then
             best_quality=$mid
             best_video_bps=$CAL_AVG_VIDEO_BPS
+            best_position=$CAL_WORST_POSITION
             low=$((mid + 1))
         else
             if (( best_quality == 0 )); then
                 failed_qualities+=("$mid")
                 failed_scores+=("$CAL_MIN_VMAF")
                 count=${#failed_qualities[@]}
-                if (( count >= 3 )) && calibration_has_plateau \
+                if [[ $plateau_checked == false ]] && (( count >= 3 )) && calibration_has_plateau \
                     "${failed_qualities[count-3]}" "${failed_qualities[count-2]}" "${failed_qualities[count-1]}" \
                     "${failed_scores[count-3]}" "${failed_scores[count-2]}" "${failed_scores[count-1]}"; then
-                    CAL_REASON='quality-plateau-below-floor'
-                    printf 'Stopping calibration early: VMAF plateau near %s is far below %s; original retained unless another codec passes.\n' \
-                        "$CAL_MIN_VMAF" "$quality_vmaf_threshold"
-                    return 2
+                    plateau_checked=true
+                    printf 'VMAF plateau detected; checking highest-quality %s %s at the failing position before rejecting.\n' \
+                        "$quality_label" "$endpoint"
+                    if ! evaluate_hardware_quality "$codec" "$encoder" "$endpoint" one-shot "$CAL_WORST_POSITION"; then
+                        CAL_REASON="sample-probe-failed-at-${endpoint}"
+                        return 1
+                    fi
+                    if ! calibration_score_passes; then
+                        CAL_REASON='quality-endpoint-below-floor'
+                        printf 'Highest-quality setting fails VMAF (%s < %s); another codec may still qualify.\n' \
+                            "$CAL_MIN_VMAF" "$quality_vmaf_threshold"
+                        calibration_video_cache_write rejected "$endpoint" "$CAL_WORST_POSITION" "$CAL_AVG_VIDEO_BPS"
+                        return 2
+                    fi
+                    printf 'Highest-quality sample recovered; continuing the boundary search.\n'
                 fi
             fi
             high=$((mid - 1))
@@ -2581,6 +2668,9 @@ calibrate_hardware_candidate_impl() {
 
     if (( best_quality <= 0 )); then
         CAL_REASON='quality-floor-not-met'
+        if ! calibration_score_passes; then
+            calibration_video_cache_write rejected "$endpoint" "$CAL_WORST_POSITION" "$CAL_AVG_VIDEO_BPS"
+        fi
         return 2
     fi
 
@@ -2594,7 +2684,7 @@ calibrate_hardware_candidate_impl() {
         return 3
     fi
     calibration_cache_write "$best_quality"
-    calibration_cache_write "$best_quality" "$CAL_FILE_CACHE_FILE"
+    calibration_video_cache_write boundary "$best_quality" "$best_position" "$best_video_bps"
     CAL_REASON='candidate-valid'
     return 0
 }

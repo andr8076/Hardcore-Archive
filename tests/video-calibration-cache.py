@@ -46,9 +46,19 @@ ffmpeg() {
         printf '%s\n' "${BUILD:-ffmpeg-test-build}"
         return 0
     fi
-    local output=${!#} sample_bytes=${SAMPLE_BYTES:-10000}
+    local output=${!#} sample_bytes=${SAMPLE_BYTES:-10000} quality previous='' argument
     { printf '%q ' "$@"; printf '\n'; } >> "$TEST_ROOT/encodes"
     [[ $output == *calibrate-av1-* ]] && sample_bytes=$((sample_bytes * 8 / 10))
+    if [[ ${SIZE_BY_QUALITY:-0} == 1 && $output =~ calibrate-hevc-([0-9]+) ]]; then
+        quality=${BASH_REMATCH[1]}
+        sample_bytes=$((1000000 / (quality + 1)))
+    fi
+    if [[ ${SIZE_BY_POSITION:-0} == 1 ]]; then
+        for argument in "$@"; do
+            [[ $previous == -ss && $argument == 105.300 ]] && sample_bytes=$((sample_bytes * 2))
+            previous=$argument
+        done
+    fi
     truncate -s "$sample_bytes" "$output"
 }
 ffprobe() {
@@ -67,11 +77,14 @@ measure_preflight_quality() {
     if [[ ${FAIL_FIRST:-0} == 1 && $measure_count == 1 ]]; then return 1; fi
     [[ $file =~ calibrate-(av1|hevc)-([0-9]+) ]] || return 1
     quality=${BASH_REMATCH[2]}
+    [[ ${FAIL_ENDPOINT:-0} == 1 && $quality == 1 ]] && return 1
     [[ ${BASH_REMATCH[1]} == av1 ]] && quality=$(((quality + 4) / 5))
     [[ $mode == av1-plateau && ${BASH_REMATCH[1]} == av1 ]] && mode=flat
     MEASURED_QUALITY_KIND=VMAF
     case "$mode" in
         flat) MEASURED_QUALITY_SCORE=74 ;;
+        edge-flat) MEASURED_QUALITY_SCORE=100; [[ $start != 105.300 ]] || MEASURED_QUALITY_SCORE=74 ;;
+        recovery) MEASURED_QUALITY_SCORE=$((quality <= 2 ? 95 : 74)) ;;
         dji)
             case "$quality" in
                 26) MEASURED_QUALITY_SCORE=71.87 ;;
@@ -91,6 +104,10 @@ measure_preflight_quality() {
         ssim) MEASURED_QUALITY_KIND=SSIM; MEASURED_QUALITY_SCORE=0.99 ;;
         *) MEASURED_QUALITY_SCORE=$((quality < 10 ? 100 : 110-quality)) ;;
     esac
+    if [[ ${WORST_END:-0} == 1 && $start == 105.300 ]]; then
+        MEASURED_QUALITY_SCORE=$((MEASURED_QUALITY_SCORE - 5))
+    fi
+    return 0
 }
 apply_encoder() { video_encoder=$1; }
 '''
@@ -144,12 +161,12 @@ printf 'RESULT:%s:%s:%s\n' "$rc" "$CAL_BEST_QUALITY" "$CAL_REASON"
         self.assertEqual(len(list(self.cache.iterdir())), 1)
         return next(self.cache.iterdir())
 
-    def test_cold_search_then_one_shot_across_processes(self):
+    def test_group_hint_checks_boundary_on_each_unidentified_video(self):
         self.seed()
         output, encodes, measures = self.run_calibration()
-        self.assertIn("RESULT:0:18:cache-validated", output)
-        self.assertEqual(len(encodes), 1)
-        self.assertEqual(measures, ["58.500\t3"])
+        self.assertIn("RESULT:0:18:candidate-valid", output)
+        self.assertEqual(len(encodes), 6)
+        self.assertEqual(measures, ["11.700\t3", "58.500\t3", "105.300\t3"] * 2)
 
     def test_video_keeps_own_setting_after_harder_file_changes_group(self):
         easy = self.root / "easy.mov"
@@ -177,7 +194,7 @@ printf 'RESULT:%s:%s:%s\n' "$rc" "$CAL_BEST_QUALITY" "$CAL_REASON"
             staged.symlink_to(original)
             output, encodes, _ = self.run_calibration(INPUT_PATH=staged)
             self.assertIn(f"Calibration cache source: {expected_source}", output)
-            self.assertEqual(len(encodes), 1)
+            self.assertEqual(len(encodes), 6 if expected_source == "group" else 1)
 
     def test_source_change_and_replacement_invalidate_video_hint(self):
         source = self.root / "actual.mov"
@@ -251,7 +268,7 @@ printf 'RESULT:%s:%s:%s\n' "$rc" "$CAL_BEST_QUALITY" "$CAL_REASON"
                 HARDCORE_ARCHIVE_CALIBRATION_SOURCE_ROOT=root)
             if expected_source:
                 self.assertIn(f"Calibration cache source: {expected_source}", output)
-                self.assertEqual(len(encodes), 1)
+                self.assertEqual(len(encodes), 6 if expected_source == "group" else 1)
 
     def test_both_codecs_keep_video_settings_and_emit_independent_timings(self):
         source = self.root / "actual.mov"
@@ -278,8 +295,8 @@ printf 'RESULT:%s:%s:%s\n' "$rc" "$CAL_BEST_QUALITY" "$CAL_REASON"
         self.assertIn("RESULT:0:13:candidate-valid", output)
         self.assertGreater(len(encodes), 1)
         output, encodes, _ = self.run_calibration(CURVE="hard")
-        self.assertIn("RESULT:0:13:cache-validated", output)
-        self.assertEqual(len(encodes), 1)
+        self.assertIn("RESULT:0:13:candidate-valid", output)
+        self.assertEqual(len(encodes), 6)
 
     def test_failed_cache_measurement_retries_full_search(self):
         self.seed()
@@ -307,7 +324,7 @@ printf 'RESULT:%s:%s:%s\n' "$rc" "$CAL_BEST_QUALITY" "$CAL_REASON"
         # Audio alone makes this candidate too large despite passing VMAF.
         output, encodes, _ = self.run_calibration(AUDIO_BPS=10000000)
         self.assertIn("RESULT:3:18:minimum-saving-not-met", output)
-        self.assertEqual(len(encodes), 19)
+        self.assertEqual(len(encodes), 6)
         self.assertEqual(entry.read_text(), original)
 
     def test_cache_isolated_by_target_profile_build_device_and_filters(self):
@@ -333,11 +350,11 @@ printf 'RESULT:%s:%s:%s\n' "$rc" "$CAL_BEST_QUALITY" "$CAL_REASON"
         for rate in ("762000/12713", "39575/661", "1176600/19669", "60/1"):
             with self.subTest(rate=rate):
                 output, encodes, _ = self.run_calibration(PROFILE=profile(rate))
-                self.assertIn("RESULT:0:18:cache-validated", output)
-                self.assertEqual(len(encodes), 1)
+                self.assertIn("RESULT:0:18:candidate-valid", output)
+                self.assertEqual(len(encodes), 6)
         self.assertEqual(len(list(self.cache.iterdir())), 1)
         output, encodes, _ = self.run_calibration(PROFILE=profile("164775/2746"), CURVE="hard")
-        self.assertIn("Cached setting did not pass", output)
+        self.assertIn("as a search hint", output)
         self.assertIn("RESULT:0:13:candidate-valid", output)
         self.assertGreater(len(encodes), 1)
 
@@ -422,17 +439,17 @@ run_video_preflight
                 output, encodes, _ = self.run_calibration(body, ENCODER=encoder)
                 self.assertEqual(len(encodes), 18)
                 output, encodes, _ = self.run_calibration(body, ENCODER=encoder)
-                self.assertIn("Cached setting passed", output)
-                self.assertEqual(len(encodes), 1)
+                self.assertIn("as a search hint", output)
+                self.assertEqual(len(encodes), 6)
 
-    def test_plateau_aborts_without_caching_failure(self):
+    def test_plateau_confirms_endpoint_without_identity_cannot_cache_rejection(self):
         output, encodes, _ = self.run_calibration(CURVE="dji")
-        self.assertIn("RESULT:2::quality-plateau-below-floor", output)
-        self.assertEqual(len(encodes), 12)  # QP 26, 13, 6, 3; omit QP 1.
+        self.assertIn("RESULT:2::quality-endpoint-below-floor", output)
+        self.assertEqual(len(encodes), 13)  # Four full trials plus one QP 1 witness.
         self.assertEqual(list(self.cache.iterdir()), [])
         output, encodes, _ = self.run_calibration(CURVE="flat")
-        self.assertIn("quality-plateau-below-floor", output)
-        self.assertEqual(len(encodes), 9)
+        self.assertIn("quality-endpoint-below-floor", output)
+        self.assertEqual(len(encodes), 10)
 
     def test_near_target_or_disabled_plateau_searches_to_endpoint(self):
         for changes in ({"CURVE": "near"}, {"CURVE": "flat", "TARGET": 75},
@@ -457,8 +474,8 @@ run_video_preflight
         self.assertIn("reusing this file", output)
         self.assertEqual(len(encodes), 18)
         output, encodes, _ = self.run_calibration(body)
-        self.assertIn("Cached setting passed", output)
-        self.assertEqual(len(encodes), 1)
+        self.assertIn("as a search hint", output)
+        self.assertEqual(len(encodes), 6)
 
     def test_codec_competition_keeps_independent_results(self):
         body = r'''
@@ -474,7 +491,7 @@ printf 'SELECTED:%s\n' "$video_encoder"
         self.assertEqual(len(list(self.cache.iterdir())), 2)
         output, encodes, _ = self.run_calibration(body)
         self.assertIn("SELECTED:av1_vaapi", output)
-        self.assertEqual(len(encodes), 2)
+        self.assertEqual(len(encodes), 12)
         output, _, _ = self.run_calibration(body, CURVE="av1-plateau")
         self.assertIn("SELECTED:hevc_vaapi", output)
 
@@ -489,6 +506,151 @@ video_encoder=libx265
 calibrate_and_choose_video_codec
 [[ $CAL_SELECTED_VALIDATED == false ]]
 ''')
+
+    def test_conservative_hint_improves_compression_to_cold_search_boundary(self):
+        # This is the old shortcut's regression: a QP 13 group representative
+        # must not pin an easier video below its passing QP 18 boundary.
+        self.run_calibration(CURVE="hard")
+        source = self.root / "easier.mov"
+        source.write_bytes(b"easier source")
+        output, encodes, _ = self.run_calibration(INPUT_PATH=source, SIZE_BY_QUALITY=1)
+        self.assertIn("RESULT:0:18:candidate-valid", output)
+        self.assertLessEqual(len(encodes), 24)  # Bounded hint + neighbor + bisection.
+        self.assertIn("hevc_vaapi 19", output)  # The next compression step fails.
+        cold, _, _ = self.run_calibration(HARDCORE_ARCHIVE_CALIBRATION_CACHE="false", SIZE_BY_QUALITY=1)
+        self.assertIn("RESULT:0:18:candidate-valid", cold)
+        output, encodes, _ = self.run_calibration(INPUT_PATH=source, SIZE_BY_QUALITY=1)
+        self.assertIn("RESULT:0:18:cache-validated", output)
+        self.assertEqual(len(encodes), 1)
+
+    def test_legacy_pinned_group_hit_is_upgraded_by_search(self):
+        source = self.root / "legacy.mov"
+        source.write_bytes(b"source")
+        self.run_calibration(INPUT_PATH=source)
+        entry = next(self.cache.glob("video-*"))
+        entry.write_text(f"v1\t13\t{int(time.time())}\n")
+        output, encodes, _ = self.run_calibration(INPUT_PATH=source)
+        self.assertIn("Calibration cache source: legacy-video", output)
+        self.assertIn("RESULT:0:18:candidate-valid", output)
+        self.assertGreater(len(encodes), 1)
+        self.assertTrue(entry.read_text().startswith("v2\tboundary\t18\t"))
+
+    def test_group_hint_checks_hard_scene_and_video_rechecks_worst_position(self):
+        self.seed()
+        source = self.root / "hard-ending.mov"
+        source.write_bytes(b"source")
+        output, _, _ = self.run_calibration(INPUT_PATH=source, WORST_END=1, SIZE_BY_POSITION=1)
+        self.assertIn("RESULT:0:13:candidate-valid", output)
+        cold_prediction = output.split("predicted saving ")[-1].split(";")[0]
+        output, encodes, measures = self.run_calibration(INPUT_PATH=source, WORST_END=1, SIZE_BY_POSITION=1)
+        self.assertIn("RESULT:0:13:cache-validated", output)
+        self.assertEqual(len(encodes), 1)
+        self.assertEqual(measures, ["105.300\t3"])
+        self.assertIn("predicted saving " + cold_prediction, output)
+
+    def test_rejection_rechecks_actual_failing_scene_at_endpoint(self):
+        source = self.root / "bad-ending.mov"
+        source.write_bytes(b"source")
+        output, encodes, _ = self.run_calibration(INPUT_PATH=source, CURVE="edge-flat")
+        self.assertIn("RESULT:2::quality-endpoint-below-floor", output)
+        self.assertEqual(len(encodes), 10)
+        self.assertIn("-global_quality:v 1 ", encodes[-1])
+        output, encodes, measures = self.run_calibration(INPUT_PATH=source, CURVE="edge-flat")
+        self.assertIn("RESULT:2::cached-quality-rejection-confirmed", output)
+        self.assertEqual(len(encodes), 1)
+        self.assertEqual(measures, ["105.300\t3"])
+        self.assertFalse([p for p in self.cache.iterdir() if not p.name.startswith("video-")])
+
+    def test_plateau_endpoint_recovery_keeps_searching(self):
+        output, encodes, _ = self.run_calibration(CURVE="recovery")
+        self.assertIn("Highest-quality sample recovered", output)
+        self.assertIn("RESULT:0:2:candidate-valid", output)
+        self.assertLessEqual(len(encodes), 19)
+
+    def test_rejected_codec_can_recover_and_compete_again(self):
+        source = self.root / "recovered.mov"
+        source.write_bytes(b"source")
+        self.run_calibration(INPUT_PATH=source, CURVE="flat")
+        output, encodes, _ = self.run_calibration(INPUT_PATH=source)
+        self.assertIn("video (rejected)", output)
+        self.assertIn("RESULT:0:18:candidate-valid", output)
+        self.assertEqual(len(encodes), 19)
+        self.assertIn("v2\tboundary\t18", next(self.cache.glob("video-*")).read_text())
+
+    def test_rejection_not_shared_and_source_change_invalidates_it(self):
+        source = self.root / "source.mov"
+        source.write_bytes(b"old source")
+        self.run_calibration(INPUT_PATH=source, CURVE="flat")
+        source.write_bytes(b"new source")
+        output, encodes, _ = self.run_calibration(INPUT_PATH=source)
+        self.assertNotIn("video (rejected)", output)
+        self.assertIn("RESULT:0:18:candidate-valid", output)
+        self.assertEqual(len(encodes), 18)
+        other = self.root / "other.mov"
+        other.write_bytes(b"other source")
+        output, _, _ = self.run_calibration(INPUT_PATH=other)
+        self.assertNotIn("video (rejected)", output)
+
+    def test_probe_failures_never_create_rejection_entries(self):
+        source = self.root / "source.mov"
+        source.write_bytes(b"source")
+        for changes in ({"CURVE": "unavailable"}, {"CURVE": "nan"},
+                        {"CURVE": "flat", "FAIL_ENDPOINT": 1}):
+            with self.subTest(changes=changes):
+                output, _, _ = self.run_calibration(INPUT_PATH=source, **changes)
+                self.assertIn("RESULT:1::sample-probe-failed", output)
+                self.assertEqual(list(self.cache.iterdir()), [])
+
+    def test_bad_rejection_measurement_falls_back_without_acceptance(self):
+        source = self.root / "source.mov"
+        source.write_bytes(b"source")
+        self.run_calibration(INPUT_PATH=source, CURVE="flat")
+        output, encodes, _ = self.run_calibration(INPUT_PATH=source, FAIL_FIRST=1)
+        self.assertIn("RESULT:0:18:candidate-valid", output)
+        self.assertEqual(len(encodes), 19)
+
+    def test_rejection_policy_keys_and_disabled_cache_force_new_search(self):
+        source = self.root / "source.mov"
+        source.write_bytes(b"source")
+        self.run_calibration(INPUT_PATH=source, CURVE="flat")
+        for changes in ({"TARGET": 93}, {"BUILD": "changed"}, {"SCALING": "true"},
+                        {"HARDCORE_ARCHIVE_VAAPI_DEVICE": "/dev/dri/renderD129"},
+                        {"HARDCORE_ARCHIVE_CALIBRATION_CACHE": "false"}):
+            with self.subTest(changes=changes):
+                output, encodes, _ = self.run_calibration(INPUT_PATH=source, **changes)
+                self.assertNotIn("video (rejected)", output)
+                self.assertIn("candidate-valid", output)
+                self.assertGreater(len(encodes), 1)
+
+    def test_malformed_video_records_cannot_skip_search(self):
+        source = self.root / "source.mov"
+        source.write_bytes(b"source")
+        self.run_calibration(INPUT_PATH=source, CURVE="flat")
+        entry = next(self.cache.glob("video-*"))
+        now = int(time.time())
+        for data in (f"v2\trejected\t18\t{now}\t0.90\t20000\n",
+                     f"v2\trejected\t1\t{now}\t$(touch injected)\t20000\n",
+                     f"v2\trejected\t1\t{now-2592001}\t0.90\t20000\n",
+                     f"v2\trejected\t1\t{now+3600}\t0.90\t20000\n",
+                     f"v2\tboundary\t18\t{now}\t0.10\t0\n"):
+            with self.subTest(data=data):
+                entry.write_text(data)
+                output, encodes, _ = self.run_calibration(INPUT_PATH=source)
+                self.assertNotIn("Calibration cache source: video", output)
+                self.assertIn("RESULT:0:18:candidate-valid", output)
+                self.assertGreater(len(encodes), 1)
+
+    def test_auto_rechecks_rejected_codec_and_successful_boundary_once_each(self):
+        source = self.root / "source.mov"
+        source.write_bytes(b"source")
+        body = "calibrate_and_choose_video_codec\nprintf 'SELECTED:%s\\n' \"$video_encoder\"\n"
+        changes = dict(INPUT_PATH=source, CURVE="av1-plateau", HARDCORE_ARCHIVE_VIDEO_CODEC_AUTO=1,
+                       HARDCORE_ARCHIVE_AUTO_AV1_ENCODER="av1_vaapi", HARDCORE_ARCHIVE_AUTO_HEVC_ENCODER="hevc_vaapi")
+        self.run_calibration(body, **changes)
+        output, encodes, _ = self.run_calibration(body, **changes)
+        self.assertIn("SELECTED:hevc_vaapi", output)
+        self.assertIn("cached-quality-rejection-confirmed", output)
+        self.assertEqual(len(encodes), 2)
 
     def test_config_values_export_to_children(self):
         functions = CORE.split("\ntrim_config_value() {", 1)[1].split("\nsafe_slug() {", 1)[0]
