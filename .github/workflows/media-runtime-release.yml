@@ -34,7 +34,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential curl xz-utils pkg-config meson ninja-build nasm yasm python3 \
+            build-essential curl xz-utils pkg-config meson ninja-build nasm yasm python3 xxd \
             libva-dev libdrm-dev libvpl-dev
           # NVENC/NVDEC headers are optional at build time. The runtime keeps GPU
           # drivers host-owned and HCA already rejects unsupported encoders.
@@ -43,7 +43,9 @@ jobs:
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
         shell: bash
-        run: brew install meson ninja nasm yasm pkg-config
+        run: |
+          brew install meson ninja nasm yasm pkg-config
+          command -v xxd
 
       - name: Syntax and runtime-selection tests
         shell: bash
