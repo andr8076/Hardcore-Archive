@@ -36,18 +36,41 @@ probe_indicates_av1_hardware_incompatibility() {
     grep -Eqi 'does not support.*av1|av1.*not supported|unsupported device|no usable encoding entrypoint.*av1|unsupported profile|profile.*av1.*not supported|no capable devices' <<< "$1"
 }
 
+VMAF_PROBE_ERROR=''
+probe_libvmaf_runtime() {
+    local err
+    err=$(mktemp "${TMPDIR:-/tmp}/hardcore-archive-vmaf.XXXXXX.err") || return 1
+    if ffmpeg -hide_banner -v error -nostdin \
+        -f lavfi -i 'color=c=black:s=64x64:r=1:d=1' \
+        -f lavfi -i 'color=c=black:s=64x64:r=1:d=1' \
+        -filter_complex '[0:v][1:v]libvmaf=n_threads=1' \
+        -frames:v 1 -f null - >/dev/null 2>"$err"; then
+        VMAF_PROBE_ERROR=''
+        rm -f -- "$err"
+        return 0
+    fi
+    VMAF_PROBE_ERROR=$(tail -n 12 "$err" 2>/dev/null || true)
+    rm -f -- "$err"
+    return 1
+}
+
 HARDWARE_VIDEO_ENCODER=''
 VIDEO_CODEC_FELL_BACK=false
 check_video_capability() {
     [[ $VIDEO_ENABLED == true && $VIDEO_RELEVANT == true ]] || return 0
-    local encoder hevc_encoder av1_error
+    local encoder hevc_encoder av1_error runtime_label
     if ! check_version_command FFmpeg ffmpeg ffmpeg 'Video transcoding requires FFmpeg.' -version; then return 0; fi
     if ! check_version_command FFprobe ffprobe ffmpeg 'Video stream validation requires FFprobe.' -version; then return 0; fi
 
     if $VIDEO_PREFLIGHT_ENABLED && [[ $QUALITY_CHECK_EFFECTIVE != off ]]; then
         if ! filter_available libvmaf; then
             add_failure UNSUPPORTED 'FFmpeg libvmaf filter' 'Video preflight quality validation is enabled, but this FFmpeg build lacks libvmaf. SSIM fallback is forbidden.' ffmpeg-vmaf
-        else add_ready 'Video quality filter: libvmaf'; fi
+        elif ! probe_libvmaf_runtime; then
+            add_failure BROKEN 'FFmpeg libvmaf runtime' "FFmpeg advertises libvmaf, but a real VMAF comparison failed: ${VMAF_PROBE_ERROR//$'\n'/ }" ffmpeg-vmaf
+        else
+            runtime_label=${HARDCORE_ARCHIVE_MEDIA_RUNTIME_SOURCE:-system}
+            add_ready "Video quality filter: libvmaf ($runtime_label runtime)"
+        fi
     fi
 
     if [[ -n $REQUESTED_VIDEO_ENCODER ]]; then
@@ -141,4 +164,3 @@ check_strict_runtime_capabilities() {
     check_image_capabilities
     check_video_capability
 }
-
