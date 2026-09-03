@@ -2,7 +2,9 @@
 
 Hardcore Archive owns a pinned, tested FFmpeg/VMAF runtime so users do not need to assemble a compatible `libvmaf` installation themselves.
 
-The Git repository intentionally does **not** store large generated binaries. Instead, GitHub Actions builds the pinned runtime for each supported platform and publishes it under the rolling release tag for the current runtime revision. Source checkouts fetch that prebuilt runtime automatically on first use and cache it locally. Packaged application releases may place the same runtime directly in `runtime/`, which avoids the first-use download.
+The Git repository intentionally does **not** store large generated binaries. GitHub Actions builds the current pinned runtime for each supported platform and publishes it under one rolling release tag: `media-runtime-latest`.
+
+A source checkout downloads that runtime automatically the first time it needs it, verifies the SHA-256 checksum, stores it in the user's cache, and then keeps using that same local copy. It does **not** check GitHub for a newer runtime on every launch. Packaged application releases may place the same runtime directly in `runtime/`, which avoids the first-use download entirely.
 
 ## User behavior
 
@@ -13,12 +15,12 @@ Runtime selection is:
 ```text
 1. runtime/bin shipped with an application package
 2. runtime/<os>-<arch>/bin in a development/package workspace
-3. cached pinned Hardcore Archive media runtime
-4. automatically download the pinned runtime from this repository
+3. cached Hardcore Archive media runtime
+4. download media-runtime-latest once and cache it
 5. system FFmpeg only as an offline/development fallback
 ```
 
-The automatic download is cached by runtime revision and target platform. Set:
+Set:
 
 ```bash
 HARDCORE_ARCHIVE_AUTO_RUNTIME=0
@@ -63,15 +65,29 @@ macos-x86_64
 macos-arm64
 ```
 
-It publishes assets under:
+The workflow replaces the contents of the rolling release:
 
 ```text
-media-runtime-r<revision>
+media-runtime-latest
 ```
 
-Each `.tar.gz` has a companion SHA-256 file. The source-checkout bootstrap verifies that checksum before activating the downloaded executables.
+Each `.tar.gz` has a companion SHA-256 file. Each platform uploads independently after its smoke test passes, so one unsupported/broken platform does not block working platforms.
 
 The Linux runtime includes pinned `nv-codec-headers`, so FFmpeg exposes NVENC/CUVID support without requiring those development headers on the user's machine. Actual NVIDIA, VAAPI, QSV, and VideoToolbox drivers/device access remain host responsibilities and are verified at runtime.
+
+## Updating a cached runtime
+
+A runtime is intentionally static after first download. Updating the project source does not silently replace the quality toolchain already used for previous calibration.
+
+To deliberately fetch the current rolling runtime again, remove the cached platform runtime and run Hardcore Archive normally. On Linux the cache is under:
+
+```text
+~/.cache/hardcore-archive/media-runtime/<platform>/runtime
+```
+
+On macOS it is under `~/Library/Caches/hardcore-archive/media-runtime/` unless `XDG_CACHE_HOME` is set.
+
+The newly downloaded runtime has its own manifest-derived `HARDCORE_ARCHIVE_VIDEO_RUNTIME_ID`, so calibration measured with the previous FFmpeg/VMAF toolchain is not silently reused.
 
 ## Building manually
 
@@ -92,12 +108,10 @@ dist/media-runtime/runtime/
 
 ## Reproducibility and cache identity
 
-`versions.env` pins FFmpeg, VMAF, Linux NV codec headers, the model policy, and the media-runtime revision. The runtime manifest records those inputs plus the build target. Hardcore Archive hashes that manifest into `HARDCORE_ARCHIVE_VIDEO_RUNTIME_ID`.
+`versions.env` pins FFmpeg, VMAF, Linux NV codec headers, and the model policy. The runtime manifest records those inputs plus the build target. Hardcore Archive hashes that manifest into `HARDCORE_ARCHIVE_VIDEO_RUNTIME_ID`.
 
-The runtime ID is included in calibration identity, so changing FFmpeg/VMAF cannot silently reuse a quality boundary measured with another toolchain.
+Update the source pins deliberately. The workflow rebuilds `media-runtime-latest`; there is no runtime revision number to maintain.
 
-Update `versions.env` deliberately and increment `HCA_MEDIA_RUNTIME_REVISION` whenever the published runtime changes. Do not track upstream branches dynamically during release builds.
-
-Do not add `--enable-nonfree` to the FFmpeg build. The build and smoke-test scripts reject such a configuration.
+Do not track upstream branches dynamically during release builds, and do not add `--enable-nonfree` to the FFmpeg build. The build and smoke-test scripts reject such a configuration.
 
 The model policy remains `builtin-default`; a future model change should be treated as a quality-policy change with cache invalidation and benchmark comparison.
