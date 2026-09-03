@@ -64,6 +64,28 @@ jobs:
           printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
           printf 'filename=%s\n' "$(basename "$archive")" >> "$GITHUB_OUTPUT"
 
+      - name: Verify relocated release package
+        shell: bash
+        env:
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+        run: |
+          verify_root=$(mktemp -d)
+          trap 'rm -rf "$verify_root"' EXIT
+          tar -xzf "$ARCHIVE" -C "$verify_root"
+          release_root=$(find "$verify_root" -mindepth 1 -maxdepth 1 -type d -print -quit)
+          [[ -n "$release_root" ]]
+          export HARDCORE_ARCHIVE_ROOT="$release_root"
+          export HARDCORE_MEDIA_RUNTIME=bundled
+          source "$release_root/lib/common.sh"
+          source "$release_root/lib/media-runtime.sh"
+          hardcore_media_runtime_select "$release_root"
+          [[ "$HARDCORE_MEDIA_RUNTIME_SOURCE" == bundled ]]
+          ffmpeg -hide_banner -v error -nostdin \
+            -f lavfi -i 'color=c=black:s=64x64:r=1:d=1' \
+            -f lavfi -i 'color=c=black:s=64x64:r=1:d=1' \
+            -filter_complex '[0:v][1:v]libvmaf=n_threads=1' \
+            -frames:v 1 -f null - >/dev/null
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.package.outputs.filename }}
