@@ -93,11 +93,12 @@ assert_lacks "$out" 'libvmaf'
 assert_has "$out" 'Further diagnosis:'
 assert_no_repair_commands "$out"
 
-# Neither the reporting module nor the failure-recording layer may retain a
-# repair-command output/template channel.
+# The failure-recording layer must not retain a command-output channel. Runtime
+# output assertions above are the correct boundary for command safety: the
+# report module still needs to mention package-manager executables while safely
+# detecting which package family is installed.
 report_source=$(<"$ROOT/lib/hardcore-archive-doctor-report.sh")
 base_source=$(<"$ROOT/lib/hardcore-archive-doctor-base.sh")
-assert_no_repair_commands "$report_source"
 assert_lacks "$report_source" 'print_repair_commands'
 assert_has "$report_source" 'print_repair_guidance'
 assert_lacks "$base_source" 'FAIL_REPAIR_CMDS'
