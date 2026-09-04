@@ -72,6 +72,7 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/calibration-identity.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/timing.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/video-acceleration.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/media-policy.sh"
+source "$(dirname -- "${BASH_SOURCE[0]}")/images.sh"
 hardcore_timing_init
 SCRIPT_VERSION="2026-09-04"
 METADATA_HELPER=${HARDCORE_ARCHIVE_METADATA_HELPER:-}
@@ -5551,29 +5552,21 @@ else
     (( OS_RESERVE_MIB > 8192 )) && OS_RESERVE_MIB=8192
 fi
 
-# Image workers run beside LZMA. Automatic mode leaves at least four logical
-# CPUs for the desktop/LZMA/video control work and caps concurrent workers.
+# Image workers run beside LZMA. Automatic mode now targets full CPU
+# saturation: every logical CPU is available to the image pool. Process
+# fan-out is bounded by the image module using both CPU count and
+# available RAM, while each worker runs at reduced process priority so
+# foreground LZMA/video work wins under contention.
 if (( IMAGE_COUNT > 0 )) && $IMAGE_OPTIMIZE && $IMAGE_OPTIMIZER_AVAILABLE; then
-    # Coordinate outer image workers with OxiPNG's internal Rayon pool.
-    # Reserve four logical CPUs for LZMA2, orchestration and the desktop,
-    # then divide the remaining CPU budget across active image workers.
-    spare_image_threads=$((CPU_THREADS - 4))
-    (( spare_image_threads < 1 )) && spare_image_threads=1
-    if [[ $IMAGE_JOBS == auto ]]; then
-        IMAGE_JOBS_EFFECTIVE=$((spare_image_threads / 2))
-        (( IMAGE_JOBS_EFFECTIVE < 1 )) && IMAGE_JOBS_EFFECTIVE=1
-        (( IMAGE_JOBS_EFFECTIVE > 4 )) && IMAGE_JOBS_EFFECTIVE=4
-        (( IMAGE_JOBS_EFFECTIVE > IMAGE_COUNT )) && IMAGE_JOBS_EFFECTIVE=$IMAGE_COUNT
-    else
-        IMAGE_JOBS_EFFECTIVE=$IMAGE_JOBS
-        (( IMAGE_JOBS_EFFECTIVE > CPU_THREADS )) && IMAGE_JOBS_EFFECTIVE=$CPU_THREADS
-        (( IMAGE_JOBS_EFFECTIVE > IMAGE_COUNT )) && IMAGE_JOBS_EFFECTIVE=$IMAGE_COUNT
+    if ! IFS=$'\t' read -r IMAGE_JOBS_EFFECTIVE IMAGE_THREADS_PER_WORKER IMAGE_CPU_BUDGET < <(
+        hardcore_images_compute_cpu_schedule "$CPU_THREADS" "$IMAGE_COUNT" "$IMAGE_JOBS" "$MEM_AVAILABLE_MIB"
+    ); then
+        die "Could not calculate the aggressive image CPU schedule."
     fi
-    IMAGE_THREADS_PER_WORKER=$((spare_image_threads / IMAGE_JOBS_EFFECTIVE))
-    (( IMAGE_THREADS_PER_WORKER < 1 )) && IMAGE_THREADS_PER_WORKER=1
 else
     IMAGE_JOBS_EFFECTIVE=0
     IMAGE_THREADS_PER_WORKER=1
+    IMAGE_CPU_BUDGET=0
     IMAGE_PARALLEL=false
 fi
 
