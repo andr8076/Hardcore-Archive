@@ -135,14 +135,74 @@ check_acl_capability() {
     fi
 }
 
+# Extension matching is only a cheap candidate scan. Before the FFmpeg runtime
+# is prepared, confirm that at least one direct candidate is identified by
+# libmagic as video content. This prevents names such as app.ts or a text file
+# called sample.mp4 from turning an ordinary archive job into a media job.
+hardcore_video_mime_confirmed() {
+    local path=$1 mime
+    mime=$(file -b --mime-type -- "$path" 2>/dev/null || true)
+    [[ $mime == video/* ]]
+}
+
+hardcore_refine_direct_video_relevance() {
+    [[ ${VIDEO_ENABLED:-false} == true && ${VIDEO_RELEVANT:-false} == true ]] || return 0
+    (( ${VIDEO_COUNT:-0} > 0 )) || return 0
+
+    if ! command -v file >/dev/null 2>&1; then
+        # A generic archive must never gain an FFmpeg dependency merely from a
+        # filename. An explicit CLI request may deliberately retain the older
+        # extension-based behavior when libmagic's `file` utility is absent.
+        if [[ ${VIDEO_STATE:-auto} == true ]]; then
+            add_info 'Video content confirmation unavailable (`file` missing); explicit --video-transcode keeps extension-based routing.'
+            return 0
+        fi
+        VIDEO_RELEVANT=false
+        VIDEO_COUNT=0
+        FIRST_VIDEO=''
+        add_info 'Video candidates were not content-confirmed because `file` is unavailable; FFmpeg runtime skipped and originals will be archived normally.'
+        return 0
+    fi
+
+    local path confirmed=0 first=''
+    if [[ -f ${SOURCE:-} ]]; then
+        if is_video_path "$SOURCE" && hardcore_video_mime_confirmed "$SOURCE"; then
+            confirmed=1
+            first=$SOURCE
+        fi
+    elif [[ -d ${SOURCE:-} ]]; then
+        local -a find_args=("$SOURCE")
+        [[ ${ONE_FILE_SYSTEM:-true} == true ]] && find_args+=(-xdev)
+        find_args+=(-type f -print0)
+        while IFS= read -r -d '' path; do
+            is_video_path "$path" || continue
+            hardcore_video_mime_confirmed "$path" || continue
+            confirmed=$((confirmed + 1))
+            [[ -n $first ]] || first=$path
+        done < <(find "${find_args[@]}" 2>/dev/null)
+    fi
+
+    if (( confirmed == 0 )); then
+        VIDEO_RELEVANT=false
+        VIDEO_COUNT=0
+        FIRST_VIDEO=''
+        add_info 'Filename video candidates were found, but none were content-confirmed as video; FFmpeg runtime skipped.'
+    else
+        VIDEO_COUNT=$confirmed
+        FIRST_VIDEO=$first
+        add_info "Video routing: $confirmed direct file(s) content-confirmed before FFmpeg setup."
+    fi
+}
+
 check_strict_runtime_capabilities() {
     check_core_command_set || true
     check_7zip || true
     [[ -n $SEVEN_ZIP ]] && inspect_nested_relevance || true
 
-    # The media runtime can be large and source checkouts may download it on
-    # first use. Delay setup until direct/nested inspection proves that enabled
-    # video processing is actually relevant to this source.
+    # Never prepare or download the media runtime based on a suffix alone.
+    # Direct candidates are content-confirmed first; nested archives perform
+    # their own source check when they are actually unpacked and processed.
+    hardcore_refine_direct_video_relevance
     if [[ $VIDEO_ENABLED == true && $VIDEO_RELEVANT == true ]]; then
         hardcore_runtime_prepare_video_toolchain || true
     fi
