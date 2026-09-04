@@ -143,10 +143,15 @@ assert_contains "$out" 'Automatic video competition: AV1 (av1_vaapi) vs HEVC (he
 assert_contains "$out" 'Self-check: READY for this source'
 
 # A configured feature with no matching content is disabled before dependency checks.
+# The frontend-only auto codec must also be translated to a neutral concrete
+# core value, otherwise the static core rejects VIDEO_CODEC=auto before it sees
+# that video transcoding is disabled.
 mv "$TMP/bin/ffmpeg" "$TMP/bin/ffmpeg.off"
 printf 'VIDEO_TRANSCODE=true\n' > "$TMP/home/.config/hardcore-archive/config"
 out=$(run_frontend "$TMP/docs" 2>&1)
 assert_has "$out" 'ARG=--no-video-transcode'
+assert_has "$out" 'ARG=--video-codec'
+assert_has "$out" 'ARG=av1'
 mv "$TMP/bin/ffmpeg.off" "$TMP/bin/ffmpeg"
 
 # Hardware AV1 is forced when video work is actually needed.
