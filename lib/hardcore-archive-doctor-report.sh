@@ -37,23 +37,22 @@ packages_for_key() {
     esac
 }
 
-print_repair_commands() {
+print_repair_guidance() {
     detect_package_manager
-    local i key packages p detail omitted=false permission_hint=false
+    local i key packages p detail permission_hint=false nonmissing_failure=false
     declare -A pkgset=()
 
-    # Package installation is a defensible automatic suggestion only when a
-    # required dependency is actually missing. BROKEN and UNSUPPORTED mean the
-    # component was detected but failed a capability/runtime/compatibility
-    # check; reinstalling its package is usually unrelated and can be harmful
-    # diagnostic noise.
+    # Doctor output is intentionally informational. Package names are hints for
+    # genuinely missing dependencies, never executable install instructions.
+    # BROKEN and UNSUPPORTED capabilities require diagnosis of the reported
+    # runtime/hardware/configuration failure rather than a guessed reinstall.
     for i in "${!FAIL_TYPES[@]}"; do
         key=${FAIL_REPAIR_KEYS[i]}
         if [[ ${FAIL_TYPES[i]} == MISSING && -n $key ]]; then
             packages=$(packages_for_key "$key")
             for p in $packages; do [[ -n $p ]] && pkgset["$p"]=1; done
-        elif [[ ${FAIL_TYPES[i]} == BROKEN || ${FAIL_TYPES[i]} == UNSUPPORTED ]]; then
-            omitted=true
+        else
+            nonmissing_failure=true
         fi
 
         detail=${FAIL_DETAILS[i]}
@@ -63,25 +62,22 @@ print_repair_commands() {
     done
 
     if (( ${#pkgset[@]} > 0 )); then
-        local -a pkgs=("${!pkgset[@]}")
-        printf '\nSuggested install command for missing dependencies (not executed):\n'
-        case $PACKAGE_MANAGER in
-            pacman) printf '  sudo pacman -S --needed';; apt) printf '  sudo apt-get update && sudo apt-get install -y';; dnf) printf '  sudo dnf install';; zypper) printf '  sudo zypper install';; brew) printf '  brew install';;
-            *) printf '  Install these packages with your package manager:';;
-        esac
-        printf ' %q' "${pkgs[@]}"; printf '\n'
+        printf '\nSuggested package names (informational only; verify for your system):\n'
+        [[ $PACKAGE_MANAGER != unknown ]] && printf '  Package family detected: %s\n' "$PACKAGE_MANAGER"
+        for p in "${!pkgset[@]}"; do printf '  - %s\n' "$p"; done
     fi
 
     if $permission_hint; then
-        printf '\nTargeted hardware-permission suggestion (not executed):\n'
-        printf '  sudo usermod -aG render,video %q\n' "${USER:-$LOGNAME}"
-        printf '  # Log out and back in after changing groups.\n'
+        printf '\nConfiguration check:\n'
+        printf '  Hardware access may depend on render/video group membership and device permissions. Verify those settings for your OS/session before changing them.\n'
     fi
 
-    if $omitted; then
-        printf '\nAutomatic install commands were intentionally omitted for BROKEN/UNSUPPORTED capabilities.\n'
-        printf 'Those components were detected; inspect the reported runtime, hardware, driver, permission, or compatibility failure instead of assuming reinstalling a package will fix it.\n'
+    if $nonmissing_failure; then
+        printf '\nFurther diagnosis:\n'
+        printf '  BROKEN/UNSUPPORTED components were detected, so package installation is not assumed to be the fix. Use the failure details above to check runtime, hardware, driver, permission, service, or compatibility state.\n'
     fi
+
+    printf '\nDoctor guidance is informational only; it does not generate repair or installation commands.\n'
 }
 
 print_doctor_report() {
@@ -114,7 +110,7 @@ print_doctor_report() {
             printf '  %-28s %s\n' "${FAIL_CAPS[i]}" "${FAIL_DETAILS[i]}"
         done
     done
-    print_repair_commands
+    print_repair_guidance
     printf '\nResult: NOT READY. No dependency fallback will be used.\n'
     return 1
 }
