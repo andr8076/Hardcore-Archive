@@ -39,31 +39,49 @@ packages_for_key() {
 
 print_repair_commands() {
     detect_package_manager
-    local key packages p
+    local i key packages p detail omitted=false permission_hint=false
     declare -A pkgset=()
-    for key in "${!REPAIR_KEY_SEEN[@]}"; do
-        packages=$(packages_for_key "$key")
-        for p in $packages; do [[ -n $p ]] && pkgset["$p"]=1; done
-    done
-    (( ${#pkgset[@]} > 0 )) || return 0
-    local -a pkgs=("${!pkgset[@]}")
-    printf '\nRepair command (not executed):\n'
-    case $PACKAGE_MANAGER in
-        pacman) printf '  sudo pacman -S --needed';; apt) printf '  sudo apt-get update && sudo apt-get install -y';; dnf) printf '  sudo dnf install';; zypper) printf '  sudo zypper install';; brew) printf '  brew install';;
-        *) printf '  Install these packages with your package manager:';;
-    esac
-    printf ' %q' "${pkgs[@]}"; printf '\n'
 
-    # A common GPU failure is device permission rather than a missing package.
-    local i detail
+    # Package installation is a defensible automatic suggestion only when a
+    # required dependency is actually missing. BROKEN and UNSUPPORTED mean the
+    # component was detected but failed a capability/runtime/compatibility
+    # check; reinstalling its package is usually unrelated and can be harmful
+    # diagnostic noise.
     for i in "${!FAIL_TYPES[@]}"; do
+        key=${FAIL_REPAIR_KEYS[i]}
+        if [[ ${FAIL_TYPES[i]} == MISSING && -n $key ]]; then
+            packages=$(packages_for_key "$key")
+            for p in $packages; do [[ -n $p ]] && pkgset["$p"]=1; done
+        elif [[ ${FAIL_TYPES[i]} == BROKEN || ${FAIL_TYPES[i]} == UNSUPPORTED ]]; then
+            omitted=true
+        fi
+
         detail=${FAIL_DETAILS[i]}
-        if [[ ${FAIL_CAPS[i]} == Hardware* && $detail == *[Pp]ermission* ]]; then
-            printf '  sudo usermod -aG render,video %q\n' "${USER:-$LOGNAME}"
-            printf '  # Log out and back in after changing groups.\n'
-            break
+        if [[ ${FAIL_TYPES[i]} == BROKEN && ${FAIL_CAPS[i]} == Hardware* && $detail == *[Pp]ermission* ]]; then
+            permission_hint=true
         fi
     done
+
+    if (( ${#pkgset[@]} > 0 )); then
+        local -a pkgs=("${!pkgset[@]}")
+        printf '\nSuggested install command for missing dependencies (not executed):\n'
+        case $PACKAGE_MANAGER in
+            pacman) printf '  sudo pacman -S --needed';; apt) printf '  sudo apt-get update && sudo apt-get install -y';; dnf) printf '  sudo dnf install';; zypper) printf '  sudo zypper install';; brew) printf '  brew install';;
+            *) printf '  Install these packages with your package manager:';;
+        esac
+        printf ' %q' "${pkgs[@]}"; printf '\n'
+    fi
+
+    if $permission_hint; then
+        printf '\nTargeted hardware-permission suggestion (not executed):\n'
+        printf '  sudo usermod -aG render,video %q\n' "${USER:-$LOGNAME}"
+        printf '  # Log out and back in after changing groups.\n'
+    fi
+
+    if $omitted; then
+        printf '\nAutomatic install commands were intentionally omitted for BROKEN/UNSUPPORTED capabilities.\n'
+        printf 'Those components were detected; inspect the reported runtime, hardware, driver, permission, or compatibility failure instead of assuming reinstalling a package will fix it.\n'
+    fi
 }
 
 print_doctor_report() {
