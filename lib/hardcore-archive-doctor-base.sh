@@ -2,14 +2,14 @@
 # Sourced by hardcore-archive.sh after source inventory/policy resolution.
 
 # --------------------------- strict doctor ---------------------------------
-declare -a FAIL_TYPES=() FAIL_CAPS=() FAIL_DETAILS=() FAIL_REPAIR_KEYS=() FAIL_REPAIR_CMDS=()
+declare -a FAIL_TYPES=() FAIL_CAPS=() FAIL_DETAILS=() FAIL_REPAIR_KEYS=()
 declare -a READY_LINES=() INFO_LINES=()
 declare -A REPAIR_KEY_SEEN=()
 
 add_ready() { READY_LINES+=("$1"); }
 add_info() { INFO_LINES+=("$1"); }
 add_failure() {
-    FAIL_TYPES+=("$1"); FAIL_CAPS+=("$2"); FAIL_DETAILS+=("$3"); FAIL_REPAIR_KEYS+=("${4:-}"); FAIL_REPAIR_CMDS+=("${5:-}")
+    FAIL_TYPES+=("$1"); FAIL_CAPS+=("$2"); FAIL_DETAILS+=("$3"); FAIL_REPAIR_KEYS+=("${4:-}")
     [[ -n ${4:-} ]] && REPAIR_KEY_SEEN["$4"]=1
 }
 
