@@ -4,16 +4,30 @@ IFS=$'\n\t'
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 
+# runner-policy.sh uses intentionally empty fixture files and fake media tools.
+# Give those fixtures deterministic MIME identities so the policy test remains
+# independent of the host libmagic database; content-routing itself is covered
+# by video-content-routing.sh below.
+file() {
+    local path=${!#}
+    case $path in
+        */source/movie.mp4) printf 'video/mp4\n' ;;
+        *) printf 'text/plain\n' ;;
+    esac
+}
+export -f file
 FRONTEND="$ROOT/hardcore-archive-runner-policy.sh" \
 DOCTOR_LOADER="$ROOT/lib/hardcore-archive-doctor.sh" \
 DOCTOR_BASE="$ROOT/lib/hardcore-archive-doctor-base.sh" \
 DOCTOR_CHECKS="$ROOT/lib/hardcore-archive-doctor-checks.sh" \
 DOCTOR_REPORT="$ROOT/lib/hardcore-archive-doctor-report.sh" \
     bash "$ROOT/tests/runner-policy.sh"
+unset -f file
 
 bash "$ROOT/tests/module-layout.sh"
 bash "$ROOT/tests/bundled-runtime.sh"
 bash "$ROOT/tests/lazy-video-runtime.sh"
+bash "$ROOT/tests/video-content-routing.sh"
 bash "$ROOT/tests/runtime-bootstrap.sh"
 bash "$ROOT/tests/runtime-build-safety.sh"
 python3 "$ROOT/tests/destination-logs.py"

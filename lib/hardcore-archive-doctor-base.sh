@@ -83,16 +83,22 @@ inspect_nested_relevance() {
             return 1
         fi
     done
-    if (( NESTED_VIDEO_COUNT > 0 )); then VIDEO_RELEVANT=true; fi
+
+    # Nested filenames are not proof of video content. The nested archive is
+    # extracted to its own workspace before recursive processing, and that child
+    # run performs the same content-aware direct-video check. This avoids
+    # preparing FFmpeg for ZIPs that merely contain app.ts, fake.mp4, etc.
+    if (( NESTED_VIDEO_COUNT > 0 )); then
+        add_info "$NESTED_VIDEO_COUNT nested video-name candidate(s) will be content-checked only if that nested archive is processed."
+    fi
     if (( NESTED_JPEG_COUNT > 0 || NESTED_PNG_COUNT > 0 )); then IMAGE_RELEVANT=true; fi
     if (( NESTED_DEEP_ARCHIVE_COUNT > 0 )); then
-        # We do not extract nested-within-nested data during the lightweight
-        # doctor. Deeper archives may reveal media, so enabled media transforms
-        # remain relevant only in this genuinely unknown recursive case.
-        $VIDEO_ENABLED && VIDEO_RELEVANT=true
+        # Deeper archives may reveal images, so image tooling remains relevant.
+        # Video tooling is deliberately deferred until actual extracted content
+        # is available for content identification.
         $IMAGE_ENABLED && IMAGE_RELEVANT=true
     fi
-    add_info "Nested inspection: $NESTED_VIDEO_COUNT video, $NESTED_JPEG_COUNT JPEG, $NESTED_PNG_COUNT PNG, $NESTED_DEEP_ARCHIVE_COUNT deeper archive entries."
+    add_info "Nested inspection: $NESTED_VIDEO_COUNT video-name candidate(s), $NESTED_JPEG_COUNT JPEG, $NESTED_PNG_COUNT PNG, $NESTED_DEEP_ARCHIVE_COUNT deeper archive entries."
 }
 
 # Do not use grep -q in an ffmpeg | ... pipeline here. With `set -o pipefail`,
