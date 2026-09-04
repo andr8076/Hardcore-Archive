@@ -27,7 +27,7 @@ if [[ $PLATFORM == Darwin ]]; then
         [[ -d $d ]] && PATH="$d:$PATH"
     done
     if command -v brew >/dev/null 2>&1; then
-        for formula in coreutils findutils util-linux gnu-sed grep gawk acl jpeg-turbo; do
+        for formula in coreutils findutils util-linux gnu-sed grep gawk jpeg-turbo; do
             prefix=$(brew --prefix "$formula" 2>/dev/null || true)
             [[ -n $prefix ]] || continue
             [[ -d $prefix/libexec/gnubin ]] && PATH="$prefix/libexec/gnubin:$PATH"

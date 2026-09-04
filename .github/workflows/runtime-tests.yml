@@ -29,6 +29,10 @@ jobs:
           "$BASH_BIN" tests/bundled-runtime.sh
           "$BASH_BIN" tests/runtime-bootstrap.sh
           "$BASH_BIN" tests/ffmpeg-detection.sh
+          # Native macOS ACLs must actually round-trip on an Apple filesystem;
+          # Linux runs the same validation/routing tests without Apple APIs.
+          export PATH="$(dirname "$(command -v "$BASH_BIN")"):$PATH"
+          python3 tests/acl-platform.py
 
   frontend-policy:
     runs-on: ubuntu-latest

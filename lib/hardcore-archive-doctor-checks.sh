@@ -117,6 +117,24 @@ check_image_capabilities() {
     fi
 }
 
+check_acl_capability() {
+    if [[ $PLATFORM == Darwin ]]; then
+        local helper="${HARDCORE_ARCHIVE_METADATA_HELPER:-${SCRIPT_DIR}/lib/hardcore-archive-metadata.py}" detail
+        if [[ ! -f $helper ]]; then
+            add_failure BROKEN 'Native macOS ACL metadata' 'The trusted metadata helper is missing; reinstall Hardcore Archive.'
+            return 1
+        fi
+        if ! detail=$(python3 "$helper" --check-acl "$SOURCE" 2>&1); then
+            add_failure BROKEN 'Native macOS ACL metadata' "$detail"
+            return 1
+        fi
+        add_ready 'ACL metadata preservation: native macOS'
+    else
+        check_version_command ACL getfacl acl 'Archive metadata preservation requires getfacl; silently omitting ACLs is forbidden.' --version || return 1
+        add_ready 'ACL metadata preservation: POSIX'
+    fi
+}
+
 check_strict_runtime_capabilities() {
     check_core_command_set || true
     check_7zip || true
@@ -138,7 +156,7 @@ check_strict_runtime_capabilities() {
         fi
     fi
 
-    check_version_command ACL getfacl acl 'Archive metadata preservation requires getfacl; silently omitting ACLs is forbidden.' --version && add_ready 'ACL metadata preservation'
+    check_acl_capability || true
     if [[ $PLATFORM == Linux ]]; then
         check_version_command findmnt findmnt util-linux 'One-filesystem and mount safety require findmnt; fallback mount detection is forbidden.' --version && add_ready 'Mount detection: findmnt'
         $BATCH_MODE && { check_version_command lsblk lsblk util-linux 'Batch storage-lane scheduling requires lsblk.' --version && add_ready 'Batch storage mapping: lsblk'; }

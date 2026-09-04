@@ -32,7 +32,7 @@ packages_for_key() {
         zypper:ffmpeg-gpu) if linux_has_drm_vendor 0x1002; then printf 'ffmpeg Mesa-libva'; elif linux_has_drm_vendor 0x8086; then printf 'ffmpeg intel-media-driver'; else printf 'ffmpeg'; fi;;
         brew:coreutils) printf 'coreutils';; brew:findutils) printf 'findutils';; brew:util-linux) printf 'util-linux';; brew:gawk) printf 'gawk';; brew:grep) printf 'grep';; brew:sed) printf 'gnu-sed';;
         brew:7zip) printf 'sevenzip';; brew:python) printf 'python';; brew:jpeg) printf 'jpeg-turbo';; brew:oxipng) printf 'oxipng';; brew:optipng) printf 'optipng';;
-        brew:acl) printf 'acl';; brew:ffmpeg|brew:ffmpeg-vmaf|brew:ffmpeg-gpu) printf 'ffmpeg';; brew:macos-system) printf '';;
+        brew:acl|brew:macos-system) printf '';; brew:ffmpeg|brew:ffmpeg-vmaf|brew:ffmpeg-gpu) printf 'ffmpeg';;
         *) printf '%s' "$key";;
     esac
 }
@@ -100,4 +100,3 @@ print_doctor_report() {
     printf '\nResult: NOT READY. No dependency fallback will be used.\n'
     return 1
 }
-

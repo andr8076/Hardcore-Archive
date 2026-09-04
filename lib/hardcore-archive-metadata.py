@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import json
 import os
 import pathlib
@@ -17,6 +18,169 @@ import tempfile
 
 class MetadataError(RuntimeError):
     pass
+
+
+DARWIN_ACL_HEADER = "# hardcore-archive acl darwin-text-jsonl v1"
+DARWIN_ACL_EMPTY = "!#acl 1\n"
+DARWIN_ACL_FLAGS = {"defer_inherit", "no_inherit"}
+DARWIN_ACE_FLAGS = {
+    "inherited", "file_inherit", "directory_inherit", "limit_inherit", "only_inherit",
+}
+DARWIN_ACL_PERMS = {
+    "read", "write", "execute", "delete", "append", "delete_child", "readattr",
+    "writeattr", "readextattr", "writeextattr", "readsecurity", "writesecurity",
+    "chown", "synchronize",
+}
+
+
+def normalize_darwin_acl(text: str) -> str:
+    """Validate Apple's ACL text before passing it to the native parser.
+
+    UUIDs are the actual principals, not local names or numeric user IDs. Keep
+    entry order (deny/allow ordering matters), inheritance and ACL-wide flags.
+    Apple's parser accepts some malformed/trailing input; we deliberately don't.
+    """
+    if not isinstance(text, str) or len(text) > 1024 * 1024 or "\x00" in text:
+        raise MetadataError("invalid macOS ACL text")
+    lines = text.removesuffix("\n").split("\n")
+    header = re.fullmatch(r"!#acl 1(?: ([a-z_,]+))?", lines[0])
+    if not header:
+        raise MetadataError("invalid macOS ACL header")
+
+    def tokens(value: str, allowed: set[str]) -> list[str]:
+        values = value.split(",") if value else []
+        if len(set(values)) != len(values) or any(v not in allowed for v in values):
+            raise MetadataError("unsupported macOS ACL flags or permissions")
+        return sorted(values)
+
+    flags = tokens(header[1] or "", DARWIN_ACL_FLAGS)
+    output = ["!#acl 1" + (" " + ",".join(flags) if flags else "")]
+    for line in lines[1:]:
+        fields = line.split(":")
+        if len(fields) not in (5, 6):
+            raise MetadataError("invalid macOS ACL entry")
+        kind, principal, name, numeric, action = fields[:5]
+        if kind not in ("user", "group") or not re.fullmatch(
+            r"[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}", principal
+        ):
+            raise MetadataError("invalid macOS ACL principal UUID")
+        if any(ord(c) < 32 for c in name) or (numeric and not re.fullmatch(r"[0-9]+", numeric)):
+            raise MetadataError("invalid macOS ACL principal description")
+        parts = action.split(",")
+        if parts[0] not in ("allow", "deny"):
+            raise MetadataError("invalid macOS ACL action")
+        if any(not part for part in parts[1:]):
+            raise MetadataError("invalid macOS ACL flags")
+        flags = tokens(",".join(parts[1:]), DARWIN_ACE_FLAGS)
+        perms = tokens(fields[5] if len(fields) == 6 else "", DARWIN_ACL_PERMS)
+        # A UUID can resolve as 'group' on one Mac and as unknown ('user') on
+        # another. These labels/names do not change the UUID-based native ACL.
+        output.append(f"user:{principal.upper()}:::" + ",".join([parts[0]] + flags)
+                      + (":" + ",".join(perms) if perms else ""))
+    return "\n".join(output) + "\n"
+
+
+class DarwinACL:
+    """Use libSystem's no-follow ACL APIs; no Homebrew ACL package or shell.
+
+    API and text format: Apple's sys/acl.h and Libc/posix1e/acl_translate.c.
+    Binary export is used only to verify lossless text conversion in memory;
+    untrusted binary ACLs are never passed to the native import functions.
+    """
+
+    ACL_TYPE_EXTENDED = 0x100
+
+    def __init__(self) -> None:
+        if sys.platform != "darwin":
+            raise MetadataError("macOS ACL metadata requires native macOS restoration; conversion to POSIX ACLs is unsafe")
+        try:
+            self.lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+            signatures = {
+                "acl_get_link_np": ([ctypes.c_char_p, ctypes.c_int], ctypes.c_void_p),
+                "acl_set_link_np": ([ctypes.c_char_p, ctypes.c_int, ctypes.c_void_p], ctypes.c_int),
+                "acl_to_text": ([ctypes.c_void_p, ctypes.POINTER(ctypes.c_ssize_t)], ctypes.c_void_p),
+                "acl_from_text": ([ctypes.c_char_p], ctypes.c_void_p),
+                "acl_valid": ([ctypes.c_void_p], ctypes.c_int),
+                "acl_size": ([ctypes.c_void_p], ctypes.c_ssize_t),
+                "acl_copy_ext": ([ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ssize_t], ctypes.c_ssize_t),
+                "acl_free": ([ctypes.c_void_p], ctypes.c_int),
+            }
+            for name, (args, result) in signatures.items():
+                function = getattr(self.lib, name)
+                function.argtypes, function.restype = args, result
+        except (OSError, AttributeError) as exc:
+            raise MetadataError(f"native macOS ACL API is unavailable: {exc}") from exc
+
+    def error(self, operation: str) -> MetadataError:
+        return MetadataError(f"native macOS ACL {operation}: {os.strerror(ctypes.get_errno())}")
+
+    def binary(self, acl) -> bytes:
+        size = self.lib.acl_size(acl)
+        if size <= 0 or size > 1024 * 1024:
+            raise self.error("invalid export size")
+        buffer = ctypes.create_string_buffer(size)
+        if self.lib.acl_copy_ext(buffer, acl, size) != size:
+            raise self.error("export failed")
+        return buffer.raw
+
+    def parse(self, text: str):
+        acl = self.lib.acl_from_text(normalize_darwin_acl(text).encode("utf-8"))
+        if not acl:
+            raise self.error("text conversion failed")
+        if self.lib.acl_valid(acl) != 0:
+            error = self.error("validation failed")
+            self.lib.acl_free(acl)
+            raise error
+        return acl
+
+    def read(self, path: pathlib.Path) -> str:
+        ctypes.set_errno(0)
+        acl = self.lib.acl_get_link_np(os.fsencode(path), self.ACL_TYPE_EXTENDED)
+        if not acl:
+            # Darwin's acl_get_link_np returns NULL/ENOENT when the object
+            # exists but has no extended ACL property. Confirm the object with
+            # lstat so a genuinely missing/raced path is never treated as an
+            # empty ACL.
+            if ctypes.get_errno() == 2:
+                try:
+                    path.lstat()
+                except OSError:
+                    pass
+                else:
+                    return DARWIN_ACL_EMPTY
+            raise self.error(f"read failed for {path}")
+        try:
+            length = ctypes.c_ssize_t()
+            pointer = self.lib.acl_to_text(acl, ctypes.byref(length))
+            if not pointer:
+                raise self.error(f"text export failed for {path}")
+            try:
+                text = normalize_darwin_acl(ctypes.string_at(pointer, length.value).decode("utf-8"))
+            finally:
+                self.lib.acl_free(pointer)
+            parsed = self.parse(text)
+            try:
+                if self.binary(acl) != self.binary(parsed):
+                    raise MetadataError(f"macOS ACL cannot be represented losslessly: {path}")
+            finally:
+                self.lib.acl_free(parsed)
+            return text
+        finally:
+            self.lib.acl_free(acl)
+
+    def write(self, path: pathlib.Path, text: str) -> None:
+        # In particular, Apple does not support setting symlink ACLs on all
+        # releases. A matching ACL (usually empty) needs no write at all.
+        if self.read(path) == normalize_darwin_acl(text):
+            return
+        acl = self.parse(text)
+        try:
+            if self.lib.acl_set_link_np(os.fsencode(path), self.ACL_TYPE_EXTENDED, acl) != 0:
+                raise self.error(f"restore failed for {path}")
+        finally:
+            self.lib.acl_free(acl)
+        if self.read(path) != normalize_darwin_acl(text):
+            raise MetadataError(f"macOS ACL read-back differs after restoration: {path}")
 
 
 def capture_files(root: pathlib.Path, destination: pathlib.Path, stream) -> int:
@@ -68,6 +232,85 @@ def capture_files(root: pathlib.Path, destination: pathlib.Path, stream) -> int:
                              f"{info.st_mtime_ns // 1_000_000_000}\t{relative}\t{target}\n")
                 count += 1
     return count
+
+
+def capture_darwin_acl(root: pathlib.Path, metadata_dir: pathlib.Path) -> int:
+    """Use the existing inventory, including its mount and symlink boundaries."""
+    root = root.resolve()
+    native = DarwinACL()
+    fd, name = tempfile.mkstemp(prefix="acl.capture.", dir=metadata_dir)
+    temporary = pathlib.Path(name)
+    count = 0
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output, (metadata_dir / "files.tsv").open(
+            encoding="utf-8", errors="surrogateescape"
+        ) as inventory:
+            if next(inventory, "") != "type\tmode\tuid\tgid\tmtime_epoch\tpath\tlink_target\n":
+                raise MetadataError("invalid files.tsv header for ACL capture")
+            output.write(DARWIN_ACL_HEADER + "\n")
+            for line in inventory:
+                fields = line.rstrip("\n").split("\t")
+                if len(fields) != 7:
+                    raise MetadataError("invalid files.tsv row for ACL capture")
+                relative = fields[5]
+                path = safe_existing_path(root, relative, reject_parent_symlinks=True)
+                if path.relative_to(root).as_posix() != relative:
+                    raise MetadataError(f"ambiguous ACL path: {relative!r}")
+                kind = "symlink" if path.is_symlink() else "directory" if path.is_dir() else "file"
+                target = os.readlink(path) if kind == "symlink" else ""
+                record = {"path": relative, "kind": kind, "target": target, "acl": native.read(path)}
+                output.write(json.dumps(record, ensure_ascii=True) + "\n")
+                count += 1
+        os.replace(temporary, metadata_dir / "acl.txt")
+    finally:
+        temporary.unlink(missing_ok=True)
+    return count
+
+
+def restore_darwin_acl(root: pathlib.Path, source: pathlib.Path) -> int:
+    rows = []
+    seen = set()
+    with source.open(encoding="utf-8") as handle:
+        if next(handle, "").rstrip("\n") != DARWIN_ACL_HEADER:
+            raise MetadataError("invalid macOS ACL manifest header")
+        for number, line in enumerate(handle, 2):
+            if len(line) > 2 * 1024 * 1024:
+                raise MetadataError(f"oversized macOS ACL record {number}")
+            try:
+                def unique_object(pairs):
+                    record = {}
+                    for key, value in pairs:
+                        if key in record:
+                            raise MetadataError(f"duplicate macOS ACL field on row {number}: {key!r}")
+                        record[key] = value
+                    return record
+                record = json.loads(line, object_pairs_hook=unique_object)
+            except ValueError as exc:
+                raise MetadataError(f"invalid macOS ACL record {number}") from exc
+            if not isinstance(record, dict) or set(record) != {"path", "kind", "target", "acl"}:
+                raise MetadataError(f"invalid macOS ACL record {number}")
+            if not all(isinstance(value, str) for value in record.values()):
+                raise MetadataError(f"invalid macOS ACL fields on row {number}")
+            relative, kind, target = record["path"], record["kind"], record["target"]
+            path = safe_existing_path(root, relative, reject_parent_symlinks=True)
+            if path.relative_to(root).as_posix() != relative or path in seen:
+                raise MetadataError(f"ambiguous or duplicate macOS ACL path: {relative!r}")
+            seen.add(path)
+            actual = "symlink" if path.is_symlink() else "directory" if path.is_dir() else "file"
+            if kind != actual or (os.readlink(path) if kind == "symlink" else "") != target:
+                raise MetadataError(f"macOS ACL object type or symlink target differs: {relative!r}")
+            rows.append((path, normalize_darwin_acl(record["acl"])))
+    # Validate all records before applying any ACL. On another OS, even an
+    # empty ACL has different inheritance semantics: never silently translate.
+    native = DarwinACL()
+    for _, text in rows:
+        acl = native.parse(text)
+        native.lib.acl_free(acl)
+    rows.sort(key=lambda row: -len(row[0].parts))
+    for path, text in rows:
+        # The API operates on the link itself, never its external target.
+        native.write(path, text)
+    return len(rows)
 
 
 ACL_ENTRY = re.compile(
@@ -336,6 +579,13 @@ def sanitize_acl(
 
 def restore_acl(root: pathlib.Path, metadata_dir: pathlib.Path) -> int:
     source = metadata_dir / "acl.txt"
+    if source.is_file():
+        with source.open(encoding="utf-8", errors="surrogateescape") as handle:
+            first = handle.readline().rstrip("\n")
+        if first.startswith("# hardcore-archive acl "):
+            if first != DARWIN_ACL_HEADER:
+                raise MetadataError("unsupported ACL manifest format/version")
+            return restore_darwin_acl(root, source)
     fd, name = tempfile.mkstemp(prefix="acl.safe.", suffix=".txt", dir=metadata_dir)
     os.close(fd)
     safe_manifest = pathlib.Path(name)
@@ -343,6 +593,8 @@ def restore_acl(root: pathlib.Path, metadata_dir: pathlib.Path) -> int:
         count, extended = sanitize_acl(root, source, safe_manifest)
         if count == 0 or not extended:
             return 0
+        if sys.platform == "darwin":
+            raise MetadataError("the archive contains extended POSIX ACLs; macOS cannot safely restore Linux ACL semantics")
         setfacl = shutil.which("setfacl")
         if not setfacl:
             raise MetadataError(
@@ -397,18 +649,28 @@ def restore(root: pathlib.Path, metadata_dir: pathlib.Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root", required=True)
-    parser.add_argument("--metadata-dir", required=True)
-    parser.add_argument("--capture-files", action="store_true",
+    parser.add_argument("--root")
+    parser.add_argument("--metadata-dir")
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--capture-files", action="store_true",
                         help="Capture NUL-delimited relative paths from stdin into files.tsv")
+    actions.add_argument("--capture-acl", action="store_true", help="Capture native macOS ACLs using files.tsv")
+    actions.add_argument("--check-acl", metavar="PATH", help="Read-only native macOS ACL capability probe")
     args = parser.parse_args()
+    if not args.check_acl and (not args.root or not args.metadata_dir):
+        parser.error("--root and --metadata-dir are required")
     try:
-        if args.capture_files:
+        if args.check_acl:
+            DarwinACL().read(pathlib.Path(args.check_acl).absolute())
+        elif args.capture_acl:
+            capture_darwin_acl(pathlib.Path(args.root), pathlib.Path(args.metadata_dir))
+        elif args.capture_files:
             capture_files(pathlib.Path(args.root), pathlib.Path(args.metadata_dir) / "files.tsv", sys.stdin.buffer)
         else:
             restore(pathlib.Path(args.root), pathlib.Path(args.metadata_dir))
-    except (MetadataError, OSError) as exc:
-        print(f"Error: metadata {'capture' if args.capture_files else 'restoration'} failed: {exc}", file=sys.stderr)
+    except (MetadataError, OSError, UnicodeError) as exc:
+        operation = "ACL probe" if args.check_acl else "capture" if args.capture_files or args.capture_acl else "restoration"
+        print(f"Error: metadata {operation} failed: {exc}", file=sys.stderr)
         return 1
     return 0
 

@@ -55,7 +55,7 @@ if [[ $PLATFORM_ID == macos ]]; then
     prepend_path_if_directory /usr/local/bin
     prepend_path_if_directory /usr/local/sbin
     if command -v brew >/dev/null 2>&1; then
-        for formula in coreutils findutils util-linux gnu-sed grep gawk acl jpeg-turbo; do
+        for formula in coreutils findutils util-linux gnu-sed grep gawk jpeg-turbo; do
             prefix=$(brew --prefix "$formula" 2>/dev/null || true)
             [[ -n $prefix ]] || continue
             prepend_path_if_directory "$prefix/libexec/gnubin"
@@ -335,7 +335,7 @@ Dependency policy:
   Optional missing tools   Explain each fallback and ask once before continuing.
   --yes                    Deliberately accept that optional-dependency warning.
   macOS full feature set   brew install bash coreutils findutils util-linux
-                           sevenzip ffmpeg python jpeg-turbo oxipng acl
+                           sevenzip ffmpeg python jpeg-turbo oxipng
 
 Other:
   --allow-sleep            Disable Linux/macOS sleep inhibition.
@@ -365,7 +365,7 @@ warn() {
 platform_install_guidance() {
     if [[ $PLATFORM_ID == macos ]]; then
         printf '\nmacOS installation guidance:\n' >&2
-        printf '  brew install bash coreutils findutils util-linux sevenzip ffmpeg python jpeg-turbo oxipng acl\n' >&2
+        printf '  brew install bash coreutils findutils util-linux sevenzip ffmpeg python jpeg-turbo oxipng\n' >&2
         printf '  Run the script with Homebrew Bash, normally: %s/bin/bash %s ...\n' \
             "$(command -v brew >/dev/null 2>&1 && brew --prefix 2>/dev/null || printf /opt/homebrew)" \
             "$PROGRAM_NAME" >&2
@@ -735,9 +735,10 @@ dependency_preflight_create_optional() {
         fi
     fi
 
-    dependency_optional_command getfacl \
-        'Records POSIX access-control lists; ACL permissions will not be included without it.'
     if [[ $PLATFORM_ID == linux ]]; then
+        dependency_require_command getfacl \
+            'Records POSIX access-control lists; silently omitting ACL permissions is forbidden.'
+        dependency_abort_if_critical
         dependency_optional_command findmnt \
             'Identifies nested mounts and filesystem types for safer staging and one-filesystem reporting.'
         if [[ $batch_context == true ]]; then
@@ -825,9 +826,21 @@ dependency_preflight_restore() {
     if [[ -n $archive && -n ${SEVEN_ZIP:-} ]]; then
         if dependency_archive_has_path "$archive" '.hardcore-archive-metadata/acl.txt' && \
            dependency_archive_manifest_has_data "$archive" '.hardcore-archive-metadata/acl.txt' \
+               '^# hardcore-archive acl darwin-'; then
+            if [[ $PLATFORM_ID != macos ]]; then
+                dependency_add_critical 'native macOS ACL restoration' \
+                    'This archive contains macOS ACL metadata; restore it on macOS. Translating access controls to POSIX ACLs is unsafe.'
+            fi
+        elif dependency_archive_has_path "$archive" '.hardcore-archive-metadata/acl.txt' && \
+           dependency_archive_manifest_has_data "$archive" '.hardcore-archive-metadata/acl.txt' \
                '^(default:|(user|group):[^:]+:|mask::)'; then
-            dependency_require_command setfacl \
-                'The archive contains extended POSIX ACLs; restore fails closed rather than silently dropping access controls.'
+            if [[ $PLATFORM_ID == macos ]]; then
+                dependency_add_critical 'POSIX ACL restoration' \
+                    'The archive contains extended Linux/POSIX ACLs; macOS cannot safely restore these access controls.'
+            else
+                dependency_require_command setfacl \
+                    'The archive contains extended POSIX ACLs; restore fails closed rather than silently dropping access controls.'
+            fi
         fi
     fi
     if ! $ALLOW_SLEEP && ! $SLEEP_PROTECTION_ACTIVE && ! platform_sleep_tool_available; then
@@ -6989,10 +7002,12 @@ EOF
     ) | python3 "$METADATA_HELPER" --capture-files \
         --root "$SOURCE_PARENT" --metadata-dir "$METADATA_DIR"
 
-    if command -v getfacl >/dev/null 2>&1; then
-        (cd -- "$SOURCE_PARENT" && getfacl -R -p -n -- "$SOURCE_NAME" 2>/dev/null) > "$ACL_MANIFEST" || : > "$ACL_MANIFEST"
+    if [[ $PLATFORM_ID == macos ]]; then
+        python3 "$METADATA_HELPER" --capture-acl \
+            --root "$SOURCE_PARENT" --metadata-dir "$METADATA_DIR" || die 'Native macOS ACL capture failed.'
     else
-        printf '# getfacl was unavailable when the archive was created.\n' > "$ACL_MANIFEST"
+        (cd -- "$SOURCE_PARENT" && getfacl -R -p -n -- "$SOURCE_NAME") > "$ACL_MANIFEST" || \
+            die 'POSIX ACL capture failed; refusing to create an archive with missing permissions.'
     fi
     SOURCE_XATTR_ROOT="$SOURCE_PARENT" SOURCE_XATTR_NAME="$SOURCE_NAME" \
         python3 - "$XATTR_MANIFEST" <<'PYXATTRSAVE'
