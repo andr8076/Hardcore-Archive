@@ -11,7 +11,6 @@ import argparse
 import lzma
 import os
 import statistics
-import sys
 from dataclasses import dataclass
 
 MIN_ANALYZE_BYTES = 256 * 1024
@@ -109,33 +108,30 @@ def _read_inventory(path: str) -> list[tuple[int, str]]:
 
 def classify_inventory(source_parent: str, inventory: str, result: str) -> None:
     source_parent = os.path.realpath(source_parent)
-    rows: list[str] = []
-    for expected_size, relative in _read_inventory(inventory):
-        path = os.path.realpath(os.path.join(source_parent, relative))
-        if not (path == source_parent or path.startswith(source_parent + os.sep)):
-            raise ValueError(f"candidate path escapes source parent: {relative!r}")
-        decision = classify_file(path, expected_size)
-        mean = "-" if decision.mean_ratio is None else f"{decision.mean_ratio:.6f}"
-        minimum = "-" if decision.min_ratio is None else f"{decision.min_ratio:.6f}"
-        rows.append(
-            "\t".join(
-                (
-                    decision.action,
-                    str(expected_size),
-                    str(decision.sampled_bytes),
-                    mean,
-                    minimum,
-                    decision.reason,
-                    relative,
-                )
-            )
-        )
-
     tmp = f"{result}.tmp.{os.getpid()}"
     try:
         with open(tmp, "w", encoding="utf-8", errors="surrogateescape", newline="\n") as handle:
-            for row in rows:
-                handle.write(row + "\n")
+            for expected_size, relative in _read_inventory(inventory):
+                path = os.path.realpath(os.path.join(source_parent, relative))
+                if not (path == source_parent or path.startswith(source_parent + os.sep)):
+                    raise ValueError(f"candidate path escapes source parent: {relative!r}")
+                decision = classify_file(path, expected_size)
+                mean = "-" if decision.mean_ratio is None else f"{decision.mean_ratio:.6f}"
+                minimum = "-" if decision.min_ratio is None else f"{decision.min_ratio:.6f}"
+                handle.write(
+                    "\t".join(
+                        (
+                            decision.action,
+                            str(expected_size),
+                            str(decision.sampled_bytes),
+                            mean,
+                            minimum,
+                            decision.reason,
+                            relative,
+                        )
+                    )
+                    + "\n"
+                )
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, result)
