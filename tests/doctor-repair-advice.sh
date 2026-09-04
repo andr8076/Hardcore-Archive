@@ -45,7 +45,6 @@ reset_failures() {
     FAIL_CAPS=()
     FAIL_DETAILS=()
     FAIL_REPAIR_KEYS=()
-    FAIL_REPAIR_CMDS=()
     REPAIR_KEY_SEEN=()
 }
 
@@ -94,11 +93,13 @@ assert_lacks "$out" 'libvmaf'
 assert_has "$out" 'Further diagnosis:'
 assert_no_repair_commands "$out"
 
-# The reporting module itself must not contain command templates that could be
-# surfaced in a future branch of doctor logic.
+# Neither the reporting module nor the failure-recording layer may retain a
+# repair-command output/template channel.
 report_source=$(<"$ROOT/lib/hardcore-archive-doctor-report.sh")
+base_source=$(<"$ROOT/lib/hardcore-archive-doctor-base.sh")
 assert_no_repair_commands "$report_source"
 assert_lacks "$report_source" 'print_repair_commands'
 assert_has "$report_source" 'print_repair_guidance'
+assert_lacks "$base_source" 'FAIL_REPAIR_CMDS'
 
 printf 'Doctor informational-guidance tests passed.\n'
