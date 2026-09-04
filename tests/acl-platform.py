@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Platform ACL policy tests, plus real Apple ACL round trips on macOS."""
 import importlib.util
+import contextlib
 import io
 import json
 import os
@@ -193,7 +194,12 @@ check_acl_capability
 @unittest.skipUnless(sys.platform == "darwin", "requires native macOS ACL APIs")
 class NativeMacTests(unittest.TestCase):
     def test_real_capture_restore_permissions_inheritance_and_symlinks(self):
-        with tempfile.TemporaryDirectory(prefix="hardcore native acl ") as temporary:
+        with contextlib.ExitStack() as cleanup:
+            temporary = cleanup.enter_context(tempfile.TemporaryDirectory(prefix="hardcore native acl "))
+            # ACLs denying deletion are part of the round trip. Remove them
+            # before TemporaryDirectory attempts to delete its own fixture.
+            cleanup.callback(subprocess.run, ["/bin/chmod", "-RN", temporary],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             root = Path(temporary).resolve()
             source = root / "source"
             source.mkdir()
