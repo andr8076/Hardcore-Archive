@@ -200,6 +200,7 @@ IMAGE_OPTIMIZE=true
 IMAGE_MODE="maximum"
 IMAGE_JOBS="auto"
 IMAGE_JOBS_EFFECTIVE=1
+IMAGE_THREADS_PER_WORKER=1
 IMAGE_LIST=""
 IMAGE_LOG=""
 IMAGE_STAGE_PARENT=""
@@ -5553,9 +5554,12 @@ fi
 # Image workers run beside LZMA. Automatic mode leaves at least four logical
 # CPUs for the desktop/LZMA/video control work and caps concurrent workers.
 if (( IMAGE_COUNT > 0 )) && $IMAGE_OPTIMIZE && $IMAGE_OPTIMIZER_AVAILABLE; then
+    # Coordinate outer image workers with OxiPNG's internal Rayon pool.
+    # Reserve four logical CPUs for LZMA2, orchestration and the desktop,
+    # then divide the remaining CPU budget across active image workers.
+    spare_image_threads=$((CPU_THREADS - 4))
+    (( spare_image_threads < 1 )) && spare_image_threads=1
     if [[ $IMAGE_JOBS == auto ]]; then
-        spare_image_threads=$((CPU_THREADS - 4))
-        (( spare_image_threads < 1 )) && spare_image_threads=1
         IMAGE_JOBS_EFFECTIVE=$((spare_image_threads / 2))
         (( IMAGE_JOBS_EFFECTIVE < 1 )) && IMAGE_JOBS_EFFECTIVE=1
         (( IMAGE_JOBS_EFFECTIVE > 4 )) && IMAGE_JOBS_EFFECTIVE=4
@@ -5565,8 +5569,11 @@ if (( IMAGE_COUNT > 0 )) && $IMAGE_OPTIMIZE && $IMAGE_OPTIMIZER_AVAILABLE; then
         (( IMAGE_JOBS_EFFECTIVE > CPU_THREADS )) && IMAGE_JOBS_EFFECTIVE=$CPU_THREADS
         (( IMAGE_JOBS_EFFECTIVE > IMAGE_COUNT )) && IMAGE_JOBS_EFFECTIVE=$IMAGE_COUNT
     fi
+    IMAGE_THREADS_PER_WORKER=$((spare_image_threads / IMAGE_JOBS_EFFECTIVE))
+    (( IMAGE_THREADS_PER_WORKER < 1 )) && IMAGE_THREADS_PER_WORKER=1
 else
     IMAGE_JOBS_EFFECTIVE=0
+    IMAGE_THREADS_PER_WORKER=1
     IMAGE_PARALLEL=false
 fi
 
@@ -6593,12 +6600,16 @@ wait_for_video_pipeline() {
 }
 
 prepare_image_stage() {
+    local helper_source
     IMAGE_STAGE_PARENT="$JOB_WORK_DIR/image-stage"
     IMAGE_STAGE_ROOT="$IMAGE_STAGE_PARENT/$SOURCE_NAME"
     rm -rf --one-file-system -- "$IMAGE_STAGE_PARENT"
     mkdir -p -- "$IMAGE_STAGE_ROOT"
     IMAGE_HELPER="$JOB_WORK_DIR/integrated-image-helper.sh"
-    write_embedded_image_helper "$IMAGE_HELPER"
+    helper_source=${HARDCORE_ARCHIVE_IMAGE_HELPER_SOURCE:-"$(dirname -- "${BASH_SOURCE[0]}")/hardcore-archive-image-helper.sh"}
+    [[ -f $helper_source ]] || die "Trusted image helper is missing: $helper_source"
+    cp -- "$helper_source" "$IMAGE_HELPER"
+    chmod 700 -- "$IMAGE_HELPER"
 }
 
 write_original_image_results() {
@@ -6624,7 +6635,8 @@ start_image_pipeline() {
 
     printf '\nStage 3/8: Starting lossless image optimization in a separate process...\n'
     printf 'JPEG/PNG originals remain untouched; only validated smaller outputs are staged.\n'
-    printf 'Image workers: %s | policy: %s\n\n' "$IMAGE_JOBS_EFFECTIVE" "$IMAGE_MODE"
+    printf 'Image workers: %s | OxiPNG threads/worker: %s | policy: %s\n\n' \
+        "$IMAGE_JOBS_EFFECTIVE" "$IMAGE_THREADS_PER_WORKER" "$IMAGE_MODE"
 
     if command -v setsid >/dev/null 2>&1; then
         setsid env _IS_CHILD_PROCESS=1 bash "$IMAGE_HELPER" \
@@ -6634,7 +6646,8 @@ start_image_pipeline() {
             --result "$IMAGE_RESULT_MANIFEST" \
             --log "$IMAGE_LOG" \
             --mode "$IMAGE_MODE" \
-            --jobs "$IMAGE_JOBS_EFFECTIVE" &
+            --jobs "$IMAGE_JOBS_EFFECTIVE" \
+            --threads-per-worker "$IMAGE_THREADS_PER_WORKER" &
         IMAGE_PIPELINE_GROUP=true
     else
         env _IS_CHILD_PROCESS=1 bash "$IMAGE_HELPER" \
@@ -6644,7 +6657,8 @@ start_image_pipeline() {
             --result "$IMAGE_RESULT_MANIFEST" \
             --log "$IMAGE_LOG" \
             --mode "$IMAGE_MODE" \
-            --jobs "$IMAGE_JOBS_EFFECTIVE" &
+            --jobs "$IMAGE_JOBS_EFFECTIVE" \
+            --threads-per-worker "$IMAGE_THREADS_PER_WORKER" &
         IMAGE_PIPELINE_GROUP=false
     fi
     IMAGE_PIPELINE_PID=$!
