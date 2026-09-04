@@ -254,6 +254,12 @@ case $mode in maximum|balanced|fast) ;; *) printf 'Invalid image mode: %s\n' "$m
 
 : >"$result_file"
 : >"$log_file"
+worker_launcher=(bash)
+# Let image work consume every otherwise-idle CPU while yielding to the
+# primary archive/video tasks when they need the same cores.
+if has nice; then
+    worker_launcher=(nice -n 5 bash)
+fi
 xargs -r -d '\n' -P "$jobs" -I '{}' \
-    bash "$0" --worker "$source_parent" "$stage_parent" "$result_file" "$log_file" "$mode" "$threads_per_worker" '{}' \
+    "${worker_launcher[@]}" "$0" --worker "$source_parent" "$stage_parent" "$result_file" "$log_file" "$mode" "$threads_per_worker" '{}' \
     <"$list_file"
