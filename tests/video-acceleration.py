@@ -19,6 +19,7 @@ has_filter() { [[ ${MISSING_FILTERS:-0} != 1 ]]; }
 ffprobe() {
     case "$*" in
         *stream=pix_fmt*) printf '%s\n' "${PIXEL_FORMAT:-yuv420p}" ;;
+        *stream=index*) printf '0\n' ;;
         *format=duration*.speed-*) printf '%s\n' "${SPEED_DURATION:-12}" ;;
         *) base_ffprobe "$@" ;;
     esac
@@ -111,10 +112,10 @@ printf 'FULL:'; printf '%q ' "${command[@]}"; printf '\n'
                                           HARDCORE_ARCHIVE_VAAPI_DEVICE="/dev/dri/renderD129")
                 sample = shlex.split(next(x[7:] for x in output.splitlines() if x.startswith("SAMPLE:")))
                 full = shlex.split(next(x[5:] for x in output.splitlines() if x.startswith("FULL:")))
-                for command in (sample, full):
+                for command, filter_option in ((sample, "-vf"), (full, "-filter:v:0")):
                     self.assertEqual(command[command.index("-hwaccel") + 1], backend)
                     self.assertLess(command.index("-hwaccel"), command.index("-i"))
-                    graph = command[command.index("-vf") + 1]
+                    graph = command[command.index(filter_option) + 1]
                     self.assertIn(scaler, graph)
                     self.assertNotIn("hwdownload", graph)
                     self.assertNotIn("-r", command)
@@ -124,8 +125,8 @@ printf 'FULL:'; printf '%q ' "${command[@]}"; printf '\n'
                         self.assertNotIn("-pix_fmt:v", command)
                     else:
                         self.assertIn("vaapi=va:/dev/dri/renderD129", command)
-                self.assertEqual(sample[sample.index("-vf") + 1], full[full.index("-vf") + 1])
-                for stream in ("0:V:0", "0:a?", "0:s?", "0:t?"):
+                self.assertEqual(sample[sample.index("-vf") + 1], full[full.index("-filter:v:0") + 1])
+                for stream in ("0:0", "0:a?", "0:s?", "0:d?", "0:t?"):
                     self.assertIn(stream, full)
                 self.assertIn("-map_metadata", full)
                 self.assertIn("-map_chapters", full)
@@ -559,7 +560,7 @@ load_config_file "$TEST_ROOT/child"
         broken = self.root / "broken.mkv"
         broken.write_bytes(b"not a video")
         result = subprocess.run(["ffmpeg", "-v", "error", "-xerror", "-nostdin", "-i", str(broken),
-                                 "-map", "0:V:0", "-map", "0:a?", "-f", "null", "-"], capture_output=True)
+                                 "-map", "0:V", "-map", "0:a?", "-f", "null", "-"], capture_output=True)
         self.assertNotEqual(result.returncode, 0)
 
 

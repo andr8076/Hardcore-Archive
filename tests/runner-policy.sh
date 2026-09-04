@@ -234,6 +234,9 @@ out=$(run_frontend --video-transcode --no-video-transcode "$TMP/source" 2>&1)
 assert_has "$out" 'ARG=--no-video-transcode'
 out=$(run_frontend --video-transcode --video-copy-audio "$TMP/source" 2>&1)
 assert_has "$out" 'VIDEO_AUDIO_COPY=true'
+out=$(run_frontend --video-special-policy preserve "$TMP/source" 2>&1)
+assert_has "$out" 'ARG=--video-special-policy'
+assert_has "$out" 'ARG=preserve'
 
 set +e
 out=$(run_frontend --video-transcode --video-encoder libsvtav1 "$TMP/source" 2>&1); rc=$?

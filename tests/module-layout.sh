@@ -4,7 +4,7 @@ IFS=$'\n\t'
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 
 required=(
-    common platform config doctor inventory planner scheduler archive video images timing calibration-identity video-acceleration runtime
+    common platform config doctor inventory planner scheduler archive video images timing calibration-identity video-acceleration media-policy runtime
     containers nested verify restore reporting visual
 )
 for module in "${required[@]}"; do
@@ -16,6 +16,7 @@ bash -n "$ROOT/hardcore-archive.sh"
 bash -n "$ROOT/hardcore-archive-runner.sh"
 bash -n "$ROOT/hardcore-archive-runner-policy.sh"
 bash -n "$ROOT/lib/hardcore-archive-core.sh"
+python3 -m py_compile "$ROOT/lib/hardcore-archive-media.py"
 bash -n "$ROOT/packaging/media-runtime/build.sh"
 bash -n "$ROOT/packaging/media-runtime/smoke-test.sh"
 bash -n "$ROOT/tests/bundled-runtime.sh"
@@ -34,6 +35,7 @@ grep -Fq 'hardcore_archive_static_engine_ready' "$ROOT/lib/archive.sh"
 grep -Fq 'hardcore_archive_static_engine_ready' "$ROOT/lib/scheduler.sh"
 ! grep -Fq 'hardcore_runtime_prepare_video_toolchain' "$ROOT/lib/scheduler.sh"
 grep -Fq 'hardcore_runtime_prepare_video_toolchain' "$ROOT/lib/hardcore-archive-doctor-checks.sh"
+grep -Fq 'HARDCORE_ARCHIVE_MEDIA_HELPER="$HARDCORE_MEDIA_HELPER"' "$ROOT/lib/scheduler.sh"
 grep -Fq 'hardcore_run_sourced "$HARDCORE_POLICY_RUNNER"' "$ROOT/lib/scheduler.sh"
 ! grep -Eq 'apply_runtime_patch|build_runtime_core|HARDCORE_RUNTIME' \
     "$ROOT/lib/archive.sh" "$ROOT/lib/video.sh" "$ROOT/lib/nested.sh" \
