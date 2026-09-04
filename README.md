@@ -29,6 +29,8 @@ lib/
     verify.sh                 inspect/verification command boundary
     restore.sh                restore command boundary
     reporting.sh              persistent run logs and diagnostics
+    media-policy.sh           unusual-video decisions
+    hardcore-archive-media.py media inspection and preservation audit
     hardcore-archive-core.sh  checked-in archive engine
     hardcore-archive-metadata.py trusted metadata restore helper
 ```
@@ -249,6 +251,19 @@ QUALITY_CHECK=92
 
 Set it to any value from 0 through 100. A higher value preserves more visual fidelity but usually reduces the compression opportunity. Override it per run with `--quality-check V`, or use `QUALITY_CHECK=off` / `--quality-check off` to disable sample quality checks. Batch and nested jobs inherit the same value. The launcher translates this user-facing setting into the engine's internal VMAF threshold, so the acceptance score is no longer fixed in normal configuration.
 
+### Unusual video formats and streams
+
+`VIDEO_SPECIAL_POLICY=ask` is the default. Before transcoding, FFprobe identifies media that needs an explicit decision: multiple primary video streams, HDR/Dolby Vision, alpha or interlaced video, rotation/360 metadata, cover art or data streams, lossless/object audio, and container-sensitive subtitles. An interactive run offers four substantive choices:
+
+1. Preserve the original file unchanged.
+2. Try a compatible FFmpeg conversion.
+3. Decide separately for each special file.
+4. Omit the selected file from the archive entirely.
+
+Omission is never the default. It is recorded as `omitted` in the video decisions, excluded from compression-savings calculations, and rejected in combination with `--remove-source`. `--yes`, nested jobs, analysis, and other non-interactive runs resolve `ask` to preservation, so they cannot silently discard or alter special media. For scripted runs, `--video-special-policy ask|preserve|convert|omit` selects the policy explicitly.
+
+When conversion is selected, FFmpeg transcodes only the first primary video stream. It maps all additional primary video streams, attached cover art, audio tracks, subtitles, data streams, attachments, global metadata, stream metadata, and chapters. Copyable auxiliary streams use stream copy. The candidate is accepted only if a post-encode audit confirms stream counts, auxiliary codecs, audio channel counts, dispositions, chapters, color descriptors, and meaningful metadata. A muxer or codec incompatibility therefore falls back to the untouched original instead of producing a reduced-feature archive entry.
+
 ## Persistent diagnostics
 
 Every create run puts its logs in a visible `hardcore-archive-logs` folder in the destination directory. For example, creating `/mnt/SSD/test-compress.7z` creates:
@@ -372,4 +387,4 @@ Run:
 bash tests/frontend-policy.sh
 ```
 
-The suite includes default integrity/no-content-hash policy checks, explicit single-pass hash verification checks, metadata round trips and hostile ACL paths, deterministic corpus generation, static-module wiring, and the existing compression/video/container policies.
+The suite includes default integrity/no-content-hash policy checks, explicit single-pass hash verification checks, metadata round trips and hostile ACL paths, unusual-media decisions and stream/metadata preservation audits, deterministic corpus generation, static-module wiring, and the existing compression/video/container policies.

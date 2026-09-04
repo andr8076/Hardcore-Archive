@@ -46,6 +46,12 @@ POWER_OFF_ON_SUCCESS=false
 # Set av1 or hevc to force a codec globally.
 VIDEO_CODEC=auto
 VIDEO_MODE=balanced
+# Unusual media (HDR/Dolby Vision, alpha/interlaced/multi-video content,
+# data/cover-art streams, lossless/object audio, or sensitive subtitles) asks
+# before transcoding. In unattended runs, "ask" preserves originals unchanged.
+# Other explicit values: preserve, convert, omit. "omit" excludes the file from
+# the archive entirely and cannot be combined with source deletion.
+VIDEO_SPECIAL_POLICY=ask
 # Minimum accepted VMAF score for video candidates. Range: 0..100.
 # Higher values preserve more visual quality but usually reduce compression.
 # Set QUALITY_CHECK=off to disable sample quality checks.

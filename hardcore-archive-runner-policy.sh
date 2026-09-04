@@ -86,6 +86,8 @@ Video policy:
   --video-no-scale          Never reduce large video resolution.
   --video-no-denoise        Disable automatic mild denoising.
   --video-copy-audio        Copy audio streams instead of Opus optimization.
+  --video-special-policy P  ask, preserve, convert, or omit. Default: ask.
+                            Interactive "omit" excludes the file entirely.
   --video-min-vmaf V        Minimum accepted VMAF score. Config: VIDEO_MIN_VMAF.
   --video-min-savings P     Minimum accepted saving.
   --video-no-preflight      Disable representative sample testing.
@@ -258,9 +260,9 @@ while (( $# > 0 )); do
             QUALITY_CHECK_CLI=${1#*=}; QUALITY_CHECK_CLI=${QUALITY_CHECK_CLI,,}; FORWARDED+=("$1"); shift ;;
         --video-copy-audio)
             VIDEO_AUDIO_COPY_COMPAT=true; FORWARDED+=("$1"); shift ;;
-        --dictionary|--threads|--effort|--search-cycles|--progress-interval|--nested-max-depth|--verify|--work-dir|--config|--video-mode|--video-min-vmaf|--video-min-savings|--image-mode|--image-jobs|--batch-root-files|--batch-jobs)
+        --dictionary|--threads|--effort|--search-cycles|--progress-interval|--nested-max-depth|--verify|--work-dir|--config|--video-mode|--video-special-policy|--video-min-vmaf|--video-min-savings|--image-mode|--image-jobs|--batch-root-files|--batch-jobs)
             need_value "$@"; FORWARDED+=("$1" "$2"); shift 2 ;;
-        --dictionary=*|--threads=*|--effort=*|--search-cycles=*|--progress-interval=*|--nested-max-depth=*|--verify=*|--work-dir=*|--config=*|--video-mode=*|--video-min-vmaf=*|--video-min-savings=*|--image-mode=*|--image-jobs=*|--batch-root-files=*|--batch-jobs=*)
+        --dictionary=*|--threads=*|--effort=*|--search-cycles=*|--progress-interval=*|--nested-max-depth=*|--verify=*|--work-dir=*|--config=*|--video-mode=*|--video-special-policy=*|--video-min-vmaf=*|--video-min-savings=*|--image-mode=*|--image-jobs=*|--batch-root-files=*|--batch-jobs=*)
             FORWARDED+=("$1"); shift ;;
         --*)
             FORWARDED+=("$1"); shift ;;
@@ -344,7 +346,12 @@ SYMLINK_COUNT=0
 FIRST_VIDEO=''
 
 is_video_path() {
-    case ${1,,} in *.mp4|*.m4v|*.mkv|*.mov|*.avi|*.webm|*.wmv|*.flv|*.mpg|*.mpeg|*.m2ts|*.mts|*.ts|*.3gp|*.3g2|*.vob|*.ogv) return 0;; *) return 1;; esac
+    case ${1,,} in
+        *.mp4|*.mkv|*.webm|*.mov|*.m4v|*.avi|*.wmv|*.flv|*.mpg|*.mpeg|\
+        *.m2ts|*.mts|*.ts|*.vob|*.ogv|*.3gp|*.3g2|*.mxf|*.dvr-ms|\
+        *.rm|*.rmvb|*.asf|*.divx|*.f4v) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 is_jpeg_path() { case ${1,,} in *.jpg|*.jpeg|*.jpe) return 0;; *) return 1;; esac; }
 is_png_path() { [[ ${1,,} == *.png ]]; }
