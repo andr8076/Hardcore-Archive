@@ -4,15 +4,28 @@ IFS=$'\n\t'
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 HELPER="$ROOT/lib/hardcore-archive-image-helper.sh"
 CORE="$ROOT/lib/hardcore-archive-core.sh"
+IMAGES="$ROOT/lib/images.sh"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/hardcore-image-performance.XXXXXX")
 cleanup() { rm -rf -- "$TMP"; }
 trap cleanup EXIT
 
 bash -n "$HELPER"
+bash -n "$IMAGES"
+
+# The automatic scheduler should use the complete logical CPU budget while
+# scaling process fan-out to available RAM. Fewer files/workers receive more
+# internal OxiPNG threads rather than leaving CPUs idle.
+source "$IMAGES"
+[[ $(hardcore_images_compute_cpu_schedule 16 100 auto 8192) == $'8\t2\t16' ]]
+[[ $(hardcore_images_compute_cpu_schedule 16 1 auto 8192) == $'1\t16\t16' ]]
+[[ $(hardcore_images_compute_cpu_schedule 64 100 auto 65536) == $'32\t2\t64' ]]
+[[ $(hardcore_images_compute_cpu_schedule 12 100 3 8192) == $'3\t4\t12' ]]
+[[ $(hardcore_images_compute_cpu_schedule 16 100 16 4096) == $'4\t4\t16' ]]
 
 mkdir -p "$TMP/bin" "$TMP/source" "$TMP/stage"
 OXI_LOG="$TMP/oxipng.log"
-export OXI_LOG
+NICE_LOG="$TMP/nice.log"
+export OXI_LOG NICE_LOG
 cat > "$TMP/bin/oxipng" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -46,6 +59,16 @@ printf 'pixel-hash-fixture\n'
 SH
 chmod +x "$TMP/bin/ffmpeg"
 
+cat > "$TMP/bin/nice" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%q ' "$@" >> "$NICE_LOG"
+printf '\n' >> "$NICE_LOG"
+if [[ ${1:-} == -n ]]; then shift 2; fi
+exec "$@"
+SH
+chmod +x "$TMP/bin/nice"
+
 PATH="$TMP/bin:$PATH"
 export PATH
 truncate -s $((1024 * 1024)) "$TMP/source/test.png"
@@ -54,6 +77,7 @@ printf 'test.png\n' > "$TMP/list"
 run_case() {
     local mode=$1
     : > "$OXI_LOG"
+    : > "$NICE_LOG"
     : > "$TMP/result"
     rm -rf "$TMP/stage"; mkdir -p "$TMP/stage"
     bash "$HELPER" \
@@ -71,6 +95,7 @@ run_case balanced
 grep -Fq -- '--threads 6' "$OXI_LOG"
 grep -Fq -- '-o 4' "$OXI_LOG"
 ! grep -Fq -- '--zopfli' "$OXI_LOG"
+grep -Fq -- '-n 5' "$NICE_LOG"
 grep -Fq $'optimized\ttest.png\ttest.png' "$TMP/result"
 
 run_case fast
@@ -90,10 +115,11 @@ python3 - "$CORE" <<'PY'
 from pathlib import Path
 import sys
 text = Path(sys.argv[1]).read_text(encoding='utf-8')
-assert 'IMAGE_THREADS_PER_WORKER=1' in text
-assert 'IMAGE_THREADS_PER_WORKER=$((spare_image_threads / IMAGE_JOBS_EFFECTIVE))' in text
+assert 'source "$(dirname -- "${BASH_SOURCE[0]}")/images.sh"' in text
+assert 'hardcore_images_compute_cpu_schedule' in text
+assert 'IMAGE_CPU_BUDGET' in text
 assert '--threads-per-worker "$IMAGE_THREADS_PER_WORKER"' in text
 assert 'hardcore-archive-image-helper.sh' in text
 PY
 
-printf 'Adaptive OxiPNG policy tests passed.\n'
+printf 'Full-throttle OxiPNG policy tests passed.\n'
