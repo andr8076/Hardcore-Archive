@@ -107,11 +107,8 @@ jobs:
               'image status line',
           )
 
-          old = '''            --mode "$IMAGE_MODE" \\
-              --jobs "$IMAGE_JOBS_EFFECTIVE" &'''
-          new = '''            --mode "$IMAGE_MODE" \\
-              --jobs "$IMAGE_JOBS_EFFECTIVE" \\
-              --threads-per-worker "$IMAGE_THREADS_PER_WORKER" &'''
+          old = '--jobs "$IMAGE_JOBS_EFFECTIVE" &'
+          new = '--jobs "$IMAGE_JOBS_EFFECTIVE" \\\n            --threads-per-worker "$IMAGE_THREADS_PER_WORKER" &'
           count = text.count(old)
           if count != 2:
               raise SystemExit(f'image helper invocation: expected two matches, found {count}')
