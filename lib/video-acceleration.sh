@@ -223,15 +223,35 @@ hardcore_video_accel_filter() {
 }
 
 hardcore_video_build_full_command() {
+    local primary_rows all_video_rows stream_index
+    local -a video_maps=()
+    local -A primary_indexes=()
     hardcore_video_accel_arguments "$video_encoder"
     hardcore_video_accel_filter "$video_encoder"
+    primary_rows=$(ffprobe -v error -select_streams V -show_entries stream=index \
+        -of csv=p=0 "$input") || return 1
+    all_video_rows=$(ffprobe -v error -select_streams v -show_entries stream=index \
+        -of csv=p=0 "$input") || return 1
+    while IFS= read -r stream_index; do
+        [[ $stream_index =~ ^[0-9]+$ ]] || continue
+        primary_indexes[$stream_index]=1
+        video_maps+=(-map "0:$stream_index")
+    done <<< "$primary_rows"
+    ((${#video_maps[@]} > 0)) || return 1
+    # Append every thumbnail, cover-art, or other video stream omitted by V.
+    while IFS= read -r stream_index; do
+        [[ $stream_index =~ ^[0-9]+$ ]] || continue
+        [[ -n ${primary_indexes[$stream_index]:-} ]] && continue
+        video_maps+=(-map "0:$stream_index")
+    done <<< "$all_video_rows"
     command=(ffmpeg -hide_banner -nostdin -y "${HARDCORE_VIDEO_DEVICE_ARGS[@]}"
         "${HARDCORE_VIDEO_INPUT_ARGS[@]}" -i "$input"
-        -map '0:V:0' -map '0:a?' -map '0:s?' -map '0:t?'
+        "${video_maps[@]}" -map '0:a?' -map '0:s?' -map '0:d?' -map '0:t?'
         -map_metadata 0 -map_chapters 0
-        -c:v "$video_encoder" "${encoder_args[@]}" "${HARDCORE_VIDEO_OUTPUT_ARGS[@]}"
-        -c:s copy -c:t copy -max_muxing_queue_size 4096)
-    [[ -z $CAL_FILTER_CHAIN ]] || command+=(-vf "$CAL_FILTER_CHAIN")
+        -copy_unknown
+        -c:v copy -c:v:0 "$video_encoder" "${encoder_args[@]}" "${HARDCORE_VIDEO_OUTPUT_ARGS[@]}"
+        -c:s copy -c:d copy -c:t copy -max_muxing_queue_size 4096)
+    [[ -z $CAL_FILTER_CHAIN ]] || command+=(-filter:v:0 "$CAL_FILTER_CHAIN")
     command+=("${audio_args[@]}" "$temporary")
 }
 
@@ -258,7 +278,7 @@ hardcore_video_encode_attempt() {
     # accelerated. Decoder errors are fatal; a damaged output is never kept.
     printf '\nEncoding completed. Running full decode validation (CPU)...\n'
     hardcore_timed video_decode_validation ffmpeg -v error -xerror -nostdin -i "$temporary" \
-        -map '0:V:0' -map '0:a?' -f null -
+        -map '0:V' -map '0:a?' -f null -
 }
 
 hardcore_video_encode_full() {

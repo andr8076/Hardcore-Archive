@@ -71,9 +71,12 @@ SCRIPT_START_SECONDS=$SECONDS
 source "$(dirname -- "${BASH_SOURCE[0]}")/calibration-identity.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/timing.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/video-acceleration.sh"
+source "$(dirname -- "${BASH_SOURCE[0]}")/media-policy.sh"
 hardcore_timing_init
-SCRIPT_VERSION="2026-09-01"
+SCRIPT_VERSION="2026-09-04"
 METADATA_HELPER=${HARDCORE_ARCHIVE_METADATA_HELPER:-}
+MEDIA_HELPER=${HARDCORE_ARCHIVE_MEDIA_HELPER:-"$(dirname -- "${BASH_SOURCE[0]}")/hardcore-archive-media.py"}
+export HARDCORE_ARCHIVE_MEDIA_HELPER=$MEDIA_HELPER
 MIB=$((1024 * 1024))
 GIB=$((1024 * MIB))
 
@@ -116,6 +119,19 @@ VIDEO_MIN_VMAF="92"
 VIDEO_MIN_SAVINGS_PERCENT="3"
 VIDEO_PREFLIGHT=true
 VIDEO_WRITE_MANIFEST=true
+VIDEO_SPECIAL_POLICY="ask"
+VIDEO_SPECIAL_LIST=""
+VIDEO_SPECIAL_PRESERVE_LIST=""
+VIDEO_SPECIAL_OMIT_LIST=""
+VIDEO_SPECIAL_COUNT=0
+VIDEO_SPECIAL_PRESERVE_COUNT=0
+VIDEO_SPECIAL_CONVERT_COUNT=0
+VIDEO_OMITTED_COUNT=0
+VIDEO_OMITTED_BYTES=0
+VIDEO_TRANSCODE_COUNT=0
+VIDEO_TRANSCODE_BYTES=0
+VIDEO_SELECTED_BYTES=0
+LARGEST_TRANSCODE_VIDEO_BYTES=0
 VIDEO_STAGE_PARENT=""
 VIDEO_STAGE_ROOT=""
 VIDEO_HELPER=""
@@ -306,6 +322,9 @@ Video policy:
   --video-no-scale         Never reduce large video resolution.
   --video-no-denoise       Disable automatic mild denoising.
   --video-copy-audio       Copy audio streams instead of Opus optimization.
+  --video-special-policy P ask, preserve, convert, or omit. Default: ask.
+                           Interactive runs ask before unusual media is changed.
+                           "omit" deliberately excludes those files entirely.
   --video-min-vmaf V       Minimum accepted VMAF score. Default: 92.
   --video-min-savings P    Minimum accepted saving. Default: 3 percent.
   --video-no-preflight     Disable representative sample testing.
@@ -891,6 +910,7 @@ load_config_file() {
             VIDEO_CODEC) VIDEO_CODEC=${value,,} ;;
             VIDEO_ENCODER) VIDEO_ENCODER=$value ;;
             VIDEO_MODE) VIDEO_MODE=${value,,} ;;
+            VIDEO_SPECIAL_POLICY) VIDEO_SPECIAL_POLICY=${value,,} ;;
             VIDEO_MIN_VMAF) VIDEO_MIN_VMAF=$value ;;
             VIDEO_MIN_SAVINGS_PERCENT) VIDEO_MIN_SAVINGS_PERCENT=$value ;;
             VIDEO_CALIBRATION_CACHE|VIDEO_CALIBRATION_EARLY_ABORT)
@@ -1975,13 +1995,14 @@ color_primaries=$(ffprobe -v error -select_streams V:0 -show_entries stream=colo
 [[ "$height" =~ ^[0-9]+$ ]] || die 'Could not determine source height.'
 original_size=$(stat -Lc '%s' -- "$input") || die 'Could not determine source size.'
 video_stream_count=$(stream_count V)
+all_video_stream_count=$(stream_count v)
 audio_count=$(stream_count a)
 subtitle_count=$(stream_count s)
 attachment_count=$(stream_count t)
 data_stream_count=$(stream_count d)
 
-if (( video_stream_count != 1 || data_stream_count > 0 )); then
-    printf 'Complex source preserved unchanged: %s primary video streams, %s data streams.\n'         "$video_stream_count" "$data_stream_count"
+if (( video_stream_count < 1 )); then
+    printf 'No primary video stream is available for conversion; original preserved unchanged.\n'
     exit 3
 fi
 
@@ -2005,6 +2026,7 @@ printf 'Pixel format:      %s\n' "${pixel_format:-Unknown}"
 printf 'Frame rate:        %s\n' "${frame_rate:-Unknown}"
 printf 'Total bitrate:     %s\n' "$bitrate_display"
 printf 'Video streams:     %s\n' "$video_stream_count"
+printf 'All video streams: %s\n' "$all_video_stream_count"
 printf 'Audio streams:     %s\n' "$audio_count"
 printf 'Subtitle streams:  %s\n' "$subtitle_count"
 printf 'Attachments:       %s\n' "$attachment_count"
@@ -3157,13 +3179,21 @@ if ! hardcore_video_encode_full; then
     die 'Video encoding or validation failed after compatible preprocessing retries.'
 fi
 
-output_video_stream_count=$(stream_count_file V "$temporary")
+output_video_stream_count=$(stream_count_file v "$temporary")
 output_audio_count=$(stream_count_file a "$temporary")
 output_subtitle_count=$(stream_count_file s "$temporary")
 output_attachment_count=$(stream_count_file t "$temporary")
-if (( output_video_stream_count != 1 || output_audio_count != audio_count ||       output_subtitle_count != subtitle_count || output_attachment_count != attachment_count )); then
+output_data_count=$(stream_count_file d "$temporary")
+if (( output_video_stream_count != all_video_stream_count || output_audio_count != audio_count ||
+      output_subtitle_count != subtitle_count || output_attachment_count != attachment_count ||
+      output_data_count != data_stream_count )); then
     rm -f -- "$temporary"
     printf 'Stream-preservation validation failed. Original preserved unchanged.\n'
+    exit 3
+fi
+if ! python3 "$HARDCORE_ARCHIVE_MEDIA_HELPER" validate "$input" "$temporary"; then
+    rm -f -- "$temporary"
+    printf 'Semantic media-preservation validation failed. Original preserved unchanged.\n'
     exit 3
 fi
 
@@ -3960,6 +3990,16 @@ while (( $# > 0 )); do
             VIDEO_COPY_AUDIO=true
             shift
             ;;
+        --video-special-policy)
+            (( $# >= 2 )) || die "--video-special-policy requires ask, preserve, convert, or omit."
+            VIDEO_SPECIAL_POLICY=${2,,}
+            shift 2
+            ;;
+        --video-special-policy=*)
+            VIDEO_SPECIAL_POLICY=${1#*=}
+            VIDEO_SPECIAL_POLICY=${VIDEO_SPECIAL_POLICY,,}
+            shift
+            ;;
         --video-min-vmaf)
             (( $# >= 2 )) || die "--video-min-vmaf requires a VMAF score."
             VIDEO_MIN_VMAF=$2
@@ -4165,6 +4205,10 @@ case "$VIDEO_MODE" in
     maximum|balanced|fast) ;;
     *) die "Video mode must be maximum, balanced, or fast." ;;
 esac
+case "$VIDEO_SPECIAL_POLICY" in
+    ask|preserve|convert|omit) ;;
+    *) die "Special-video policy must be ask, preserve, convert, or omit." ;;
+esac
 case "$IMAGE_MODE" in
     maximum|balanced|fast) ;;
     *) die "Image mode must be maximum, balanced, or fast." ;;
@@ -4271,6 +4315,7 @@ build_batch_child_arguments() {
     $VIDEO_NO_SCALE && BATCH_CHILD_ARGS+=(--video-no-scale)
     $VIDEO_NO_DENOISE && BATCH_CHILD_ARGS+=(--video-no-denoise)
     $VIDEO_COPY_AUDIO && BATCH_CHILD_ARGS+=(--video-copy-audio)
+    BATCH_CHILD_ARGS+=(--video-special-policy "${VIDEO_SPECIAL_POLICY:-ask}")
     BATCH_CHILD_ARGS+=(--video-min-savings "$VIDEO_MIN_SAVINGS_PERCENT")
     BATCH_CHILD_ARGS+=(--video-min-vmaf "$VIDEO_MIN_VMAF")
     $VIDEO_PREFLIGHT || BATCH_CHILD_ARGS+=(--video-no-preflight)
@@ -4882,6 +4927,9 @@ IMAGE_LOG=$(component_log_path image.log)
 VIDEO_COMPRESSED_LIST=$(mktemp)
 VIDEO_FALLBACK_LIST=$(mktemp)
 VIDEO_RESULT_MANIFEST=$(mktemp)
+VIDEO_SPECIAL_LIST=$(mktemp)
+VIDEO_SPECIAL_PRESERVE_LIST=$(mktemp)
+VIDEO_SPECIAL_OMIT_LIST=$(mktemp)
 IMAGE_RESULT_MANIFEST=$(mktemp)
 IMAGE_OPTIMIZED_LIST=$(mktemp)
 IMAGE_FALLBACK_LIST=$(mktemp)
@@ -5063,6 +5111,7 @@ cleanup() {
     fi
     rm -f -- "$VIDEO_LIST" "$IMAGE_LIST" "$NESTED_LIST" "$CONTAINER_LIST" "$COPY_LIST" "$SNAPSHOT_BEFORE" "$SNAPSHOT_AFTER" \
         "$INVENTORY_RAW" "$VIDEO_COMPRESSED_LIST" "$VIDEO_FALLBACK_LIST" \
+        "$VIDEO_SPECIAL_LIST" "$VIDEO_SPECIAL_PRESERVE_LIST" "$VIDEO_SPECIAL_OMIT_LIST" \
         "$VIDEO_RESULT_MANIFEST" "$IMAGE_RESULT_MANIFEST" "$IMAGE_OPTIMIZED_LIST" "$IMAGE_FALLBACK_LIST" \
         "$NESTED_RESULT_MANIFEST" "$NESTED_REPACKED_LIST" "$NESTED_FALLBACK_LIST" \
         "$CONTAINER_RESULT_MANIFEST" "$CONTAINER_REPACKED_LIST" "$CONTAINER_FALLBACK_LIST" \
@@ -5153,7 +5202,7 @@ check_destination_capacity() {
     # may be roughly as large as all logical source data plus manifests. Sparse
     # holes compress extremely well, but they are deliberately not subtracted
     # from this safety bound.
-    estimate=$TOTAL_BYTES
+    estimate=$((TOTAL_BYTES - VIDEO_OMITTED_BYTES))
     safety=$((estimate / 20 + 256 * MIB))
     required=$((estimate + safety))
     if $FORCE && (( existing > 0 )); then
@@ -5247,10 +5296,49 @@ while IFS= read -r -d '' file_size && IFS= read -r -d '' relative_path; do
     fi
 done < "$INVENTORY_RAW"
 printf 'Scan complete: %s files / %s.\n' "$TOTAL_FILE_COUNT" "$(human_bytes "$TOTAL_BYTES")"
-check_destination_capacity
 
 dependency_preflight_create_optional "$VIDEO_COUNT" "$IMAGE_JPEG_COUNT" \
     "$IMAGE_PNG_COUNT" "$NESTED_COUNT" false
+
+if $VIDEO_TRANSCODE && (( VIDEO_COUNT > 0 )); then
+    [[ -f $MEDIA_HELPER ]] || die "The trusted special-media helper is missing: $MEDIA_HELPER"
+    set +e
+    hardcore_media_resolve
+    media_policy_rc=$?
+    set -e
+    case $media_policy_rc in
+        0) ;;
+        2) die 'Cancelled while choosing how to handle special videos.' ;;
+        *) die 'Special-video inspection or policy selection failed.' ;;
+    esac
+
+    VIDEO_SPECIAL_COUNT=$(awk 'END {print NR+0}' "$VIDEO_SPECIAL_LIST")
+    VIDEO_SPECIAL_PRESERVE_COUNT=$(awk 'END {print NR+0}' "$VIDEO_SPECIAL_PRESERVE_LIST")
+    VIDEO_OMITTED_COUNT=$(awk 'END {print NR+0}' "$VIDEO_SPECIAL_OMIT_LIST")
+    VIDEO_SPECIAL_CONVERT_COUNT=$((VIDEO_SPECIAL_COUNT - VIDEO_SPECIAL_PRESERVE_COUNT - VIDEO_OMITTED_COUNT))
+    (( VIDEO_SPECIAL_CONVERT_COUNT >= 0 )) || die 'Special-video policy accounting is inconsistent.'
+    VIDEO_TRANSCODE_COUNT=$((VIDEO_COUNT - VIDEO_SPECIAL_PRESERVE_COUNT - VIDEO_OMITTED_COUNT))
+    while IFS= read -r relative_path; do
+        [[ -n $relative_path ]] || continue
+        file_size=$(stat -c '%s' -- "$SOURCE_PARENT/$relative_path")
+        if hardcore_media_list_contains "$VIDEO_SPECIAL_OMIT_LIST" "$relative_path"; then
+            VIDEO_OMITTED_BYTES=$((VIDEO_OMITTED_BYTES + file_size))
+        elif ! hardcore_media_list_contains "$VIDEO_SPECIAL_PRESERVE_LIST" "$relative_path"; then
+            VIDEO_TRANSCODE_BYTES=$((VIDEO_TRANSCODE_BYTES + file_size))
+            (( file_size > LARGEST_TRANSCODE_VIDEO_BYTES )) && LARGEST_TRANSCODE_VIDEO_BYTES=$file_size
+        fi
+    done < "$VIDEO_LIST"
+    VIDEO_SELECTED_BYTES=$((VIDEO_BYTES - VIDEO_OMITTED_BYTES))
+
+    if (( VIDEO_OMITTED_COUNT > 0 )); then
+        warn "$VIDEO_OMITTED_COUNT explicitly selected video file(s) will be omitted from the archive ($(human_bytes "$VIDEO_OMITTED_BYTES"))."
+        $REMOVE_SOURCE && die 'Videos selected for omission cannot be combined with --remove-source; the omitted originals would have no archived copy.'
+    fi
+else
+    VIDEO_TRANSCODE_COUNT=0
+    VIDEO_SELECTED_BYTES=$VIDEO_BYTES
+fi
+check_destination_capacity
 
 if (( IMAGE_COUNT > 0 )); then
     jpeg_tools=false
@@ -5284,11 +5372,17 @@ video_encoder_is_hardware() {
 }
 
 probe_parent_video_encoder() {
-    local relative input probe='' candidate expected actual
+    local relative='' selected='' input probe='' candidate expected actual
     local -a command=() candidates=()
-    relative=$(head -n1 -- "$VIDEO_LIST" 2>/dev/null || true)
-    [[ -n $relative ]] || return 1
-    input="$SOURCE_PARENT/$relative"
+    while IFS= read -r relative; do
+        [[ -n $relative ]] || continue
+        hardcore_media_list_contains "$VIDEO_SPECIAL_PRESERVE_LIST" "$relative" && continue
+        hardcore_media_list_contains "$VIDEO_SPECIAL_OMIT_LIST" "$relative" && continue
+        selected=$relative
+        break
+    done < "$VIDEO_LIST"
+    [[ -n $selected ]] || return 1
+    input="$SOURCE_PARENT/$selected"
     probe=$(mktemp --suffix=.mkv)
     [[ $VIDEO_CODEC == av1 ]] && expected=av1 || expected=hevc
 
@@ -5328,7 +5422,7 @@ probe_parent_video_encoder() {
 # so video work can overlap the CPU-heavy LZMA process. Maximum prefers the
 # strongest available software encoder and runs sequentially unless explicitly
 # overridden. Fast keeps hardware-first behavior and parallel execution.
-if $VIDEO_TRANSCODE && (( VIDEO_COUNT > 0 )); then
+if $VIDEO_TRANSCODE && (( VIDEO_TRANSCODE_COUNT > 0 )); then
     case $VIDEO_MODE in
         maximum)
             if [[ -z $VIDEO_ENCODER ]]; then
@@ -5365,8 +5459,8 @@ fi
 # Pick a persistent local working area. It is cleaned after success, but kept
 # after interruption/failure so validated video work can be reused.
 MINIMUM_STAGING_BYTES=$((256 * MIB))
-if $VIDEO_TRANSCODE && (( VIDEO_COUNT > 0 )); then
-    MINIMUM_STAGING_BYTES=$((MINIMUM_STAGING_BYTES + VIDEO_BYTES + LARGEST_VIDEO_BYTES))
+if $VIDEO_TRANSCODE && (( VIDEO_TRANSCODE_COUNT > 0 )); then
+    MINIMUM_STAGING_BYTES=$((MINIMUM_STAGING_BYTES + VIDEO_TRANSCODE_BYTES + LARGEST_TRANSCODE_VIDEO_BYTES))
 fi
 if (( IMAGE_COUNT > 0 )); then
     MINIMUM_STAGING_BYTES=$((MINIMUM_STAGING_BYTES + IMAGE_BYTES + LARGEST_IMAGE_BYTES))
@@ -5445,7 +5539,7 @@ else
 fi
 
 VIDEO_PARALLEL_RESERVE_MIB=0
-if $VIDEO_TRANSCODE && $VIDEO_PARALLEL && (( VIDEO_COUNT > 0 )); then
+if $VIDEO_TRANSCODE && $VIDEO_PARALLEL && (( VIDEO_TRANSCODE_COUNT > 0 )); then
     VIDEO_PARALLEL_RESERVE_MIB=2048
 fi
 IMAGE_PARALLEL_RESERVE_MIB=0
@@ -5738,7 +5832,7 @@ ESTIMATED_COMPRESSION_RAM_MIB=$((DICTIONARY_MIB * 23 / 2 + 512))
 PARALLEL_SPARE_MIB=$((MEMORY_BUDGET_MIB - ESTIMATED_COMPRESSION_RAM_MIB))
 (( PARALLEL_SPARE_MIB < 0 )) && PARALLEL_SPARE_MIB=0
 
-if $VIDEO_TRANSCODE && (( VIDEO_COUNT > 0 )) && $VIDEO_PARALLEL; then
+if $VIDEO_TRANSCODE && (( VIDEO_TRANSCODE_COUNT > 0 )) && $VIDEO_PARALLEL; then
     if (( VIDEO_PARALLEL_RESERVE_MIB > PARALLEL_SPARE_MIB )); then
         if $VIDEO_PARALLEL_EXPLICIT; then
             warn "Forced parallel video work exceeds the spare-RAM plan; compression settings remain pinned, but memory pressure may increase."
@@ -5766,16 +5860,16 @@ fi
 
 FREE_DESTINATION_BYTES=$(df -PB1 -- "$ARCHIVE_PARENT" | awk 'NR==2 {print $4}')
 FREE_WORK_BYTES=$(df -PB1 -- "$JOB_WORK_DIR" | awk 'NR==2 {print $4}')
-DESTINATION_REQUIRED_BYTES=$((TOTAL_BYTES + 128 * MIB))
+DESTINATION_REQUIRED_BYTES=$((TOTAL_BYTES - VIDEO_OMITTED_BYTES + 128 * MIB))
 WORK_REQUIRED_BYTES=$((256 * MIB))
-if $VIDEO_TRANSCODE && (( VIDEO_COUNT > 0 )); then
-    WORK_REQUIRED_BYTES=$((WORK_REQUIRED_BYTES + VIDEO_BYTES + LARGEST_VIDEO_BYTES))
+if $VIDEO_TRANSCODE && (( VIDEO_TRANSCODE_COUNT > 0 )); then
+    WORK_REQUIRED_BYTES=$((WORK_REQUIRED_BYTES + VIDEO_TRANSCODE_BYTES + LARGEST_TRANSCODE_VIDEO_BYTES))
 fi
 if (( IMAGE_COUNT > 0 )); then
     WORK_REQUIRED_BYTES=$((WORK_REQUIRED_BYTES + IMAGE_BYTES + LARGEST_IMAGE_BYTES))
 fi
 if [[ $VERIFY_MODE_EFFECTIVE == hashes || $VERIFY_MODE_EFFECTIVE == extract ]]; then
-    WORK_REQUIRED_BYTES=$((WORK_REQUIRED_BYTES + TOTAL_BYTES + 128 * MIB))
+    WORK_REQUIRED_BYTES=$((WORK_REQUIRED_BYTES + TOTAL_BYTES - VIDEO_OMITTED_BYTES + 128 * MIB))
 fi
 if same_filesystem "$ARCHIVE_PARENT" "$JOB_WORK_DIR"; then
     SHARED_FILESYSTEM=true
@@ -5786,7 +5880,7 @@ else
 fi
 
 if [[ -n $MC_SAMPLE_RATIO ]]; then
-    ESTIMATED_ARCHIVE_BYTES=$(LC_NUMERIC=C awk -v nonvideo="$NONVIDEO_BYTES" -v ratio="$MC_SAMPLE_RATIO" -v copy="$COPY_BYTES" -v container="$CONTAINER_BYTES" -v video="$VIDEO_BYTES" -v image="$IMAGE_BYTES" -v nested="$NESTED_BYTES" 'BEGIN {printf "%.0f", nonvideo*ratio+copy+container+video+image+nested}')
+    ESTIMATED_ARCHIVE_BYTES=$(LC_NUMERIC=C awk -v nonvideo="$NONVIDEO_BYTES" -v ratio="$MC_SAMPLE_RATIO" -v copy="$COPY_BYTES" -v container="$CONTAINER_BYTES" -v video="$VIDEO_SELECTED_BYTES" -v image="$IMAGE_BYTES" -v nested="$NESTED_BYTES" 'BEGIN {printf "%.0f", nonvideo*ratio+copy+container+video+image+nested}')
 fi
 if [[ -n $MC_SAMPLE_SECONDS_PER_MIB ]]; then
     ESTIMATED_SECONDS=$(LC_NUMERIC=C awk -v mib="$NONVIDEO_MIB" -v rate="$MC_SAMPLE_SECONDS_PER_MIB" 'BEGIN {printf "%.0f", mib*rate}')
@@ -5822,6 +5916,9 @@ printf 'Video files detected:    %s files / %s\n' \
 if (( VIDEO_COUNT > 0 )); then
     if $VIDEO_TRANSCODE; then
         printf 'Video handling:          Transcode smaller validated results; Copy fallback\n'
+        printf 'Special video policy:   %s (%s detected, %s preserved, %s conversion candidates, %s omitted)\n' \
+            "$VIDEO_SPECIAL_POLICY" "$VIDEO_SPECIAL_COUNT" "$VIDEO_SPECIAL_PRESERVE_COUNT" \
+            "$VIDEO_SPECIAL_CONVERT_COUNT" "$VIDEO_OMITTED_COUNT"
         printf 'Video codec:             %s\n' "${VIDEO_CODEC^^}"
         printf 'Video encoder:           %s\n' "${VIDEO_ENCODER:-Automatic hardware-first selection}"
         printf 'Video execution:         %s separate process\n' "$($VIDEO_PARALLEL && printf 'Parallel' || printf 'Sequential')"
@@ -6346,6 +6443,10 @@ prepare_video_stage() {
 
     while IFS= read -r relative_path; do
         [[ -n $relative_path ]] || continue
+        if hardcore_media_list_contains "$VIDEO_SPECIAL_PRESERVE_LIST" "$relative_path" ||
+           hardcore_media_list_contains "$VIDEO_SPECIAL_OMIT_LIST" "$relative_path"; then
+            continue
+        fi
         source_path="$SOURCE_PARENT/$relative_path"
         archived_relative=$(video_archived_relative "$relative_path")
         key=$(video_cache_key "$relative_path") || key=''
@@ -6645,15 +6746,30 @@ classify_video_stage_results() {
 
     VIDEO_COMPRESSED_COUNT=0
     VIDEO_FALLBACK_COUNT=0
+    VIDEO_OMITTED_COUNT=0
     VIDEO_COMPRESSED_BYTES=0
     VIDEO_FALLBACK_BYTES=0
+    VIDEO_OMITTED_BYTES=0
 
     while IFS= read -r relative; do
         [[ -n $relative ]] || continue
         staged_original="$VIDEO_STAGE_PARENT/$relative"
         original_size=$(stat -c '%s' -- "$SOURCE_PARENT/$relative")
 
-        if [[ -L $staged_original ]]; then
+        if hardcore_media_list_contains "$VIDEO_SPECIAL_OMIT_LIST" "$relative"; then
+            action='omitted'
+            archived_relative=''
+            archived_size=0
+            VIDEO_OMITTED_COUNT=$((VIDEO_OMITTED_COUNT + 1))
+            VIDEO_OMITTED_BYTES=$((VIDEO_OMITTED_BYTES + original_size))
+        elif hardcore_media_list_contains "$VIDEO_SPECIAL_PRESERVE_LIST" "$relative"; then
+            action='original'
+            archived_relative=$relative
+            archived_size=$original_size
+            printf '%s\n' "$relative" >> "$VIDEO_FALLBACK_LIST"
+            VIDEO_FALLBACK_COUNT=$((VIDEO_FALLBACK_COUNT + 1))
+            VIDEO_FALLBACK_BYTES=$((VIDEO_FALLBACK_BYTES + original_size))
+        elif [[ -L $staged_original ]]; then
             action='original'
             archived_relative=$relative
             archived_size=$original_size
@@ -6692,10 +6808,10 @@ classify_video_stage_results() {
         printf '%s\t%s\t%s\t%s\t%s\n'             "$action" "$relative" "$archived_relative" "$original_size" "$archived_size"             >> "$VIDEO_RESULT_MANIFEST"
     done < "$VIDEO_LIST"
 
-    accounted=$((VIDEO_COMPRESSED_COUNT + VIDEO_FALLBACK_COUNT))
+    accounted=$((VIDEO_COMPRESSED_COUNT + VIDEO_FALLBACK_COUNT + VIDEO_OMITTED_COUNT))
     (( accounted == VIDEO_COUNT )) ||         die "Video staging accounted for $accounted of $VIDEO_COUNT source videos."
 
-    VIDEO_SAVED_BYTES=$((VIDEO_BYTES - VIDEO_COMPRESSED_BYTES - VIDEO_FALLBACK_BYTES))
+    VIDEO_SAVED_BYTES=$((VIDEO_BYTES - VIDEO_OMITTED_BYTES - VIDEO_COMPRESSED_BYTES - VIDEO_FALLBACK_BYTES))
     if (( VIDEO_SAVED_BYTES < 0 )); then
         VIDEO_SAVED_BYTES=0
     fi
@@ -6710,6 +6826,12 @@ write_video_manifest() {
         printf 'Script version: %s\n' "$SCRIPT_VERSION"
         printf 'Source root: %s\n' "$SOURCE_NAME"
         printf 'Video codec target: %s\n' "${VIDEO_CODEC^^}"
+        printf 'Special-video policy: %s\n' "$VIDEO_SPECIAL_POLICY"
+        printf 'Special videos detected: %s\n' "$VIDEO_SPECIAL_COUNT"
+        printf 'Special videos preserved: %s\n' "$VIDEO_SPECIAL_PRESERVE_COUNT"
+        printf 'Special videos offered to FFmpeg: %s\n' "$VIDEO_SPECIAL_CONVERT_COUNT"
+        printf 'Videos omitted by explicit choice: %s\n' "$VIDEO_OMITTED_COUNT"
+        printf 'Bytes omitted by explicit choice: %s\n' "$VIDEO_OMITTED_BYTES"
         printf 'Minimum accepted VMAF: %s\n' "$VIDEO_MIN_VMAF"
         printf 'Minimum accepted saving: %s%%\n' "$VIDEO_MIN_SAVINGS_PERCENT"
         printf 'Preflight sampling: %s\n' "$($VIDEO_PREFLIGHT && printf 'enabled' || printf 'disabled')"
@@ -6728,6 +6850,10 @@ add_video_results_to_archive() {
         "$VIDEO_COMPRESSED_COUNT" "$(human_bytes "$VIDEO_COMPRESSED_BYTES")"
     printf 'Original-video fallbacks:     %s files / %s\n\n' \
         "$VIDEO_FALLBACK_COUNT" "$(human_bytes "$VIDEO_FALLBACK_BYTES")"
+    if (( ${VIDEO_OMITTED_COUNT:-0} > 0 )); then
+        printf 'Explicitly omitted videos:    %s files / %s\n\n' \
+            "${VIDEO_OMITTED_COUNT:-0}" "$(human_bytes "${VIDEO_OMITTED_BYTES:-0}")"
+    fi
 
     if [[ -s $VIDEO_COMPRESSED_LIST ]]; then
         (
@@ -6813,7 +6939,7 @@ prepare_and_add_nested_archives() {
     # staging on the selected filesystem instead of reselecting the home cache.
     inherited+=(--work-dir "$NESTED_STAGE_PARENT/child-work")
     $VIDEO_TRANSCODE || inherited+=(--no-video-transcode)
-    inherited+=(--video-codec "$VIDEO_CODEC" --video-mode "$VIDEO_MODE" --quality-check "$QUALITY_CHECK" --video-min-vmaf "$VIDEO_MIN_VMAF")
+    inherited+=(--video-codec "$VIDEO_CODEC" --video-mode "$VIDEO_MODE" --video-special-policy "${VIDEO_SPECIAL_POLICY:-ask}" --quality-check "$QUALITY_CHECK" --video-min-vmaf "$VIDEO_MIN_VMAF")
     [[ -n $VIDEO_ENCODER ]] && inherited+=(--video-encoder "$VIDEO_ENCODER")
     $IMAGE_OPTIMIZE || inherited+=(--no-image-optimize)
     inherited+=(--image-mode "$IMAGE_MODE" --verify "$VERIFY_MODE_EFFECTIVE" --effort "$EFFORT")
@@ -6982,6 +7108,9 @@ Operating system: $(platform_os_version)
 Created: $(date --iso-8601=seconds)
 Source name: $SOURCE_NAME
 Source bytes: $TOTAL_BYTES
+Source bytes selected for archive: $((TOTAL_BYTES - VIDEO_OMITTED_BYTES))
+Videos omitted by explicit choice: $VIDEO_OMITTED_COUNT
+Video bytes omitted by explicit choice: $VIDEO_OMITTED_BYTES
 Verification: $VERIFY_MODE_EFFECTIVE
 Sparse files: $SPARSE_FILE_COUNT
 Sparse hole bytes: $SPARSE_HOLE_BYTES
@@ -7210,10 +7339,11 @@ verify_archive_by_extraction() {
 
 write_success_report() {
     $WRITE_REPORT || return 0
-    local archive_size elapsed ratio report_temp
+    local archive_size elapsed ratio report_temp archived_source_bytes
     archive_size=$(stat -c '%s' -- "$ARCHIVE")
     elapsed=$((SECONDS - SCRIPT_START_SECONDS))
-    ratio=$(LC_NUMERIC=C awk -v a="$archive_size" -v s="$TOTAL_BYTES" 'BEGIN {if(s>0) printf "%.2f",a*100/s; else print "0"}')
+    archived_source_bytes=$((TOTAL_BYTES - VIDEO_OMITTED_BYTES))
+    ratio=$(LC_NUMERIC=C awk -v a="$archive_size" -v s="$archived_source_bytes" 'BEGIN {if(s>0) printf "%.2f",a*100/s; else print "0"}')
     report_temp="${REPORT_PATH}.partial.$$"
     if ! {
         printf 'Hardcore Archive success report\n'
@@ -7224,6 +7354,9 @@ write_success_report() {
         printf 'Source: %s\n' "$SOURCE"
         printf 'Archive: %s\n' "$ARCHIVE"
         printf 'Source bytes: %s\n' "$TOTAL_BYTES"
+        printf 'Source bytes selected for archive: %s\n' "$archived_source_bytes"
+        printf 'Videos omitted by explicit choice: %s\n' "$VIDEO_OMITTED_COUNT"
+        printf 'Video bytes omitted by explicit choice: %s\n' "$VIDEO_OMITTED_BYTES"
         printf 'Archive bytes: %s\n' "$archive_size"
         printf 'Archive/source ratio: %s%%\n' "$ratio"
         printf 'Elapsed: %s\n' "$(format_duration "$elapsed")"
@@ -7240,6 +7373,7 @@ write_success_report() {
         printf 'Container bytes saved: %s\n' "$CONTAINER_SAVED_BYTES"
         printf 'Videos transcoded: %s\n' "$VIDEO_COMPRESSED_COUNT"
         printf 'Videos preserved: %s\n' "$VIDEO_FALLBACK_COUNT"
+        printf 'Videos omitted by explicit choice: %s\n' "$VIDEO_OMITTED_COUNT"
         printf 'Video bytes saved: %s\n' "$VIDEO_SAVED_BYTES"
         printf 'Resume-cache hits: %s\n' "$VIDEO_CACHE_HITS"
         printf 'Images optimized: %s\n' "$IMAGE_OPTIMIZED_COUNT"
@@ -7441,6 +7575,7 @@ printf 'Copy lane:  %s files / %s\n' "$COPY_COUNT" "$(human_bytes "$COPY_BYTES")
 if (( VIDEO_COUNT > 0 )); then
     printf 'Videos transcoded smaller: %s\n' "$VIDEO_COMPRESSED_COUNT"
     printf 'Videos stored original:    %s\n' "$VIDEO_FALLBACK_COUNT"
+    printf 'Videos omitted explicitly: %s\n' "$VIDEO_OMITTED_COUNT"
     printf 'Video bytes saved:         %s\n' "$(human_bytes "$VIDEO_SAVED_BYTES")"
 fi
 if (( IMAGE_COUNT > 0 )); then

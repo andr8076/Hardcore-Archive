@@ -16,7 +16,7 @@ hardcore_reporting_create_directory() {
         case $1 in
             --) shift; positionals+=("$@"); break ;;
             --batch) batch=true; shift ;;
-            --dictionary|--threads|--effort|--search-cycles|--progress-interval|--nested-max-depth|--verify|--work-dir|--config|--video-mode|--video-min-vmaf|--video-min-savings|--image-mode|--image-jobs|--batch-root-files|--batch-jobs|--video-codec|--video-encoder|--quality-check)
+            --dictionary|--threads|--effort|--search-cycles|--progress-interval|--nested-max-depth|--verify|--work-dir|--config|--video-mode|--video-special-policy|--video-min-vmaf|--video-min-savings|--image-mode|--image-jobs|--batch-root-files|--batch-jobs|--video-codec|--video-encoder|--quality-check)
                 (( $# >= 2 )) || { printf 'Error: %s requires a value.\n' "$1" >&2; return 1; }
                 shift 2 ;;
             --*) shift ;;
