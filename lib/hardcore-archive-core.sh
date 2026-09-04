@@ -3428,23 +3428,15 @@ is_format_preserving_container_path() {
         *) return 1 ;;
     esac
 }
-# Files that are already entropy-compressed are preserved byte-for-byte but are
-# stored with 7-Zip's Copy method instead of wasting LZMA2 time. Transform
-# lanes are classified first, so video/image/nested/container processing still
-# takes precedence whenever it is enabled.
+# HARDCORE_COPY_LANE_PATCH_V2
+# Generic Copy/LZMA routing is content-aware. Transform lanes are still
+# classified first; ordinary files are sampled once in a batch and only
+# content-confirmed incompressible files enter the Copy lane. Uncertain and
+# small files remain in solid LZMA2 so a filename can never suppress useful
+# compression.
+declare -A CONTENT_COPY_PATHS=()
 is_already_compressed_path() {
-    local lower=${1,,}
-    case "$lower" in
-        *.7z|*.zip|*.rar|*.cab|*.gz|*.bz2|*.xz|*.zst|*.lz4|*.tgz|*.tbz|*.tbz2|*.txz|*.tzst|\
-        *.docx|*.xlsx|*.pptx|*.odt|*.ods|*.odp|*.epub|*.apk|*.jar|*.war|*.whl|*.npz|*.deb|*.rpm|\
-        *.mp3|*.aac|*.m4a|*.ogg|*.opus|*.flac|*.wma|*.alac|*.ape|\
-        *.webp|*.gif|*.avif|*.heic|*.heif)
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+    [[ ${CONTENT_COPY_PATHS[$1]+present} == present ]]
 }
 
 archive_replacement_path() {
@@ -4918,6 +4910,8 @@ CONTAINER_RESULT_MANIFEST=$(mktemp)
 CONTAINER_REPACKED_LIST=$(mktemp)
 CONTAINER_FALLBACK_LIST=$(mktemp)
 COPY_LIST=$(mktemp)
+COMPRESSIBILITY_CANDIDATES=$(mktemp)
+COMPRESSIBILITY_RESULT_MANIFEST=$(mktemp)
 SNAPSHOT_BEFORE=$(mktemp)
 SNAPSHOT_AFTER=$(mktemp)
 SEVEN_ZIP_LOG=$(component_log_path 7zip.log)
@@ -5109,7 +5103,7 @@ cleanup() {
     if [[ -z ${HARDCORE_ARCHIVE_DIAGNOSTIC_DIR:-} ]]; then
         rm -f -- "$SEVEN_ZIP_LOG" "$VIDEO_LOG" "$IMAGE_LOG" "$MC_TUNING_LOG" "$HASH_VERIFY_LOG"
     fi
-    rm -f -- "$VIDEO_LIST" "$IMAGE_LIST" "$NESTED_LIST" "$CONTAINER_LIST" "$COPY_LIST" "$SNAPSHOT_BEFORE" "$SNAPSHOT_AFTER" \
+    rm -f -- "$VIDEO_LIST" "$IMAGE_LIST" "$NESTED_LIST" "$CONTAINER_LIST" "$COPY_LIST" "$COMPRESSIBILITY_CANDIDATES" "$COMPRESSIBILITY_RESULT_MANIFEST" "$SNAPSHOT_BEFORE" "$SNAPSHOT_AFTER" \
         "$INVENTORY_RAW" "$VIDEO_COMPRESSED_LIST" "$VIDEO_FALLBACK_LIST" \
         "$VIDEO_SPECIAL_LIST" "$VIDEO_SPECIAL_PRESERVE_LIST" "$VIDEO_SPECIAL_OMIT_LIST" \
         "$VIDEO_RESULT_MANIFEST" "$IMAGE_RESULT_MANIFEST" "$IMAGE_OPTIMIZED_LIST" "$IMAGE_FALLBACK_LIST" \
@@ -5245,6 +5239,7 @@ CONTAINER_SAVED_BYTES=0
 CONTAINER_STAGE_PARENT=''
 COPY_COUNT=0
 COPY_BYTES=0
+GENERIC_CANDIDATE_COUNT=0
 NONVIDEO_COUNT=0
 NONVIDEO_BYTES=0
 
@@ -5286,16 +5281,53 @@ while IFS= read -r -d '' file_size && IFS= read -r -d '' relative_path; do
         CONTAINER_COUNT=$((CONTAINER_COUNT + 1))
         CONTAINER_BYTES=$((CONTAINER_BYTES + file_size))
         printf '%s\n' "$relative_path" >> "$CONTAINER_LIST"
-    elif is_already_compressed_path "$relative_path"; then
-        COPY_COUNT=$((COPY_COUNT + 1))
-        COPY_BYTES=$((COPY_BYTES + file_size))
-        printf '%s\n' "$relative_path" >> "$COPY_LIST"
     else
-        NONVIDEO_COUNT=$((NONVIDEO_COUNT + 1))
-        NONVIDEO_BYTES=$((NONVIDEO_BYTES + file_size))
+        GENERIC_CANDIDATE_COUNT=$((GENERIC_CANDIDATE_COUNT + 1))
+        printf '%s\0%s\0' "$file_size" "$relative_path" >> "$COMPRESSIBILITY_CANDIDATES"
     fi
 done < "$INVENTORY_RAW"
+
+: > "$COMPRESSIBILITY_RESULT_MANIFEST"
+if (( GENERIC_CANDIDATE_COUNT > 0 )); then
+    COMPRESSIBILITY_HELPER=${HARDCORE_ARCHIVE_COMPRESSIBILITY_HELPER:-"$(dirname -- "${BASH_SOURCE[0]}")/hardcore-archive-compressibility.py"}
+    [[ -f $COMPRESSIBILITY_HELPER ]] || \
+        die "The content-aware compressibility helper is missing: $COMPRESSIBILITY_HELPER"
+    if ! python3 "$COMPRESSIBILITY_HELPER" \
+        --source-parent "$SOURCE_PARENT" \
+        --inventory "$COMPRESSIBILITY_CANDIDATES" \
+        --result "$COMPRESSIBILITY_RESULT_MANIFEST"; then
+        die "Content-aware Copy/LZMA classification failed; no extension-only fallback was used."
+    fi
+
+    compressibility_accounted=0
+    while IFS=$'\t' read -r route classified_size sampled_bytes mean_ratio min_ratio route_reason relative_path; do
+        [[ -n $route && -n $relative_path ]] || continue
+        [[ $classified_size =~ ^[0-9]+$ && $sampled_bytes =~ ^[0-9]+$ ]] || \
+            die "Invalid content-routing result for: $relative_path"
+        compressibility_accounted=$((compressibility_accounted + 1))
+        case $route in
+            copy)
+                COPY_COUNT=$((COPY_COUNT + 1))
+                COPY_BYTES=$((COPY_BYTES + classified_size))
+                CONTENT_COPY_PATHS["$relative_path"]=1
+                printf '%s\n' "$relative_path" >> "$COPY_LIST"
+                ;;
+            lzma)
+                NONVIDEO_COUNT=$((NONVIDEO_COUNT + 1))
+                NONVIDEO_BYTES=$((NONVIDEO_BYTES + classified_size))
+                ;;
+            *)
+                die "Unknown content-routing action '$route' for: $relative_path"
+                ;;
+        esac
+    done < "$COMPRESSIBILITY_RESULT_MANIFEST"
+    (( compressibility_accounted == GENERIC_CANDIDATE_COUNT )) || \
+        die "Content routing accounted for $compressibility_accounted of $GENERIC_CANDIDATE_COUNT ordinary files."
+fi
+
 printf 'Scan complete: %s files / %s.\n' "$TOTAL_FILE_COUNT" "$(human_bytes "$TOTAL_BYTES")"
+printf 'Content routing: %s LZMA2 file(s), %s Copy file(s); filenames do not decide the generic lane.\n' \
+    "$NONVIDEO_COUNT" "$COPY_COUNT"
 
 dependency_preflight_create_optional "$VIDEO_COUNT" "$IMAGE_JPEG_COUNT" \
     "$IMAGE_PNG_COUNT" "$NESTED_COUNT" false
@@ -6350,11 +6382,11 @@ process_format_preserving_containers() {
 add_copy_lane_to_archive() {
     (( COPY_COUNT > 0 )) || return 0
     FAILURE_CONTEXT="copy-lane-storage"
-    printf '\nStage 6/8: Storing already-compressed files with Copy mode...\n'
+    printf '\nStage 6/8: Storing content-confirmed incompressible files with Copy mode...\n'
     printf 'Copy lane: %s files / %s\n\n' "$COPY_COUNT" "$(human_bytes "$COPY_BYTES")"
     (
         cd -- "$SOURCE_PARENT"
-        run_logged_stage "already-compressed Copy storage" "$SEVEN_ZIP_LOG" \
+        run_logged_stage "content-incompressible Copy storage" "$SEVEN_ZIP_LOG" \
             "$SEVEN_ZIP" a "$TEMP_ARCHIVE" \
                 -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
                 -snl -snh -spd -scsUTF-8 -bsp1 -y \
