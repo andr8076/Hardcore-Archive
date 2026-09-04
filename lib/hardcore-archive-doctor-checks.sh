@@ -139,6 +139,14 @@ check_strict_runtime_capabilities() {
     check_core_command_set || true
     check_7zip || true
     [[ -n $SEVEN_ZIP ]] && inspect_nested_relevance || true
+
+    # The media runtime can be large and source checkouts may download it on
+    # first use. Delay setup until direct/nested inspection proves that enabled
+    # video processing is actually relevant to this source.
+    if [[ $VIDEO_ENABLED == true && $VIDEO_RELEVANT == true ]]; then
+        hardcore_runtime_prepare_video_toolchain || true
+    fi
+
     check_version_command Python python3 python 'Sparse-file and metadata analysis require Python 3.' --version && add_ready 'Python 3'
 
     if [[ $MC_AUTO_ENABLED == true && $ANALYZE_ONLY == false ]]; then

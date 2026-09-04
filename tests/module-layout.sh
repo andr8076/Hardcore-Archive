@@ -32,7 +32,8 @@ grep -Fq 'source "$HARDCORE_ARCHIVE_ROOT/lib/visual.sh"' "$ROOT/hardcore-archive
 grep -Fq 'source "$HARDCORE_ARCHIVE_ROOT/lib/scheduler.sh"' "$ROOT/hardcore-archive-runner.sh"
 grep -Fq 'hardcore_archive_static_engine_ready' "$ROOT/lib/archive.sh"
 grep -Fq 'hardcore_archive_static_engine_ready' "$ROOT/lib/scheduler.sh"
-grep -Fq 'hardcore_runtime_prepare_video_toolchain' "$ROOT/lib/scheduler.sh"
+! grep -Fq 'hardcore_runtime_prepare_video_toolchain' "$ROOT/lib/scheduler.sh"
+grep -Fq 'hardcore_runtime_prepare_video_toolchain' "$ROOT/lib/hardcore-archive-doctor-checks.sh"
 grep -Fq 'hardcore_run_sourced "$HARDCORE_POLICY_RUNNER"' "$ROOT/lib/scheduler.sh"
 ! grep -Eq 'apply_runtime_patch|build_runtime_core|HARDCORE_RUNTIME' \
     "$ROOT/lib/archive.sh" "$ROOT/lib/video.sh" "$ROOT/lib/nested.sh" \

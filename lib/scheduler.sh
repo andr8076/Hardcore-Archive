@@ -22,7 +22,6 @@ hardcore_runtime_main() {
     hardcore_require_bash || return 1
     hardcore_planner_init_runtime_paths || return 1
     hardcore_archive_static_engine_ready || return 1
-    hardcore_runtime_prepare_video_toolchain || return 1
 
     local rc
     if hardcore_planner_direct_policy_mode "$@"; then

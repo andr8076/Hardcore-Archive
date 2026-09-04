@@ -61,7 +61,7 @@ check_video_capability
 
 # A machine with only HEVC remains valid in auto mode; absence is not a hidden
 # fallback, it is simply the only candidate the hardware exposes.
-FAIL_TYPES=(); FAIL_CAPS=(); FAIL_DETAILS=(); FAIL_REPAIR_KEYS=(); FAIL_REPAIR_CMDS=(); READY_LINES=(); INFO_LINES=()
+FAIL_TYPES=(); FAIL_CAPS=(); FAIL_DETAILS=(); FAIL_REPAIR_KEYS=(); READY_LINES=(); INFO_LINES=()
 HARDWARE_AV1_ENCODER=''; HARDWARE_HEVC_ENCODER=''; HARDWARE_VIDEO_ENCODER=''; HARDWARE_VIDEO_PRIMARY_CODEC=''
 select_hardware_encoder() { [[ $1 == hevc ]] && { printf hevc_vaapi; return 0; }; return 1; }
 check_video_capability
@@ -74,7 +74,7 @@ check_video_capability
 # FFmpeg can expose AV1 NVENC even when the installed GPU cannot encode AV1.
 # A failed automatic candidate must not make a working alternative fatal.
 reset_auto_doctor() {
-    FAIL_TYPES=(); FAIL_CAPS=(); FAIL_DETAILS=(); FAIL_REPAIR_KEYS=(); FAIL_REPAIR_CMDS=()
+    FAIL_TYPES=(); FAIL_CAPS=(); FAIL_DETAILS=(); FAIL_REPAIR_KEYS=()
     READY_LINES=(); INFO_LINES=(); REPAIR_KEY_SEEN=()
     EFFECTIVE_VIDEO_CODEC=auto
     QUALITY_CHECK_EFFECTIVE=auto

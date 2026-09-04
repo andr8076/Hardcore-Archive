@@ -81,6 +81,7 @@ EOF_TOOL
 cat > "$TMP/bin/ffmpeg" <<'EOF_TOOL'
 #!/usr/bin/env bash
 if [[ " $* " == *" -version "* ]]; then echo 'ffmpeg fake'; exit 0; fi
+if [[ " $* " == *" -buildconf "* ]]; then echo '--enable-libvmaf'; exit 0; fi
 if [[ " $* " == *" -encoders "* ]]; then
     cat <<'OUT'
  V..... av1_vaapi AV1
@@ -143,10 +144,15 @@ assert_contains "$out" 'Automatic video competition: AV1 (av1_vaapi) vs HEVC (he
 assert_contains "$out" 'Self-check: READY for this source'
 
 # A configured feature with no matching content is disabled before dependency checks.
+# The frontend-only auto codec must also be translated to a neutral concrete
+# core value, otherwise the static core rejects VIDEO_CODEC=auto before it sees
+# that video transcoding is disabled.
 mv "$TMP/bin/ffmpeg" "$TMP/bin/ffmpeg.off"
 printf 'VIDEO_TRANSCODE=true\n' > "$TMP/home/.config/hardcore-archive/config"
 out=$(run_frontend "$TMP/docs" 2>&1)
 assert_has "$out" 'ARG=--no-video-transcode'
+assert_has "$out" 'ARG=--video-codec'
+assert_has "$out" 'ARG=av1'
 mv "$TMP/bin/ffmpeg.off" "$TMP/bin/ffmpeg"
 
 # Hardware AV1 is forced when video work is actually needed.
@@ -179,7 +185,8 @@ assert_has "$out" 'ARG=hevc'
 assert_has "$out" 'ARG=hevc_vaapi'
 assert_contains "$out" 'GPU cannot encode AV1; using the only permitted fallback: HEVC via hevc_vaapi.'
 
-# Missing required image capability is a hard failure with an exact repair command.
+# Missing required image capability is a hard failure with informational package
+# guidance, never an executable repair command.
 mv "$TMP/bin/oxipng" "$TMP/bin/oxipng.off"
 set +e
 out=$(run_frontend --image-optimize "$TMP/png" 2>&1); rc=$?
@@ -187,8 +194,10 @@ set -e
 (( rc == 3 )) || { printf 'Expected doctor failure rc=3, got %s\n%s\n' "$rc" "$out" >&2; exit 1; }
 assert_contains "$out" 'MISSING'
 assert_contains "$out" 'PNG optimizer'
-assert_contains "$out" 'sudo pacman -S --needed'
+assert_contains "$out" 'Suggested package names (informational only; verify for your system):'
+assert_contains "$out" 'Package family detected: pacman'
 assert_contains "$out" 'oxipng'
+assert_lacks "$out" 'sudo '
 mv "$TMP/bin/oxipng.off" "$TMP/bin/oxipng"
 
 # Installed FFmpeg without required libvmaf is UNSUPPORTED, not silently downgraded to SSIM.

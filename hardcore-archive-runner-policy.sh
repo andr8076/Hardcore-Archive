@@ -419,8 +419,14 @@ fi
 
 # Now that nested contents have been inspected, disable transforms that cannot
 # be used by this particular source before the static core performs its own
-# broad preflight.
-if [[ $VIDEO_ENABLED != true || $VIDEO_RELEVANT != true ]]; then VIDEO_ENABLED=false; FORWARDED+=(--no-video-transcode); fi
+# broad preflight. VIDEO_CODEC=auto is a frontend-only policy value; when video
+# work is disabled, pass a neutral concrete codec so the older core parser does
+# not reject an option it will never use.
+if [[ $VIDEO_ENABLED != true || $VIDEO_RELEVANT != true ]]; then
+    VIDEO_ENABLED=false
+    FORWARDED+=(--no-video-transcode)
+    [[ $EFFECTIVE_VIDEO_CODEC == auto ]] && FORWARDED+=(--video-codec av1)
+fi
 if [[ $IMAGE_ENABLED != true || $IMAGE_RELEVANT != true ]]; then IMAGE_ENABLED=false; FORWARDED+=(--no-image-optimize); fi
 if [[ $NESTED_ENABLED != true || $NESTED_RELEVANT != true ]]; then NESTED_ENABLED=false; FORWARDED+=(--no-nested-repack); fi
 if [[ $CONTAINER_ENABLED != true || $CONTAINER_RELEVANT != true ]]; then CONTAINER_ENABLED=false; fi

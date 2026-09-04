@@ -37,33 +37,47 @@ packages_for_key() {
     esac
 }
 
-print_repair_commands() {
+print_repair_guidance() {
     detect_package_manager
-    local key packages p
+    local i key packages p detail permission_hint=false nonmissing_failure=false
     declare -A pkgset=()
-    for key in "${!REPAIR_KEY_SEEN[@]}"; do
-        packages=$(packages_for_key "$key")
-        for p in $packages; do [[ -n $p ]] && pkgset["$p"]=1; done
-    done
-    (( ${#pkgset[@]} > 0 )) || return 0
-    local -a pkgs=("${!pkgset[@]}")
-    printf '\nRepair command (not executed):\n'
-    case $PACKAGE_MANAGER in
-        pacman) printf '  sudo pacman -S --needed';; apt) printf '  sudo apt-get update && sudo apt-get install -y';; dnf) printf '  sudo dnf install';; zypper) printf '  sudo zypper install';; brew) printf '  brew install';;
-        *) printf '  Install these packages with your package manager:';;
-    esac
-    printf ' %q' "${pkgs[@]}"; printf '\n'
 
-    # A common GPU failure is device permission rather than a missing package.
-    local i detail
+    # Doctor output is intentionally informational. Package names are hints for
+    # genuinely missing dependencies, never executable install instructions.
+    # BROKEN and UNSUPPORTED capabilities require diagnosis of the reported
+    # runtime/hardware/configuration failure rather than a guessed reinstall.
     for i in "${!FAIL_TYPES[@]}"; do
+        key=${FAIL_REPAIR_KEYS[i]}
+        if [[ ${FAIL_TYPES[i]} == MISSING && -n $key ]]; then
+            packages=$(packages_for_key "$key")
+            for p in $packages; do [[ -n $p ]] && pkgset["$p"]=1; done
+        else
+            nonmissing_failure=true
+        fi
+
         detail=${FAIL_DETAILS[i]}
-        if [[ ${FAIL_CAPS[i]} == Hardware* && $detail == *[Pp]ermission* ]]; then
-            printf '  sudo usermod -aG render,video %q\n' "${USER:-$LOGNAME}"
-            printf '  # Log out and back in after changing groups.\n'
-            break
+        if [[ ${FAIL_TYPES[i]} == BROKEN && ${FAIL_CAPS[i]} == Hardware* && $detail == *[Pp]ermission* ]]; then
+            permission_hint=true
         fi
     done
+
+    if (( ${#pkgset[@]} > 0 )); then
+        printf '\nSuggested package names (informational only; verify for your system):\n'
+        [[ $PACKAGE_MANAGER != unknown ]] && printf '  Package family detected: %s\n' "$PACKAGE_MANAGER"
+        for p in "${!pkgset[@]}"; do printf '  - %s\n' "$p"; done
+    fi
+
+    if $permission_hint; then
+        printf '\nConfiguration check:\n'
+        printf '  Hardware access may depend on render/video group membership and device permissions. Verify those settings for your OS/session before changing them.\n'
+    fi
+
+    if $nonmissing_failure; then
+        printf '\nFurther diagnosis:\n'
+        printf '  BROKEN/UNSUPPORTED components were detected, so package installation is not assumed to be the fix. Use the failure details above to check runtime, hardware, driver, permission, service, or compatibility state.\n'
+    fi
+
+    printf '\nDoctor guidance is informational only; it does not generate repair or installation commands.\n'
 }
 
 print_doctor_report() {
@@ -96,7 +110,7 @@ print_doctor_report() {
             printf '  %-28s %s\n' "${FAIL_CAPS[i]}" "${FAIL_DETAILS[i]}"
         done
     done
-    print_repair_commands
+    print_repair_guidance
     printf '\nResult: NOT READY. No dependency fallback will be used.\n'
     return 1
 }
