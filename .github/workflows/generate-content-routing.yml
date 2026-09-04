@@ -1,0 +1,37 @@
+name: Generate content-aware routing core
+
+on:
+  push:
+    branches:
+      - feature/content-aware-copy-routing
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/content-aware-copy-routing
+          fetch-depth: 0
+      - name: Generate checked-in static core
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 lib/hardcore-archive-copy-lane.py lib/hardcore-archive-core.sh /tmp/hardcore-archive-core.sh
+          if cmp -s /tmp/hardcore-archive-core.sh lib/hardcore-archive-core.sh; then
+            echo 'Static core is already current.'
+            exit 0
+          fi
+          mv /tmp/hardcore-archive-core.sh lib/hardcore-archive-core.sh
+          bash -n lib/hardcore-archive-core.sh
+          python3 tests/compressibility-routing.py
+          bash tests/copy-lane-policy.sh
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib/hardcore-archive-core.sh
+          git commit -m 'Generate content-aware Copy routing core'
+          git push origin HEAD:feature/content-aware-copy-routing
