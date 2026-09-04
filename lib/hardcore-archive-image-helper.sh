@@ -20,15 +20,12 @@ png_pixel_hash() {
     fi
 }
 
-oxipng_help() {
+oxipng_supports() {
+    local needle=$1
     if [[ -z ${OXIPNG_HELP_CACHE+x} ]]; then
         OXIPNG_HELP_CACHE=$(oxipng --help 2>&1 || true)
     fi
-    printf '%s' "$OXIPNG_HELP_CACHE"
-}
-
-oxipng_supports() {
-    oxipng_help | grep -Fq -- "$1"
+    [[ $OXIPNG_HELP_CACHE == *"$needle"* ]]
 }
 
 oxipng_thread_args() {
@@ -88,11 +85,10 @@ run_oxipng_baseline() {
 run_oxipng_zopfli_refinement() {
     local threads=$1 target=$2 budget=$3
     local -a args=(-q -o 2 --zopfli --preserve)
+    oxipng_supports '--zopfli' || return 2
     oxipng_thread_args "$threads"
     args+=("${OXIPNG_THREAD_ARGS[@]}")
-    if oxipng_supports '--zi '; then
-        args+=(--zi 5)
-    elif oxipng_supports '--zi <'; then
+    if oxipng_supports '--zi'; then
         args+=(--zi 5)
     fi
     if oxipng_supports '--ziwi'; then
@@ -152,29 +148,39 @@ optimize_one() {
         if has oxipng; then
             source_hash=$(png_pixel_hash "$input" || true)
             if [[ -n $source_hash ]] && run_oxipng_baseline "$mode" "$threads" "$candidate" >>"$log_file" 2>&1 && [[ -s $candidate ]]; then
-                candidate_hash=$(png_pixel_hash "$candidate" || true)
-                if [[ $candidate_hash == "$source_hash" ]]; then
-                    best=$candidate
-                    best_size=$(stat -c '%s' -- "$candidate")
-                    tool="oxipng-${mode}"
-                fi
+                best=$candidate
+                best_size=$(stat -c '%s' -- "$candidate")
+                tool="oxipng-${mode}"
             fi
 
-            if [[ $mode == maximum && -n $best ]] && zopfli_refinement_worthwhile "$original_size" "$best_size"; then
+            if [[ $mode == maximum && -n $best ]] && \
+               oxipng_supports '--zopfli' && \
+               zopfli_refinement_worthwhile "$original_size" "$best_size"; then
                 zopfli="$temp_dir/zopfli.png"
                 cp --reflink=auto --preserve=all -- "$best" "$zopfli"
                 zopfli_budget=$(zopfli_budget_seconds "$best_size")
                 printf 'Zopfli refinement: %s, budget %ss, threads %s\n' "$relative" "$zopfli_budget" "$threads" >>"$log_file"
                 if run_oxipng_zopfli_refinement "$threads" "$zopfli" "$zopfli_budget" >>"$log_file" 2>&1 && [[ -s $zopfli ]]; then
-                    candidate_hash=$(png_pixel_hash "$zopfli" || true)
                     zopfli_size=$(stat -c '%s' -- "$zopfli")
-                    if [[ $candidate_hash == "$source_hash" ]] && (( zopfli_size < best_size )); then
+                    if (( zopfli_size < best_size )); then
                         best=$zopfli
                         best_size=$zopfli_size
                         tool='oxipng-maximum+bounded-zopfli'
                     fi
                 else
                     printf 'Zopfli refinement skipped/expired; keeping baseline candidate for %s\n' "$relative" >>"$log_file"
+                fi
+            fi
+
+            # Decode only the final winner. OxiPNG candidates are temporary, so
+            # an interrupted/invalid refinement can never replace the source.
+            if [[ -n $best ]]; then
+                candidate_hash=$(png_pixel_hash "$best" || true)
+                if [[ -z $source_hash || $candidate_hash != "$source_hash" ]]; then
+                    printf 'Final PNG pixel validation failed; preserving original: %s\n' "$relative" >>"$log_file"
+                    best=''
+                    best_size=0
+                    tool='oxipng-validation-failed'
                 fi
             fi
         elif has optipng; then
