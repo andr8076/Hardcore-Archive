@@ -13,6 +13,7 @@ DOCTOR_REPORT="$ROOT/lib/hardcore-archive-doctor-report.sh" \
 
 bash "$ROOT/tests/module-layout.sh"
 bash "$ROOT/tests/bundled-runtime.sh"
+bash "$ROOT/tests/lazy-video-runtime.sh"
 bash "$ROOT/tests/runtime-bootstrap.sh"
 bash "$ROOT/tests/runtime-build-safety.sh"
 python3 "$ROOT/tests/destination-logs.py"
