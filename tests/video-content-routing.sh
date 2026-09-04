@@ -35,6 +35,7 @@ file() {
 }
 
 add_info() { :; }
+add_ready() { :; }
 check_core_command_set() { return 0; }
 check_7zip() { SEVEN_ZIP=''; return 0; }
 inspect_nested_relevance() { return 0; }
