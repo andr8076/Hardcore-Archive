@@ -1,0 +1,93 @@
+name: Update full-throttle image core
+
+on:
+  push:
+    branches:
+      - perf/full-throttle-images
+
+permissions:
+  contents: write
+
+jobs:
+  update-core:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/full-throttle-images
+          fetch-depth: 0
+      - name: Update checked-in image engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          core_path = Path('lib/hardcore-archive-core.sh')
+          core = core_path.read_text(encoding='utf-8')
+
+          old_source = 'source "$(dirname -- "${BASH_SOURCE[0]}")/media-policy.sh"\nhardcore_timing_init'
+          new_source = 'source "$(dirname -- "${BASH_SOURCE[0]}")/media-policy.sh"\nsource "$(dirname -- "${BASH_SOURCE[0]}")/images.sh"\nhardcore_timing_init'
+          if core.count(old_source) != 1:
+              raise SystemExit(f'images source insertion: expected one match, found {core.count(old_source)}')
+          core = core.replace(old_source, new_source, 1)
+
+          start = core.index('# Image workers run beside LZMA.')
+          end = core.index('\n\nVIDEO_PARALLEL_RESERVE_MIB=0', start)
+          block = '''# Image workers run beside LZMA. Automatic mode now targets full CPU
+          # saturation: every logical CPU is available to the image pool. Process
+          # fan-out is bounded by the image module using both CPU count and
+          # available RAM, while each worker runs at reduced process priority so
+          # foreground LZMA/video work wins under contention.
+          if (( IMAGE_COUNT > 0 )) && $IMAGE_OPTIMIZE && $IMAGE_OPTIMIZER_AVAILABLE; then
+              if ! IFS=$'\\t' read -r IMAGE_JOBS_EFFECTIVE IMAGE_THREADS_PER_WORKER IMAGE_CPU_BUDGET < <(
+                  hardcore_images_compute_cpu_schedule "$CPU_THREADS" "$IMAGE_COUNT" "$IMAGE_JOBS" "$MEM_AVAILABLE_MIB"
+              ); then
+                  die "Could not calculate the aggressive image CPU schedule."
+              fi
+          else
+              IMAGE_JOBS_EFFECTIVE=0
+              IMAGE_THREADS_PER_WORKER=1
+              IMAGE_CPU_BUDGET=0
+              IMAGE_PARALLEL=false
+          fi'''
+          core = core[:start] + block + core[end:]
+          core_path.write_text(core, encoding='utf-8')
+
+          helper_path = Path('lib/hardcore-archive-image-helper.sh')
+          helper = helper_path.read_text(encoding='utf-8')
+          old_tail = ''': >"$result_file"
+          : >"$log_file"
+          xargs -r -d '\\n' -P "$jobs" -I '{}' \\
+              bash "$0" --worker "$source_parent" "$stage_parent" "$result_file" "$log_file" "$mode" "$threads_per_worker" '{}' \\
+              <"$list_file"
+          '''
+          new_tail = ''': >"$result_file"
+          : >"$log_file"
+          worker_launcher=(bash)
+          # Let image work consume every otherwise-idle CPU while yielding to the
+          # primary archive/video tasks when they need the same cores.
+          if has nice; then
+              worker_launcher=(nice -n 5 bash)
+          fi
+          xargs -r -d '\\n' -P "$jobs" -I '{}' \\
+              "${worker_launcher[@]}" "$0" --worker "$source_parent" "$stage_parent" "$result_file" "$log_file" "$mode" "$threads_per_worker" '{}' \\
+              <"$list_file"
+          '''
+          if helper.count(old_tail) != 1:
+              raise SystemExit(f'image worker launcher: expected one match, found {helper.count(old_tail)}')
+          helper = helper.replace(old_tail, new_tail, 1)
+          helper_path.write_text(helper, encoding='utf-8')
+          PY
+          bash -n lib/images.sh
+          bash -n lib/hardcore-archive-core.sh
+          bash -n lib/hardcore-archive-image-helper.sh
+          bash tests/image-performance-policy.sh
+          bash tests/module-layout.sh
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib/hardcore-archive-core.sh lib/hardcore-archive-image-helper.sh
+          git diff --cached --quiet && exit 0
+          git commit -m 'Drive image optimization at full CPU utilization'
+          git push origin HEAD:perf/full-throttle-images
