@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
-"""Generate deterministic real-world workload corpora for Hardcore Archive.
-
-The existing generate-corpus.py stays intentionally small and byte-preserving.
-This generator creates lane-focused workloads that exercise the complete archive
-pipeline: documents, many small files, images, media, nested archives,
-format-preserving application containers, a mixed scheduler workload, and an
-"everything" workload.
-"""
+"""Generate reproducible real-world workload corpora for Hardcore Archive."""
 from __future__ import annotations
 
 import argparse
 import gzip
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -37,15 +31,17 @@ ALL_PROFILES = (
 
 
 def deterministic_noise(size: int, namespace: str = "noise") -> bytes:
-    out = bytearray()
+    output = bytearray()
     counter = 0
-    while len(out) < size:
-        out.extend(hashlib.sha256(f"hardcore:{namespace}:{counter}".encode()).digest())
+    while len(output) < size:
+        output.extend(hashlib.sha256(f"hardcore:{namespace}:{counter}".encode()).digest())
         counter += 1
-    return bytes(out[:size])
+    return bytes(output[:size])
 
 
 def write_to_size(path: Path, block: bytes, size: int) -> None:
+    if not block:
+        raise ValueError("write_to_size requires a non-empty block")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as handle:
         remaining = size
@@ -69,21 +65,23 @@ def png_chunk(kind: bytes, payload: bytes) -> bytes:
 
 
 def make_png(path: Path, width: int, height: int, variant: int) -> None:
-    """Write a valid but deliberately lightly-compressed RGB PNG."""
+    """Write a valid, intentionally lightly-compressed RGB PNG."""
     path.parent.mkdir(parents=True, exist_ok=True)
     raw = bytearray()
     for y in range(height):
-        raw.append(0)  # no PNG filter; leaves useful work for OxiPNG
+        raw.append(0)  # no row filter: intentionally leaves optimization work
         for x in range(width):
             tile = ((x // 32) ^ (y // 32) ^ variant) & 7
-            r = (x + variant * 17 + tile * 23) & 255
-            g = (y + variant * 29 + tile * 11) & 255
-            b = ((x + y) // 2 + tile * 31) & 255
-            raw.extend((r, g, b))
-    payload = zlib.compress(bytes(raw), level=1)
+            raw.extend(
+                (
+                    (x + variant * 17 + tile * 23) & 255,
+                    (y + variant * 29 + tile * 11) & 255,
+                    ((x + y) // 2 + tile * 31) & 255,
+                )
+            )
     data = bytearray(b"\x89PNG\r\n\x1a\n")
     data += png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
-    data += png_chunk(b"IDAT", payload)
+    data += png_chunk(b"IDAT", zlib.compress(bytes(raw), level=1))
     data += png_chunk(b"IEND", b"")
     path.write_bytes(data)
 
@@ -104,17 +102,38 @@ def make_docx(path: Path, paragraphs: int = 4000) -> None:
 
 def make_xlsx(path: Path, rows: int = 12000) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    sheet_rows = []
-    for row in range(1, rows + 1):
-        sheet_rows.append(
-            f"<row r='{row}'><c r='A{row}' t='inlineStr'><is><t>group-{row % 50}</t></is></c>"
-            f"<c r='B{row}'><v>{row}</v></c><c r='C{row}'><v>{row % 997}</v></c></row>"
-        )
-    sheet = "<worksheet xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'><sheetData>" + "".join(sheet_rows) + "</sheetData></worksheet>"
+    sheet = "<worksheet xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'><sheetData>"
+    sheet += "".join(
+        f"<row r='{row}'><c r='A{row}' t='inlineStr'><is><t>group-{row % 50}</t></is></c>"
+        f"<c r='B{row}'><v>{row}</v></c><c r='C{row}'><v>{row % 997}</v></c></row>"
+        for row in range(1, rows + 1)
+    )
+    sheet += "</sheetData></worksheet>"
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=3) as archive:
         zip_write(archive, "[Content_Types].xml", "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'/>", 3)
         zip_write(archive, "xl/worksheets/sheet1.xml", sheet, 3)
         zip_write(archive, "xl/workbook.xml", "<workbook xmlns='http://schemas.openxmlformats.org/spreadsheetml/2006/main'/>", 3)
+
+
+def make_tar_gz(path: Path, entries: dict[str, bytes], compresslevel: int = 4) -> None:
+    """Create TAR+GZIP with fixed member metadata and gzip mtime."""
+    tar_buffer = io.BytesIO()
+    with tarfile.open(fileobj=tar_buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        for name in sorted(entries):
+            payload = entries[name]
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            info.mtime = FIXED_MTIME
+            info.mode = 0o644
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            archive.addfile(info, io.BytesIO(payload))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, compresslevel=compresslevel, mtime=0) as compressed:
+            compressed.write(tar_buffer.getvalue())
 
 
 def add_documents(root: Path, budget: int) -> None:
@@ -132,7 +151,8 @@ def add_documents(root: Path, budget: int) -> None:
             handle.write(json.dumps({"id": i, "group": i % 41, "state": "stored", "message": f"event-{i % 250}"}, separators=(",", ":")) + "\n")
             i += 1
     write_to_size(root / "documents" / "database-page-pattern.bin", bytes(range(256)) * 1024, max(MIB, budget // 5))
-    write_to_size(root / "documents" / "already-packed.bin.gz", gzip.compress(block * 8, compresslevel=9, mtime=0), max(1, len(gzip.compress(block * 8, compresslevel=9, mtime=0))))
+    packed = gzip.compress(block * 8, compresslevel=9, mtime=0)
+    (root / "documents" / "already-packed.bin.gz").write_bytes(packed)
 
 
 def add_small_files(root: Path, size_mib: int) -> None:
@@ -143,7 +163,8 @@ def add_small_files(root: Path, size_mib: int) -> None:
         group = target / f"group-{i % 32:02d}"
         group.mkdir(exist_ok=True)
         (group / f"item-{i:05d}.txt").write_text(
-            (f"id={i}\ngroup={i % 32}\nstatus=archived\nvalue={i % 997}\n" * 5), encoding="utf-8"
+            f"id={i}\ngroup={i % 32}\nstatus=archived\nvalue={i % 997}\n" * 5,
+            encoding="utf-8",
         )
 
 
@@ -156,19 +177,17 @@ def add_images(root: Path, size_mib: int) -> None:
 def add_archives(root: Path, budget: int) -> None:
     target = root / "archives"
     target.mkdir(parents=True, exist_ok=True)
-    text = (b"Nested archive benchmark payload line. " * 4096)
+    text = b"Nested archive benchmark payload line. " * 4096
     pattern = bytes(range(256)) * 4096
     with zipfile.ZipFile(target / "nested.zip", "w", compression=zipfile.ZIP_DEFLATED, compresslevel=3) as archive:
         zip_write(archive, "docs/readme.txt", text, 3)
         zip_write(archive, "data/pattern.bin", pattern, 3)
         zip_write(archive, "data/noise.bin", deterministic_noise(max(MIB, budget // 16), "nested"), 3)
-    tar_source = target / ".tar-source"
-    tar_source.mkdir()
-    write_to_size(tar_source / "repeated.log", text, max(MIB, budget // 8))
-    write_to_size(tar_source / "pattern.bin", pattern, max(MIB, budget // 8))
-    with tarfile.open(target / "payload.tar.gz", "w:gz", compresslevel=4) as archive:
-        archive.add(tar_source, arcname="payload")
-    shutil.rmtree(tar_source)
+    repeated_size = max(MIB, budget // 8)
+    pattern_size = max(MIB, budget // 8)
+    repeated = (text * ((repeated_size + len(text) - 1) // len(text)))[:repeated_size]
+    patterned = (pattern * ((pattern_size + len(pattern) - 1) // len(pattern)))[:pattern_size]
+    make_tar_gz(target / "payload.tar.gz", {"payload/repeated.log": repeated, "payload/pattern.bin": patterned})
 
 
 def add_containers(root: Path) -> None:
@@ -179,7 +198,7 @@ def add_containers(root: Path) -> None:
     with zipfile.ZipFile(jar, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=3) as archive:
         zip_write(archive, "META-INF/MANIFEST.MF", "Manifest-Version: 1.0\nCreated-By: Hardcore benchmark\n", 3)
         for i in range(50):
-            zip_write(archive, f"data/record-{i:03d}.txt", (f"record={i}\n" * 400), 3)
+            zip_write(archive, f"data/record-{i:03d}.txt", f"record={i}\n" * 400, 3)
 
 
 def add_media(root: Path) -> None:
@@ -188,7 +207,10 @@ def add_media(root: Path) -> None:
         raise SystemExit("media workload requested but ffmpeg is not installed")
     target = root / "media"
     target.mkdir(parents=True, exist_ok=True)
-    specs = (("motion", "testsrc2=size=1280x720:rate=30", 700), ("detail", "mandelbrot=size=1280x720:rate=30", 1100))
+    specs = (
+        ("motion", "testsrc2=size=1280x720:rate=30", 700),
+        ("bars", "smptebars=size=1280x720:rate=30", 1100),
+    )
     for name, source, tone in specs:
         subprocess.run(
             [
@@ -208,7 +230,8 @@ def add_mixed(root: Path, size_mib: int, include_media: bool, everything: bool =
     add_images(root, max(8, size_mib // 2))
     add_archives(root, budget // 2)
     add_containers(root)
-    write_to_size(root / "binary" / "incompressible.bin", deterministic_noise(max(MIB, budget // 6), "mixed"), max(MIB, budget // 6))
+    noise_size = max(MIB, budget // 6)
+    write_to_size(root / "binary" / "incompressible.bin", deterministic_noise(noise_size, "mixed"), noise_size)
     if everything:
         add_small_files(root, max(8, size_mib // 2))
     if include_media:
@@ -244,6 +267,7 @@ def main() -> int:
     args = parser.parse_args()
     if args.size_mib < 4:
         parser.error("--size-mib must be at least 4")
+
     requested = [item.strip() for item in args.profiles.split(",") if item.strip()]
     allowed = set(ALL_PROFILES) | {"media"}
     unknown = [item for item in requested if item not in allowed]
