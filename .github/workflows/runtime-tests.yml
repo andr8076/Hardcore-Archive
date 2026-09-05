@@ -26,6 +26,7 @@ jobs:
             BASH_BIN=bash
           fi
           "$BASH_BIN" tests/module-layout.sh
+          "$BASH_BIN" tests/resource-pool.sh
           "$BASH_BIN" tests/bundled-runtime.sh
           "$BASH_BIN" tests/runtime-bootstrap.sh
           "$BASH_BIN" tests/ffmpeg-detection.sh
