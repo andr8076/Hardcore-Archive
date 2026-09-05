@@ -21,6 +21,22 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('tools/finish-resource-pool.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''    count = text.count(old)
+              if count != 1:
+          '''.replace('              ', '    ')
+          new = '''    count = text.count(old)
+              if label == "resource pool globals" and count == 2:
+                  return text.replace(old, new, 1)
+              if count != 1:
+          '''.replace('              ', '    ')
+          if old not in text:
+              raise SystemExit('updater helper matcher not found')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
           python3 tools/finish-resource-pool.py
           bash -n lib/resource-pool.sh
           bash -n lib/hardcore-archive-image-helper.sh
