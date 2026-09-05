@@ -5,7 +5,7 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 
 required=(
     common platform config doctor inventory planner scheduler archive video images resource-pool timing calibration-identity video-acceleration media-policy runtime
-    containers nested verify restore reporting visual
+    containers nested verify restore reporting visual inspect
 )
 for module in "${required[@]}"; do
     [[ -f $ROOT/lib/$module.sh ]] || { printf 'Missing module: lib/%s.sh\n' "$module" >&2; exit 1; }
@@ -34,6 +34,7 @@ bash -n "$ROOT/tests/runtime-build-safety.sh"
 
 grep -Fq 'source "$HARDCORE_ARCHIVE_ROOT/lib/config.sh"' "$ROOT/hardcore-archive"
 grep -Fq 'source "$HARDCORE_ARCHIVE_ROOT/lib/visual.sh"' "$ROOT/hardcore-archive"
+grep -Fq 'source "$HARDCORE_ARCHIVE_ROOT/lib/inspect.sh"' "$ROOT/hardcore-archive"
 grep -Fq 'source "$HARDCORE_ARCHIVE_ROOT/lib/scheduler.sh"' "$ROOT/hardcore-archive-runner.sh"
 grep -Fq 'hardcore_archive_static_engine_ready' "$ROOT/lib/archive.sh"
 grep -Fq 'hardcore_archive_static_engine_ready' "$ROOT/lib/scheduler.sh"
