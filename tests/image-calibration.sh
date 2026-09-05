@@ -92,17 +92,20 @@ export HARDCORE_ARCHIVE_IMAGE_CALIBRATOR="$TMP/stub-calibrator.py"
 export HARDCORE_ARCHIVE_IMAGE_SCHEDULER_CACHE_DIR="$TMP/cache"
 source "$IMAGES"
 
-chosen=$(hardcore_images_choose_cpu_schedule 8 100 10 auto 8192 fixture false)
+chosen=$(hardcore_images_choose_cpu_schedule 8 10 10 auto 8192 fixture false)
 [[ $chosen == $'4\t2\t8\tcalibrated-cache' ]]
 
 clamped=$(hardcore_images_choose_cpu_schedule 8 2 2 auto 8192 fixture false)
 [[ $clamped == $'2\t4\t8\tcalibrated-cache-clamped' ]]
 
+jpeg_dominant=$(hardcore_images_choose_cpu_schedule 8 100 10 auto 8192 fixture false)
+[[ $jpeg_dominant == $'8\t1\t8\theuristic-jpeg-dominant' ]]
+
 explicit=$(hardcore_images_choose_cpu_schedule 8 100 10 3 8192 fixture false)
 [[ $explicit == $'3\t3\t8\texplicit' ]]
 
 export HARDCORE_ARCHIVE_IMAGE_CALIBRATION_DISABLE=1
-disabled=$(hardcore_images_choose_cpu_schedule 8 100 10 auto 8192 fixture false)
+disabled=$(hardcore_images_choose_cpu_schedule 8 10 10 auto 8192 fixture false)
 [[ $disabled == $'8\t1\t8\theuristic-disabled' ]]
 unset HARDCORE_ARCHIVE_IMAGE_CALIBRATION_DISABLE
 
