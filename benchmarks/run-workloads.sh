@@ -10,6 +10,8 @@ HARDCORE_BIN=${HARDCORE_ARCHIVE_BIN:-$ROOT/hardcore-archive}
 WITH_MEDIA=${HARDCORE_BENCHMARK_WITH_MEDIA:-0}
 PROFILE_FILTER=${HARDCORE_BENCHMARK_PROFILES:-all}
 CASE_FILTER=${HARDCORE_BENCHMARK_CASES:-hardcore-full,sevenzip-byte-preserving}
+MEMORY_LIMIT_MIB=${HARDCORE_BENCHMARK_MEMORY_LIMIT_MIB:-0}
+[[ $MEMORY_LIMIT_MIB =~ ^[0-9]+$ ]] || { printf 'Error: HARDCORE_BENCHMARK_MEMORY_LIMIT_MIB must be an integer.\n' >&2; exit 2; }
 
 SEVEN_ZIP=${SEVEN_ZIP_BIN:-}
 if [[ -z $SEVEN_ZIP ]]; then
@@ -56,6 +58,35 @@ print(f"{len(files)}\t{sum(os.stat(p, follow_symlinks=False).st_size for p in fi
 PY
 }
 
+verify_manifest() {
+    local source=$1 manifest=$2
+    python3 - "$source" "$manifest" <<'PY'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+manifest = pathlib.Path(sys.argv[2])
+listed = set()
+for raw in manifest.read_text(encoding='utf-8').splitlines():
+    if not raw:
+        continue
+    try:
+        expected, relative = raw.split('  ', 1)
+    except ValueError:
+        raise SystemExit(f'invalid workload manifest line: {raw!r}')
+    path = root / relative
+    if not path.is_file():
+        raise SystemExit(f'workload file is missing: {relative}')
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    if actual != expected:
+        raise SystemExit(f'workload hash mismatch: {relative}')
+    listed.add(relative)
+actual_paths = {str(path.relative_to(root)) for path in root.rglob('*') if path.is_file()}
+extra = sorted(actual_paths - listed)
+missing = sorted(listed - actual_paths)
+if extra or missing:
+    raise SystemExit(f'workload manifest/path mismatch: extra={extra[:5]} missing={missing[:5]}')
+PY
+}
+
 ratio_percent() {
     local archive_size=$1 source_size=$2
     LC_NUMERIC=C awk -v a="$archive_size" -v s="$source_size" 'BEGIN {if(s>0) printf "%.4f",a*100/s; else print "0"}'
@@ -63,6 +94,7 @@ ratio_percent() {
 
 csv_contains() {
     local csv=$1 needle=$2 item
+    local -a items=()
     [[ $csv == all ]] && return 0
     IFS=',' read -ra items <<< "$csv"
     for item in "${items[@]}"; do
@@ -75,7 +107,22 @@ measure_phase() {
     local profile=$1 case_name=$2 phase=$3 metric=$4 archive=$5 source_size=$6
     shift 6
     local wall peak user system cpu size ratio key
-    python3 "$MEASURE" --output "$metric" -- "$@"
+    local -a command=("$@")
+    if (( MEMORY_LIMIT_MIB > 0 )); then
+        command=(
+            bash -c '
+                set -Eeuo pipefail
+                limit_mib=$1
+                shift
+                ulimit -v "$((limit_mib * 1024))" || {
+                    printf "Error: this platform cannot apply the requested virtual-memory ceiling.\\n" >&2
+                    exit 2
+                }
+                exec "$@"
+            ' _ "$MEMORY_LIMIT_MIB" "${command[@]}"
+        )
+    fi
+    python3 "$MEASURE" --output "$metric" -- "${command[@]}"
     IFS=$'\t' read -r wall peak user system cpu < "$metric"
     [[ $wall =~ ^[0-9]+([.][0-9]+)?$ ]] || { printf 'Error: invalid wall metric: %s\n' "$wall" >&2; exit 1; }
     [[ $peak =~ ^[0-9]+$ ]] || { printf 'Error: invalid memory metric: %s\n' "$peak" >&2; exit 1; }
@@ -143,6 +190,7 @@ record_environment() {
         printf 'cpu\t%s\n' "$cpu"
         printf 'logical_cpus\t%s\n' "$cpus"
         printf 'memory_kib\t%s\n' "$memory_kib"
+        printf 'memory_limit_mib\t%s\n' "$MEMORY_LIMIT_MIB"
         printf 'gpu\t%s\n' "$gpu"
         printf 'hardcore_commit\t%s\n' "$commit"
         printf 'sevenzip\t%s\n' "$sevenzip_version"
@@ -165,6 +213,9 @@ run_profile_case() {
     rm -rf -- "$extract_dir"
 
     printf '\n=== %s / %s ===\n' "$profile" "$case_name"
+    if (( MEMORY_LIMIT_MIB > 0 )); then
+        printf 'Memory-pressure ceiling: %s MiB virtual memory\n' "$MEMORY_LIMIT_MIB"
+    fi
     case $case_name in
         hardcore-full)
             # Strong hash verification of the final archived payload is part of
@@ -214,6 +265,8 @@ for source in "$WORKLOAD_ROOT"/*; do
     csv_contains "$PROFILE_FILTER" "$profile" || continue
     manifest="$WORKLOAD_ROOT/$profile.sha256"
     [[ -s $manifest ]] || { printf 'Error: workload manifest is missing: %s\n' "$manifest" >&2; exit 2; }
+    printf 'Validating workload: %s\n' "$profile"
+    verify_manifest "$source" "$manifest"
     found=1
     IFS=$'\t' read -r source_files source_size < <(source_stats "$source")
     for case_name in hardcore-full sevenzip-byte-preserving; do
