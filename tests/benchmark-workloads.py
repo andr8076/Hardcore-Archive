@@ -140,7 +140,7 @@ case "$cmd" in
         mode=${1:-}; shift || true
         if [[ $mode == -slt ]]; then
             printf 'Method = LZMA2:24\nFolder = -\nFolder = +\n'
-            for i in $(seq 1 5000); do printf 'Path = payload/file-%05d\nFolder = -\n' "$i"; done
+            for ((i=1; i<=5000; i++)); do printf 'Path = payload/file-%05d\nFolder = -\n' "$i"; done
         else
             printf '.hardcore-archive-metadata/archive-info.txt\n'
             printf '.hardcore-archive-image-manifest.txt\n'
