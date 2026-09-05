@@ -1,0 +1,118 @@
+name: Update calibrated image core
+
+on:
+  push:
+    branches:
+      - perf/calibrated-image-scheduler
+
+permissions:
+  contents: write
+
+jobs:
+  update-core:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/calibrated-image-scheduler
+          fetch-depth: 0
+      - name: Wire calibrated scheduler into checked-in engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('lib/hardcore-archive-core.sh')
+          text = path.read_text(encoding='utf-8')
+
+          def once(old, new, label):
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected one match, found {count}')
+              text = text.replace(old, new, 1)
+
+          once(
+              'export HARDCORE_ARCHIVE_CALIBRATION_CACHE_DIR=${HARDCORE_ARCHIVE_CALIBRATION_CACHE_DIR:-$PLATFORM_CACHE_HOME/hardcore-archive/video-calibration-v1}\n',
+              'export HARDCORE_ARCHIVE_CALIBRATION_CACHE_DIR=${HARDCORE_ARCHIVE_CALIBRATION_CACHE_DIR:-$PLATFORM_CACHE_HOME/hardcore-archive/video-calibration-v1}\n'
+              'export HARDCORE_ARCHIVE_IMAGE_SCHEDULER_CACHE_DIR=${HARDCORE_ARCHIVE_IMAGE_SCHEDULER_CACHE_DIR:-$PLATFORM_CACHE_HOME/hardcore-archive/image-scheduler-v1}\n',
+              'image scheduler cache',
+          )
+
+          once(
+              'IMAGE_JOBS_EFFECTIVE=1\nIMAGE_THREADS_PER_WORKER=1\nIMAGE_LIST=""',
+              'IMAGE_JOBS_EFFECTIVE=1\nIMAGE_THREADS_PER_WORKER=1\nIMAGE_CPU_BUDGET=1\nIMAGE_SCHEDULER_SOURCE="heuristic"\nIMAGE_LIST=""',
+              'image scheduler state',
+          )
+
+          old_usage = '''  --image-jobs N|auto      Concurrent lossless image workers. Default: auto.
+                           Automatic mode leaves resources for LZMA and video.'''
+          new_usage = '''  --image-jobs N|auto      Concurrent lossless image workers. Default: auto.
+                           Automatic mode calibrates OxiPNG process/thread fan-out
+                           for this CPU, caches the winner, and yields to LZMA/video.'''
+          once(old_usage, new_usage, 'image usage text')
+
+          start = text.index('# Image workers run beside LZMA. Automatic mode now targets full CPU')
+          end = text.index('\n\nVIDEO_PARALLEL_RESERVE_MIB=0', start)
+          new_block = '''# Image workers run beside LZMA. Automatic mode uses a cached machine-specific
+          # OxiPNG calibration when possible, with the full-throttle deterministic
+          # scheduler as a safe fallback. Explicit --image-jobs always wins.
+          if (( IMAGE_COUNT > 0 )) && $IMAGE_OPTIMIZE && $IMAGE_OPTIMIZER_AVAILABLE; then
+              if [[ $IMAGE_JOBS == auto ]] && (( IMAGE_PNG_COUNT > 1 )); then
+                  printf 'Image scheduler: checking machine calibration/cache...\\n'
+              fi
+              if ! IFS=$'\\t' read -r IMAGE_JOBS_EFFECTIVE IMAGE_THREADS_PER_WORKER IMAGE_CPU_BUDGET IMAGE_SCHEDULER_SOURCE < <(
+                  hardcore_images_choose_cpu_schedule \\
+                      "$CPU_THREADS" "$IMAGE_COUNT" "$IMAGE_PNG_COUNT" "$IMAGE_JOBS" \\
+                      "$MEM_AVAILABLE_MIB" "$CPU_MODEL" "$ANALYZE_ONLY"
+              ); then
+                  die "Could not calculate the image CPU schedule."
+              fi
+          else
+              IMAGE_JOBS_EFFECTIVE=0
+              IMAGE_THREADS_PER_WORKER=1
+              IMAGE_CPU_BUDGET=0
+              IMAGE_SCHEDULER_SOURCE="inactive"
+              IMAGE_PARALLEL=false
+          fi'''
+          text = text[:start] + new_block + text[end:]
+
+          once(
+              '''    printf 'Image mode/workers:      %s / %s\\n' "$IMAGE_MODE" "$IMAGE_JOBS_EFFECTIVE"''',
+              '''    printf 'Image mode/workers:      %s / %s\\n' "$IMAGE_MODE" "$IMAGE_JOBS_EFFECTIVE"
+              printf 'OxiPNG threads/worker:   %s\\n' "$IMAGE_THREADS_PER_WORKER"
+              printf 'Image scheduler:         %s\\n' "$IMAGE_SCHEDULER_SOURCE"''',
+              'plan image scheduler output',
+          )
+
+          once(
+              '''    printf 'Image workers: %s | OxiPNG threads/worker: %s | policy: %s\\n\\n' \\
+                  "$IMAGE_JOBS_EFFECTIVE" "$IMAGE_THREADS_PER_WORKER" "$IMAGE_MODE"''',
+              '''    printf 'Image workers: %s | OxiPNG threads/worker: %s | policy: %s | scheduler: %s\\n\\n' \\
+                  "$IMAGE_JOBS_EFFECTIVE" "$IMAGE_THREADS_PER_WORKER" "$IMAGE_MODE" "$IMAGE_SCHEDULER_SOURCE"''',
+              'runtime image scheduler output',
+          )
+
+          once(
+              '''        printf 'Image mode/workers: %s / %s\\n' "$IMAGE_MODE" "$IMAGE_JOBS_EFFECTIVE"''',
+              '''        printf 'Image mode/workers: %s / %s\\n' "$IMAGE_MODE" "$IMAGE_JOBS_EFFECTIVE"
+              printf 'Image scheduler: %s\\n' "$IMAGE_SCHEDULER_SOURCE"''',
+              'final image scheduler report',
+          )
+
+          path.write_text(text, encoding='utf-8')
+          PY
+          bash -n lib/images.sh
+          bash -n lib/hardcore-archive-core.sh
+          python3 -m py_compile lib/hardcore-archive-image-calibrate.py
+          bash tests/image-calibration.sh
+          bash tests/image-performance-policy.sh
+          bash tests/module-layout.sh
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib/hardcore-archive-core.sh
+          git diff --cached --quiet && exit 0
+          git commit -m 'Use calibrated OxiPNG process and thread scheduling'
+          git push origin HEAD:perf/calibrated-image-scheduler
