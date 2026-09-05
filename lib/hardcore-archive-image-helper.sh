@@ -104,7 +104,11 @@ optimize_one() {
     local source_parent=$1 stage_parent=$2 result_file=$3 log_file=$4 mode=$5 threads=$6 relative=$7
     local input output output_dir temp_dir original_size lower source_hash candidate_hash
     local baseline progressive candidate candidate_size best='' best_size=0 tool='unavailable'
-    local zopfli zopfli_size zopfli_budget
+    local zopfli zopfli_size zopfli_budget line actual_threads
+
+    actual_threads=${HARDCORE_RESOURCE_GRANTED_CPU:-$threads}
+    [[ $actual_threads =~ ^[1-9][0-9]*$ ]] || actual_threads=$threads
+    threads=$actual_threads
 
     input="$source_parent/$relative"
     output="$stage_parent/$relative"
@@ -220,8 +224,39 @@ optimize_one() {
     fi
 }
 
+if [[ ${1:-} == --worker-direct ]]; then
+    shift
+    if [[ ${HARDCORE_RESOURCE_GRANTED_CPU:-} =~ ^[1-9][0-9]*$ ]]; then
+        # The shared scheduler may grant fewer CPUs than this PNG's calibrated
+        # maximum while LZMA/video are active. Use the actual grant.
+        set -- "$1" "$2" "$3" "$4" "$5" "$HARDCORE_RESOURCE_GRANTED_CPU" "$7"
+    fi
+    optimize_one "$@"
+    exit 0
+fi
+
 if [[ ${1:-} == --worker ]]; then
     shift
+    # Worker arguments are: source stage result log mode threads relative.
+    relative=${7:-}
+    requested_threads=${6:-1}
+    worker_cpu_max=1
+    lower_relative=${relative,,}
+    if [[ $lower_relative == *.png ]] && has oxipng; then
+        worker_cpu_max=$requested_threads
+    fi
+    [[ $worker_cpu_max =~ ^[1-9][0-9]*$ ]] || worker_cpu_max=1
+
+    if [[ -n ${HARDCORE_IMAGE_RESOURCE_POOL:-} && -f ${HARDCORE_IMAGE_RESOURCE_RUNNER:-} ]]; then
+        exec python3 "$HARDCORE_IMAGE_RESOURCE_RUNNER" run \
+            --pool "$HARDCORE_IMAGE_RESOURCE_POOL" \
+            --cpu-min 1 \
+            --cpu-max "$worker_cpu_max" \
+            --ram-mib 256 \
+            --label image \
+            --priority low \
+            -- bash "$0" --worker-direct "$@"
+    fi
     optimize_one "$@"
     exit 0
 fi
@@ -234,6 +269,8 @@ log_file=''
 mode=maximum
 jobs=1
 threads_per_worker=1
+resource_pool=''
+resource_runner=''
 while (( $# > 0 )); do
     case "$1" in
         --source-parent) source_parent=$2; shift 2 ;;
@@ -244,6 +281,8 @@ while (( $# > 0 )); do
         --mode) mode=$2; shift 2 ;;
         --jobs) jobs=$2; shift 2 ;;
         --threads-per-worker) threads_per_worker=$2; shift 2 ;;
+        --resource-pool) resource_pool=$2; shift 2 ;;
+        --resource-runner) resource_runner=$2; shift 2 ;;
         *) printf 'Unknown image-helper option: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -251,12 +290,20 @@ done
 [[ $jobs =~ ^[1-9][0-9]*$ ]] || { printf 'Invalid image job count: %s\n' "$jobs" >&2; exit 2; }
 [[ $threads_per_worker =~ ^[1-9][0-9]*$ ]] || { printf 'Invalid threads per image worker: %s\n' "$threads_per_worker" >&2; exit 2; }
 case $mode in maximum|balanced|fast) ;; *) printf 'Invalid image mode: %s\n' "$mode" >&2; exit 2;; esac
+if [[ -n $resource_pool || -n $resource_runner ]]; then
+    [[ -n $resource_pool && -n $resource_runner && -f $resource_runner ]] || {
+        printf 'Invalid shared resource-pool configuration for image helper.\n' >&2
+        exit 2
+    }
+    export HARDCORE_IMAGE_RESOURCE_POOL=$resource_pool
+    export HARDCORE_IMAGE_RESOURCE_RUNNER=$resource_runner
+fi
 
 : >"$result_file"
 : >"$log_file"
 worker_launcher=(bash)
-# Let image work consume every otherwise-idle CPU while yielding to the
-# primary archive/video tasks when they need the same cores.
+# Image workers remain lower priority as a second line of defense. The shared
+# token pool now provides the primary CPU/RAM coordination with video and LZMA.
 if has nice; then
     worker_launcher=(nice -n 5 bash)
 fi

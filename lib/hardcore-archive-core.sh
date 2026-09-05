@@ -74,6 +74,7 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/timing.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/video-acceleration.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/media-policy.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/images.sh"
+source "$(dirname -- "${BASH_SOURCE[0]}")/resource-pool.sh"
 hardcore_timing_init
 SCRIPT_VERSION="2026-09-04"
 METADATA_HELPER=${HARDCORE_ARCHIVE_METADATA_HELPER:-}
@@ -229,6 +230,23 @@ IMAGE_TOOL_SUMMARY="not needed"
 IMAGE_PARALLEL_RESERVE_MIB=0
 IMAGE_PARALLEL=true
 IMAGE_OPTIMIZER_AVAILABLE=false
+
+# Per-run shared CPU/RAM scheduler. LZMA2 keeps its full-quality reservation;
+# media workers claim only the remaining capacity until compression completes.
+RESOURCE_POOL_ENABLED=false
+RESOURCE_POOL_NEEDED=false
+RESOURCE_POOL_MODE="not-needed"
+RESOURCE_POOL_DIR=""
+RESOURCE_POOL_RUNNER=""
+RESOURCE_POOL_INITIAL_CPU=0
+RESOURCE_POOL_INITIAL_RAM_MIB=0
+RESOURCE_POOL_MAX_RAM_MIB=0
+RESOURCE_POOL_EXPANDED=false
+RESOURCE_VIDEO_CPU_CLAIM=0
+RESOURCE_VIDEO_QUALITY_THREADS=0
+RESOURCE_VIDEO_QUALITY_ENV="auto"
+RESOURCE_VIDEO_RAM_CLAIM_MIB=0
+RESOURCE_RAM_CHUNK_MIB=64
 
 # Nested archive repacking and alternate command modes.
 COMMAND_MODE="create"
@@ -5866,36 +5884,77 @@ fi
 
 ESTIMATED_COMPRESSION_RAM_MIB=$((DICTIONARY_MIB * 23 / 2 + 512))
 
-# Preserve compression quality first. The dictionary above is selected exactly
-# as if LZMA2 were running alone. Media jobs may overlap only when the memory
-# left after that full-quality plan can safely accommodate them.
-PARALLEL_SPARE_MIB=$((MEMORY_BUDGET_MIB - ESTIMATED_COMPRESSION_RAM_MIB))
-(( PARALLEL_SPARE_MIB < 0 )) && PARALLEL_SPARE_MIB=0
+# Preserve compression quality first. The dictionary above was selected exactly
+# as if LZMA2 were running alone. Instead of statically shrinking/serializing
+# media work, expose only the CPU/RAM left after that reservation through one
+# crash-safe token pool. Once LZMA2 finishes, the pool expands to the full safe
+# machine budget and waiting media workers can immediately use the released
+# capacity without changing archive quality settings.
+RESOURCE_POOL_RUNNER=${HARDCORE_ARCHIVE_RESOURCE_RUNNER:-"$(dirname -- "${BASH_SOURCE[0]}")/hardcore-archive-resource-run.py"}
+RESOURCE_POOL_DIR="$JOB_WORK_DIR/resource-pool.$$"
+RESOURCE_POOL_MAX_RAM_MIB=$((MEMORY_BUDGET_MIB / RESOURCE_RAM_CHUNK_MIB * RESOURCE_RAM_CHUNK_MIB))
+(( RESOURCE_POOL_MAX_RAM_MIB >= RESOURCE_RAM_CHUNK_MIB )) ||     die "Safe RAM budget is too small for shared resource scheduling."
 
-if $VIDEO_TRANSCODE && (( VIDEO_TRANSCODE_COUNT > 0 )) && $VIDEO_PARALLEL; then
-    if (( VIDEO_PARALLEL_RESERVE_MIB > PARALLEL_SPARE_MIB )); then
-        if $VIDEO_PARALLEL_EXPLICIT; then
-            warn "Forced parallel video work exceeds the spare-RAM plan; compression settings remain pinned, but memory pressure may increase."
-        else
-            VIDEO_PARALLEL=false
-            VIDEO_PARALLEL_RESERVE_MIB=0
-            warn "Video work will run sequentially so the full LZMA2 dictionary is preserved without memory pressure."
-        fi
+RESOURCE_POOL_INITIAL_CPU=$(hardcore_resource_media_initial_cpu     "$CPU_THREADS" "$THREADS" "$NONVIDEO_COUNT") || die "Could not calculate initial media CPU capacity."
+RESOURCE_POOL_INITIAL_RAM_MIB=$(hardcore_resource_media_initial_ram     "$RESOURCE_POOL_MAX_RAM_MIB" "$ESTIMATED_COMPRESSION_RAM_MIB" "$NONVIDEO_COUNT") ||     die "Could not calculate initial media RAM capacity."
+RESOURCE_POOL_INITIAL_RAM_MIB=$((RESOURCE_POOL_INITIAL_RAM_MIB / RESOURCE_RAM_CHUNK_MIB * RESOURCE_RAM_CHUNK_MIB))
+
+RESOURCE_VIDEO_QUALITY_THREADS=$(hardcore_resource_quality_cpu_threads     "$CPU_THREADS" "$QUALITY_CHECK") || die "Could not calculate the video quality CPU claim."
+RESOURCE_VIDEO_CPU_CLAIM=$(hardcore_resource_video_cpu_claim     "$CPU_THREADS" "$QUALITY_CHECK") || die "Could not calculate the video CPU claim."
+if (( RESOURCE_VIDEO_QUALITY_THREADS > 0 )); then
+    RESOURCE_VIDEO_QUALITY_ENV=$RESOURCE_VIDEO_QUALITY_THREADS
+else
+    RESOURCE_VIDEO_QUALITY_ENV=auto
+fi
+
+RESOURCE_VIDEO_RAM_CLAIM_MIB=0
+if $VIDEO_TRANSCODE && $VIDEO_PARALLEL && (( VIDEO_TRANSCODE_COUNT > 0 )); then
+    RESOURCE_VIDEO_RAM_CLAIM_MIB=2048
+    (( RESOURCE_VIDEO_RAM_CLAIM_MIB > RESOURCE_POOL_MAX_RAM_MIB )) &&         RESOURCE_VIDEO_RAM_CLAIM_MIB=$RESOURCE_POOL_MAX_RAM_MIB
+fi
+
+RESOURCE_POOL_NEEDED=false
+if (( IMAGE_COUNT > 0 && IMAGE_JOBS_EFFECTIVE > 0 )) &&    $IMAGE_OPTIMIZE && $IMAGE_OPTIMIZER_AVAILABLE; then
+    RESOURCE_POOL_NEEDED=true
+fi
+if $VIDEO_TRANSCODE && $VIDEO_PARALLEL && (( VIDEO_TRANSCODE_COUNT > 0 )); then
+    RESOURCE_POOL_NEEDED=true
+fi
+
+if $RESOURCE_POOL_NEEDED; then
+    [[ -f $RESOURCE_POOL_RUNNER ]] || die "Trusted resource scheduler is missing: $RESOURCE_POOL_RUNNER"
+    command -v python3 >/dev/null 2>&1 || die "Shared resource scheduling requires Python 3."
+    RESOURCE_POOL_ENABLED=true
+    if (( NONVIDEO_COUNT == 0 )); then
+        RESOURCE_POOL_EXPANDED=true
+    else
+        RESOURCE_POOL_EXPANDED=false
+    fi
+
+    if $ANALYZE_ONLY; then
+        RESOURCE_POOL_MODE="planned"
+    else
+        rm -rf --one-file-system -- "$RESOURCE_POOL_DIR"
+        hardcore_resource_pool_init             "$RESOURCE_POOL_RUNNER" "$RESOURCE_POOL_DIR"             "$RESOURCE_POOL_INITIAL_CPU" "$CPU_THREADS"             "$RESOURCE_POOL_INITIAL_RAM_MIB" "$RESOURCE_POOL_MAX_RAM_MIB" ||             die "Could not initialize the shared CPU/RAM resource pool."
+        RESOURCE_POOL_MODE="active"
+    fi
+
+    # The pool decides whether an image can overlap LZMA/video. Starting a
+    # worker with zero currently available tokens is safe: it waits for release.
+    if (( IMAGE_COUNT > 0 && IMAGE_JOBS_EFFECTIVE > 0 )) &&        $IMAGE_OPTIMIZE && $IMAGE_OPTIMIZER_AVAILABLE; then
+        IMAGE_PARALLEL=true
     fi
 fi
 
-MEDIA_SPARE_MIB=$((PARALLEL_SPARE_MIB - VIDEO_PARALLEL_RESERVE_MIB))
-(( MEDIA_SPARE_MIB < 0 )) && MEDIA_SPARE_MIB=0
-if (( IMAGE_COUNT > 0 && IMAGE_JOBS_EFFECTIVE > 0 )); then
-    while (( IMAGE_JOBS_EFFECTIVE > 1 && IMAGE_JOBS_EFFECTIVE * 256 > MEDIA_SPARE_MIB )); do
-        IMAGE_JOBS_EFFECTIVE=$((IMAGE_JOBS_EFFECTIVE - 1))
-    done
+# Keep these plan fields for the batch scheduler. They describe maximum lane
+# claims; actual simultaneous use is bounded dynamically by the pool.
+VIDEO_PARALLEL_RESERVE_MIB=0
+if $VIDEO_TRANSCODE && $VIDEO_PARALLEL && (( VIDEO_TRANSCODE_COUNT > 0 )); then
+    VIDEO_PARALLEL_RESERVE_MIB=$RESOURCE_VIDEO_RAM_CLAIM_MIB
+fi
+IMAGE_PARALLEL_RESERVE_MIB=0
+if (( IMAGE_COUNT > 0 && IMAGE_JOBS_EFFECTIVE > 0 )) &&    $IMAGE_OPTIMIZE && $IMAGE_OPTIMIZER_AVAILABLE; then
     IMAGE_PARALLEL_RESERVE_MIB=$((IMAGE_JOBS_EFFECTIVE * 256))
-    if (( IMAGE_PARALLEL_RESERVE_MIB > MEDIA_SPARE_MIB )); then
-        IMAGE_PARALLEL=false
-        IMAGE_PARALLEL_RESERVE_MIB=0
-        warn "Lossless image optimization will run sequentially so it cannot reduce the LZMA2 dictionary or force swapping."
-    fi
 fi
 
 FREE_DESTINATION_BYTES=$(df -PB1 -- "$ARCHIVE_PARENT" | awk 'NR==2 {print $4}')
@@ -5941,6 +6000,14 @@ printf 'Compression threads:     %s\n' "$THREADS"
 printf 'RAM total:               %s MiB\n' "$MEM_TOTAL_MIB"
 printf 'RAM currently available: %s MiB\n' "$MEM_AVAILABLE_MIB"
 printf 'RAM kept free:           %s MiB\n' "$OS_RESERVE_MIB"
+printf 'Shared resource pool:    %s\n' "$RESOURCE_POOL_MODE"
+if $RESOURCE_POOL_ENABLED; then
+    printf 'Initial media CPU pool:  %s / %s logical threads\n' "$RESOURCE_POOL_INITIAL_CPU" "$CPU_THREADS"
+    printf 'Initial media RAM pool:  %s / %s MiB\n' "$RESOURCE_POOL_INITIAL_RAM_MIB" "$RESOURCE_POOL_MAX_RAM_MIB"
+    if $VIDEO_TRANSCODE && $VIDEO_PARALLEL && (( VIDEO_TRANSCODE_COUNT > 0 )); then
+        printf 'Video resource claim:    %s CPU / %s MiB RAM\n' "$RESOURCE_VIDEO_CPU_CLAIM" "$RESOURCE_VIDEO_RAM_CLAIM_MIB"
+    fi
+fi
 if (( VIDEO_PARALLEL_RESERVE_MIB > 0 )); then
     printf 'RAM reserved for video:  %s MiB\n' "$VIDEO_PARALLEL_RESERVE_MIB"
 fi
@@ -5984,7 +6051,7 @@ if (( IMAGE_COUNT > 0 )); then
     if ! $IMAGE_OPTIMIZER_AVAILABLE || ! $IMAGE_OPTIMIZE; then
         printf 'Image execution:         No optimizer process; originals use Copy\n'
     else
-        printf 'Image execution:         %s\n' "$($IMAGE_PARALLEL && printf 'Parallel with LZMA2' || printf 'Sequential before LZMA2')"
+        printf 'Image execution:         %s\n' "$($IMAGE_PARALLEL && printf 'Parallel via shared pool with LZMA2 (token-gated)' || printf 'Sequential before LZMA2')"
     fi
 fi
 printf 'LZMA2 lane:              %s files / %s\n' \
@@ -6529,6 +6596,7 @@ video_helper_arguments() {
 }
 
 start_video_pipeline() {
+    local -a launch_command
     prepare_video_stage
     video_helper_arguments
     : > "$VIDEO_LOG"
@@ -6545,13 +6613,29 @@ start_video_pipeline() {
     printf 'The original videos remain untouched. Valid smaller outputs are written only to temporary staging.\n'
     printf 'Detailed FFmpeg output is captured; combined status appears every %s seconds.\n\n' "$PROGRESS_INTERVAL"
 
+    launch_command=(
+        env _IS_CHILD_PROCESS=1
+        HARDCORE_ARCHIVE_VIDEO_QUALITY_THREADS="$RESOURCE_VIDEO_QUALITY_ENV"
+        bash "$VIDEO_HELPER" "${VIDEO_HELPER_ARGS[@]}"
+    )
+    if $RESOURCE_POOL_ENABLED && $VIDEO_PARALLEL; then
+        launch_command=(
+            python3 "$RESOURCE_POOL_RUNNER" run
+            --pool "$RESOURCE_POOL_DIR"
+            --cpu-min "$RESOURCE_VIDEO_CPU_CLAIM"
+            --cpu-max "$RESOURCE_VIDEO_CPU_CLAIM"
+            --ram-mib "$RESOURCE_VIDEO_RAM_CLAIM_MIB"
+            --label video
+            --priority high
+            -- "${launch_command[@]}"
+        )
+    fi
+
     if command -v setsid >/dev/null 2>&1; then
-        setsid env _IS_CHILD_PROCESS=1 bash "$VIDEO_HELPER" "${VIDEO_HELPER_ARGS[@]}" \
-            >"$VIDEO_LOG" 2>&1 &
+        setsid "${launch_command[@]}" >"$VIDEO_LOG" 2>&1 &
         VIDEO_PIPELINE_GROUP=true
     else
-        env _IS_CHILD_PROCESS=1 bash "$VIDEO_HELPER" "${VIDEO_HELPER_ARGS[@]}" \
-            >"$VIDEO_LOG" 2>&1 &
+        "${launch_command[@]}" >"$VIDEO_LOG" 2>&1 &
         VIDEO_PIPELINE_GROUP=false
     fi
     VIDEO_PIPELINE_PID=$!
@@ -6627,8 +6711,12 @@ write_original_image_results() {
 }
 
 start_image_pipeline() {
+    local -a resource_args=()
     (( IMAGE_COUNT > 0 )) || return 0
     prepare_image_stage
+    if $RESOURCE_POOL_ENABLED; then
+        resource_args=(--resource-pool "$RESOURCE_POOL_DIR" --resource-runner "$RESOURCE_POOL_RUNNER")
+    fi
 
     if ! $IMAGE_OPTIMIZE || ! $IMAGE_OPTIMIZER_AVAILABLE; then
         write_original_image_results
@@ -6650,7 +6738,8 @@ start_image_pipeline() {
             --log "$IMAGE_LOG" \
             --mode "$IMAGE_MODE" \
             --jobs "$IMAGE_JOBS_EFFECTIVE" \
-            --threads-per-worker "$IMAGE_THREADS_PER_WORKER" &
+            --threads-per-worker "$IMAGE_THREADS_PER_WORKER" \
+            "${resource_args[@]}" &
         IMAGE_PIPELINE_GROUP=true
     else
         env _IS_CHILD_PROCESS=1 bash "$IMAGE_HELPER" \
@@ -6661,7 +6750,8 @@ start_image_pipeline() {
             --log "$IMAGE_LOG" \
             --mode "$IMAGE_MODE" \
             --jobs "$IMAGE_JOBS_EFFECTIVE" \
-            --threads-per-worker "$IMAGE_THREADS_PER_WORKER" &
+            --threads-per-worker "$IMAGE_THREADS_PER_WORKER" \
+            "${resource_args[@]}" &
         IMAGE_PIPELINE_GROUP=false
     fi
     IMAGE_PIPELINE_PID=$!
@@ -7430,6 +7520,10 @@ write_success_report() {
         printf 'Image bytes saved: %s\n' "$IMAGE_SAVED_BYTES"
         printf 'Image mode/workers: %s / %s\n' "$IMAGE_MODE" "$IMAGE_JOBS_EFFECTIVE"
     printf 'Image scheduler: %s\n' "$IMAGE_SCHEDULER_SOURCE"
+        printf 'Shared resource pool: %s\n' "$RESOURCE_POOL_MODE"
+        if $RESOURCE_POOL_ENABLED; then
+            printf 'Initial media pool: %s/%s CPU, %s/%s MiB RAM\n'                 "$RESOURCE_POOL_INITIAL_CPU" "$CPU_THREADS" "$RESOURCE_POOL_INITIAL_RAM_MIB" "$RESOURCE_POOL_MAX_RAM_MIB"
+        fi
         printf 'Nested archives repacked: %s\n' "$NESTED_REPACKED_COUNT"
         printf 'Nested archives preserved: %s\n' "$NESTED_FALLBACK_COUNT"
         printf 'Nested archive bytes saved: %s\n' "$NESTED_SAVED_BYTES"
@@ -7485,6 +7579,20 @@ write_success_report() {
     sync "$REPORT_PATH" 2>/dev/null || true
 }
 
+
+resource_pool_release_lzma_reservation() {
+    if $RESOURCE_POOL_ENABLED && ! $RESOURCE_POOL_EXPANDED; then
+        hardcore_resource_pool_expand_full             "$RESOURCE_POOL_RUNNER" "$RESOURCE_POOL_DIR"             "$CPU_THREADS" "$RESOURCE_POOL_MAX_RAM_MIB" ||             die "Could not release LZMA2 capacity into the shared resource pool."
+        RESOURCE_POOL_EXPANDED=true
+        printf '\nShared resource pool: LZMA2 finished; CPU/RAM reservation released to waiting media workers.\n'
+    fi
+}
+
+compress_nonvideo_with_resources() {
+    compress_nonvideo_with_fallback "$@"
+    resource_pool_release_lzma_reservation
+}
+
 cd -- "$SOURCE_PARENT"
 
 if (( VIDEO_COUNT > 0 )) && $VIDEO_TRANSCODE; then
@@ -7493,7 +7601,7 @@ if (( VIDEO_COUNT > 0 )) && $VIDEO_TRANSCODE; then
         if $IMAGE_PARALLEL; then
             start_image_pipeline
         fi
-        compress_nonvideo_with_fallback "$DICTIONARY_MIB"
+        compress_nonvideo_with_resources "$DICTIONARY_MIB"
         if $IMAGE_PARALLEL; then
             wait_for_image_pipeline
         else
@@ -7509,12 +7617,12 @@ if (( VIDEO_COUNT > 0 )) && $VIDEO_TRANSCODE; then
         wait_for_video_pipeline
         if $IMAGE_PARALLEL; then
             start_image_pipeline
-            compress_nonvideo_with_fallback "$DICTIONARY_MIB"
+            compress_nonvideo_with_resources "$DICTIONARY_MIB"
             wait_for_image_pipeline
         else
             start_image_pipeline
             wait_for_image_pipeline
-            compress_nonvideo_with_fallback "$DICTIONARY_MIB"
+            compress_nonvideo_with_resources "$DICTIONARY_MIB"
         fi
     fi
 
@@ -7524,12 +7632,12 @@ else
     printf '\nStage 3/8: Video transcoding is not needed.\n'
     if $IMAGE_PARALLEL; then
         start_image_pipeline
-        compress_nonvideo_with_fallback "$DICTIONARY_MIB"
+        compress_nonvideo_with_resources "$DICTIONARY_MIB"
         wait_for_image_pipeline
     else
         start_image_pipeline
         wait_for_image_pipeline
-        compress_nonvideo_with_fallback "$DICTIONARY_MIB"
+        compress_nonvideo_with_resources "$DICTIONARY_MIB"
     fi
 
     printf '\nStage 5/8: No video process needs to be awaited.\n'

@@ -5,6 +5,7 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 HELPER="$ROOT/lib/hardcore-archive-image-helper.sh"
 CORE="$ROOT/lib/hardcore-archive-core.sh"
 IMAGES="$ROOT/lib/images.sh"
+RUNNER="$ROOT/lib/hardcore-archive-resource-run.py"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/hardcore-image-performance.XXXXXX")
 cleanup() { rm -rf -- "$TMP"; }
 trap cleanup EXIT
@@ -111,6 +112,28 @@ grep -Fq -- '--zopfli' "$OXI_LOG"
 grep -Fq -- '--zi 5' "$OXI_LOG"
 grep -Fq -- '--ziwi 2' "$OXI_LOG"
 grep -Fq 'oxipng-maximum+bounded-zopfli' "$TMP/result"
+
+RESOURCE_POOL="$TMP/image-resource-pool"
+python3 "$RUNNER" init \
+    --pool "$RESOURCE_POOL" --cpu-initial 2 --cpu-max 6 \
+    --ram-initial-mib 256 --ram-max-mib 1024
+: > "$OXI_LOG"
+: > "$NICE_LOG"
+: > "$TMP/result"
+rm -rf "$TMP/stage"; mkdir -p "$TMP/stage"
+bash "$HELPER" \
+    --source-parent "$TMP/source" \
+    --stage-parent "$TMP/stage" \
+    --list "$TMP/list" \
+    --result "$TMP/result" \
+    --log "$TMP/helper.log" \
+    --mode balanced \
+    --jobs 1 \
+    --threads-per-worker 6 \
+    --resource-pool "$RESOURCE_POOL" \
+    --resource-runner "$RUNNER"
+grep -Fq -- '--threads 2' "$OXI_LOG"
+! grep -Fq -- '--threads 6' "$OXI_LOG"
 
 python3 - "$CORE" <<'PY'
 from pathlib import Path
