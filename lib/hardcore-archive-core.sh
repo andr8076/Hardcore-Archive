@@ -41,6 +41,7 @@ esac
 
 # Shared by per-file helpers, batch jobs and nested archive children.
 export HARDCORE_ARCHIVE_CALIBRATION_CACHE_DIR=${HARDCORE_ARCHIVE_CALIBRATION_CACHE_DIR:-$PLATFORM_CACHE_HOME/hardcore-archive/video-calibration-v1}
+export HARDCORE_ARCHIVE_IMAGE_SCHEDULER_CACHE_DIR=${HARDCORE_ARCHIVE_IMAGE_SCHEDULER_CACHE_DIR:-$PLATFORM_CACHE_HOME/hardcore-archive/image-scheduler-v1}
 
 # Homebrew keeps GNU utilities out of the default command names on macOS.
 # Prefer their gnubin directories automatically so the main workflow has one
@@ -202,6 +203,8 @@ IMAGE_MODE="maximum"
 IMAGE_JOBS="auto"
 IMAGE_JOBS_EFFECTIVE=1
 IMAGE_THREADS_PER_WORKER=1
+IMAGE_CPU_BUDGET=1
+IMAGE_SCHEDULER_SOURCE="heuristic"
 IMAGE_LIST=""
 IMAGE_LOG=""
 IMAGE_STAGE_PARENT=""
@@ -337,7 +340,8 @@ Image policy:
   --no-image-optimize      Store JPEG and PNG originals without optimization.
   --image-mode MODE        maximum, balanced, or fast. Default: maximum.
   --image-jobs N|auto      Concurrent lossless image workers. Default: auto.
-                           Automatic mode leaves resources for LZMA and video.
+                           Automatic mode calibrates OxiPNG process/thread fan-out
+                           for this CPU, caches the winner, and yields to LZMA/video.
 
 Batch policy:
   --batch-root-files MODE  archive, ignore, or error. Default: archive.
@@ -5552,21 +5556,25 @@ else
     (( OS_RESERVE_MIB > 8192 )) && OS_RESERVE_MIB=8192
 fi
 
-# Image workers run beside LZMA. Automatic mode now targets full CPU
-# saturation: every logical CPU is available to the image pool. Process
-# fan-out is bounded by the image module using both CPU count and
-# available RAM, while each worker runs at reduced process priority so
-# foreground LZMA/video work wins under contention.
+# Image workers run beside LZMA. Automatic mode uses a cached machine-specific
+# OxiPNG calibration when possible, with the full-throttle deterministic
+# scheduler as a safe fallback. Explicit --image-jobs always wins.
 if (( IMAGE_COUNT > 0 )) && $IMAGE_OPTIMIZE && $IMAGE_OPTIMIZER_AVAILABLE; then
-    if ! IFS=$'\t' read -r IMAGE_JOBS_EFFECTIVE IMAGE_THREADS_PER_WORKER IMAGE_CPU_BUDGET < <(
-        hardcore_images_compute_cpu_schedule "$CPU_THREADS" "$IMAGE_COUNT" "$IMAGE_JOBS" "$MEM_AVAILABLE_MIB"
+    if [[ $IMAGE_JOBS == auto ]] && (( IMAGE_PNG_COUNT > 1 )); then
+        printf 'Image scheduler: checking machine calibration/cache...\n'
+    fi
+    if ! IFS=$'\t' read -r IMAGE_JOBS_EFFECTIVE IMAGE_THREADS_PER_WORKER IMAGE_CPU_BUDGET IMAGE_SCHEDULER_SOURCE < <(
+        hardcore_images_choose_cpu_schedule \
+            "$CPU_THREADS" "$IMAGE_COUNT" "$IMAGE_PNG_COUNT" "$IMAGE_JOBS" \
+            "$MEM_AVAILABLE_MIB" "$CPU_MODEL" "$ANALYZE_ONLY"
     ); then
-        die "Could not calculate the aggressive image CPU schedule."
+        die "Could not calculate the image CPU schedule."
     fi
 else
     IMAGE_JOBS_EFFECTIVE=0
     IMAGE_THREADS_PER_WORKER=1
     IMAGE_CPU_BUDGET=0
+    IMAGE_SCHEDULER_SOURCE="inactive"
     IMAGE_PARALLEL=false
 fi
 
@@ -5971,6 +5979,8 @@ if (( IMAGE_COUNT > 0 )); then
     printf 'Image handling:          %s\n' "$($IMAGE_OPTIMIZE && $IMAGE_OPTIMIZER_AVAILABLE && printf 'Lossless optimize, validate, Copy fallback' || printf 'Store originals with Copy')"
     printf 'Image optimizer tools:   %s\n' "$IMAGE_TOOL_SUMMARY"
     printf 'Image mode/workers:      %s / %s\n' "$IMAGE_MODE" "$IMAGE_JOBS_EFFECTIVE"
+    printf 'OxiPNG threads/worker:   %s\n' "$IMAGE_THREADS_PER_WORKER"
+    printf 'Image scheduler:         %s\n' "$IMAGE_SCHEDULER_SOURCE"
     if ! $IMAGE_OPTIMIZER_AVAILABLE || ! $IMAGE_OPTIMIZE; then
         printf 'Image execution:         No optimizer process; originals use Copy\n'
     else
@@ -6628,8 +6638,8 @@ start_image_pipeline() {
 
     printf '\nStage 3/8: Starting lossless image optimization in a separate process...\n'
     printf 'JPEG/PNG originals remain untouched; only validated smaller outputs are staged.\n'
-    printf 'Image workers: %s | OxiPNG threads/worker: %s | policy: %s\n\n' \
-        "$IMAGE_JOBS_EFFECTIVE" "$IMAGE_THREADS_PER_WORKER" "$IMAGE_MODE"
+    printf 'Image workers: %s | OxiPNG threads/worker: %s | policy: %s | scheduler: %s\n\n' \
+        "$IMAGE_JOBS_EFFECTIVE" "$IMAGE_THREADS_PER_WORKER" "$IMAGE_MODE" "$IMAGE_SCHEDULER_SOURCE"
 
     if command -v setsid >/dev/null 2>&1; then
         setsid env _IS_CHILD_PROCESS=1 bash "$IMAGE_HELPER" \
@@ -7419,6 +7429,7 @@ write_success_report() {
         printf 'Images preserved: %s\n' "$IMAGE_FALLBACK_COUNT"
         printf 'Image bytes saved: %s\n' "$IMAGE_SAVED_BYTES"
         printf 'Image mode/workers: %s / %s\n' "$IMAGE_MODE" "$IMAGE_JOBS_EFFECTIVE"
+    printf 'Image scheduler: %s\n' "$IMAGE_SCHEDULER_SOURCE"
         printf 'Nested archives repacked: %s\n' "$NESTED_REPACKED_COUNT"
         printf 'Nested archives preserved: %s\n' "$NESTED_FALLBACK_COUNT"
         printf 'Nested archive bytes saved: %s\n' "$NESTED_SAVED_BYTES"
