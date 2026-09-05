@@ -11,6 +11,7 @@ reserved for one tab-separated scheduler result:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import math
@@ -21,6 +22,7 @@ import shutil
 import statistics
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 import zlib
@@ -278,6 +280,24 @@ def main() -> int:
     if args.cache_only:
         return 3
 
+    # Batch and nested archive children can reach the same cache concurrently.
+    # Serialize calibration by cache identity so only one benchmark disturbs the
+    # machine; waiters re-check the cache after acquiring the lock.
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        lock_handle = open(str(path) + '.lock', 'a+', encoding='utf-8')
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+    except OSError:
+        return 4
+
+    if not args.refresh:
+        cached = load_cache(path, key)
+        if cached is not None:
+            result = cached['result']
+            emit(int(result['jobs']), int(result['threads']), args.cpu_threads, 'calibrated-cache')
+            return 0
+
+    print('Calibrating OxiPNG worker/thread scheduling for this machine...', file=sys.stderr)
     started_all = time.monotonic()
     measurements: list[dict[str, object]] = []
     with tempfile.TemporaryDirectory(prefix="hardcore-image-calibration-") as temporary:
@@ -371,6 +391,10 @@ def main() -> int:
         # must not make archive creation fail.
         pass
 
+    print(
+        f"Image scheduler calibration selected {jobs} worker(s) x {threads} thread(s).",
+        file=sys.stderr,
+    )
     emit(jobs, threads, args.cpu_threads, "calibrated-new")
     return 0
 
