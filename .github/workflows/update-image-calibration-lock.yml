@@ -1,0 +1,80 @@
+name: Update image calibration lock
+
+on:
+  push:
+    branches:
+      - perf/calibrated-image-scheduler
+
+permissions:
+  contents: write
+
+jobs:
+  update-calibrator:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/calibrated-image-scheduler
+          fetch-depth: 0
+      - name: Add cross-process calibration locking
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('lib/hardcore-archive-image-calibrate.py')
+          text = path.read_text(encoding='utf-8')
+
+          text = text.replace('import argparse\n', 'import argparse\nimport fcntl\n', 1)
+          text = text.replace('import subprocess\n', 'import subprocess\nimport sys\n', 1)
+
+          old = '''    if args.cache_only:
+              return 3
+
+              started_all = time.monotonic()
+          '''
+          if old in text:
+              raise SystemExit('unexpected indentation variant present')
+
+          old = '''    if args.cache_only:
+              return 3
+
+          started_all = time.monotonic()
+          '''
+          # YAML indentation is removed before this Python program executes; the
+          # actual source has four spaces, so use a direct source-level matcher.
+          old = "    if args.cache_only:\n        return 3\n\n    started_all = time.monotonic()\n"
+          new = """    if args.cache_only:\n        return 3\n\n    # Batch and nested archive children can reach the same cache concurrently.\n    # Serialize calibration by cache identity so only one benchmark disturbs the\n    # machine; waiters re-check the cache after acquiring the lock.\n    try:\n        directory.mkdir(parents=True, exist_ok=True)\n        lock_handle = open(str(path) + '.lock', 'a+', encoding='utf-8')\n        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)\n    except OSError:\n        return 4\n\n    if not args.refresh:\n        cached = load_cache(path, key)\n        if cached is not None:\n            result = cached['result']\n            emit(int(result['jobs']), int(result['threads']), args.cpu_threads, 'calibrated-cache')\n            return 0\n\n    print('Calibrating OxiPNG worker/thread scheduling for this machine...', file=sys.stderr)\n    started_all = time.monotonic()\n"""
+          if text.count(old) != 1:
+              raise SystemExit(f'calibration lock insertion: expected one match, found {text.count(old)}')
+          text = text.replace(old, new, 1)
+
+          old = '''    emit(jobs, threads, args.cpu_threads, "calibrated-new")
+              return 0
+          '''
+          old = '    emit(jobs, threads, args.cpu_threads, "calibrated-new")\n    return 0\n'
+          new = '''    print(
+              f"Image scheduler calibration selected {jobs} worker(s) x {threads} thread(s).",
+              file=sys.stderr,
+          )
+              emit(jobs, threads, args.cpu_threads, "calibrated-new")
+              return 0
+          '''
+          # Normalize indentation intentionally after the triple-quoted YAML body.
+          new = '    print(\n        f"Image scheduler calibration selected {jobs} worker(s) x {threads} thread(s).",\n        file=sys.stderr,\n    )\n    emit(jobs, threads, args.cpu_threads, "calibrated-new")\n    return 0\n'
+          if text.count(old) != 1:
+              raise SystemExit(f'calibration completion output: expected one match, found {text.count(old)}')
+          text = text.replace(old, new, 1)
+
+          path.write_text(text, encoding='utf-8')
+          PY
+          python3 -m py_compile lib/hardcore-archive-image-calibrate.py
+          bash tests/image-calibration.sh
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib/hardcore-archive-image-calibrate.py
+          git diff --cached --quiet && exit 0
+          git commit -m 'Serialize OxiPNG scheduler calibration'
+          git push origin HEAD:perf/calibrated-image-scheduler
