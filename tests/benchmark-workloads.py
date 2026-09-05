@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 GENERATOR = ROOT / "benchmarks" / "generate-workloads.py"
 COMPARATOR = ROOT / "benchmarks" / "compare-results.py"
 MEASURE = ROOT / "benchmarks" / "measure-extended.py"
+RUNNER = ROOT / "benchmarks" / "run-workloads.sh"
 
 
 def digest_tree(root: Path) -> str:
@@ -46,11 +47,13 @@ def write_summary(path: Path, creation: float, archive_bytes: int, peak: int) ->
 
 def main() -> int:
     subprocess.run([sys.executable, "-m", "py_compile", str(GENERATOR), str(COMPARATOR), str(MEASURE)], check=True)
+    subprocess.run(["bash", "-n", str(RUNNER)], check=True)
+
     with tempfile.TemporaryDirectory(prefix="hardcore-bench-test-") as temp:
         temp_path = Path(temp)
         first = temp_path / "first"
         second = temp_path / "second"
-        profiles = "documents,images,containers"
+        profiles = "documents,images,archives,containers"
         for output in (first, second):
             subprocess.run(
                 [sys.executable, str(GENERATOR), str(output), "--size-mib", "4", "--profiles", profiles],
@@ -59,9 +62,8 @@ def main() -> int:
             for name in profiles.split(","):
                 assert (output / name).is_dir(), name
                 assert (output / f"{name}.sha256").is_file(), name
-        assert digest_tree(first / "documents") == digest_tree(second / "documents")
-        assert digest_tree(first / "images") == digest_tree(second / "images")
-        assert digest_tree(first / "containers") == digest_tree(second / "containers")
+        for name in profiles.split(","):
+            assert digest_tree(first / name) == digest_tree(second / name), name
 
         metric = temp_path / "metric.tsv"
         subprocess.run(
@@ -72,6 +74,8 @@ def main() -> int:
         assert len(values) == 5
         assert float(values[0]) >= 0
         assert int(values[1]) >= 0
+        assert float(values[2]) >= 0
+        assert float(values[3]) >= 0
         assert float(values[4]) >= 0
 
         baseline = temp_path / "baseline.tsv"
