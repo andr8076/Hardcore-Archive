@@ -28,7 +28,17 @@ hardcore_inspect_resolve_7zip() {
 }
 
 hardcore_inspect_size() {
-    stat -c '%s' -- "$1" 2>/dev/null || stat -f '%z' -- "$1" 2>/dev/null
+    stat -c '%s' -- "$1" 2>/dev/null || stat -f '%z' "$1" 2>/dev/null
+}
+
+hardcore_inspect_resolve_path() {
+    local input=$1 parent base
+    parent=$(dirname -- "$input") || return 1
+    base=$(basename -- "$input") || return 1
+    (
+        cd -- "$parent" 2>/dev/null || exit 1
+        printf '%s/%s\n' "$(pwd -P)" "$base"
+    )
 }
 
 hardcore_inspect_human_bytes() {
@@ -51,13 +61,12 @@ hardcore_inspect_main() {
     }
     archive_input=$2
     [[ -f $archive_input ]] || { hardcore_inspect_die "Archive does not exist: $archive_input"; return 1; }
-    command -v realpath >/dev/null 2>&1 || { hardcore_inspect_die 'Inspection requires realpath.'; return 1; }
     command -v awk >/dev/null 2>&1 || { hardcore_inspect_die 'Inspection requires awk.'; return 1; }
     command -v grep >/dev/null 2>&1 || { hardcore_inspect_die 'Inspection requires grep.'; return 1; }
     command -v stat >/dev/null 2>&1 || { hardcore_inspect_die 'Inspection requires stat.'; return 1; }
     command -v mktemp >/dev/null 2>&1 || { hardcore_inspect_die 'Inspection requires mktemp.'; return 1; }
     seven_zip=$(hardcore_inspect_resolve_7zip) || { hardcore_inspect_die 'Inspection requires 7-Zip (7zz, 7z, or 7za).'; return 1; }
-    archive=$(realpath -e -- "$archive_input" 2>/dev/null) || { hardcore_inspect_die "Could not resolve archive path: $archive_input"; return 1; }
+    archive=$(hardcore_inspect_resolve_path "$archive_input") || { hardcore_inspect_die "Could not resolve archive path: $archive_input"; return 1; }
 
     tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/hardcore-inspect.XXXXXX") || { hardcore_inspect_die 'Could not create inspection workspace.'; return 1; }
     listing="$tmpdir/listing.slt"
