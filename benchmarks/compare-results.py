@@ -7,23 +7,24 @@ import csv
 from pathlib import Path
 import sys
 
-
 METRICS = (
-    ("archive_bytes", "size", False),
-    ("creation_seconds", "create", False),
-    ("verification_seconds", "verify", False),
-    ("extraction_seconds", "extract", False),
-    ("peak_memory_kib", "memory", False),
+    ("archive_bytes", "size"),
+    ("creation_seconds", "create"),
+    ("verification_seconds", "verify"),
+    ("extraction_seconds", "extract"),
+    ("peak_memory_kib", "memory"),
 )
 
 
 def load(path: Path) -> dict[tuple[str, str], dict[str, str]]:
     with path.open(newline="", encoding="utf-8") as handle:
-        rows = list(csv.DictReader(handle, delimiter="\t"))
+        reader = csv.DictReader(handle, delimiter="\t")
+        rows = list(reader)
+        columns = set(reader.fieldnames or ())
     required = {"profile", "case"} | {item[0] for item in METRICS}
     if not rows:
         raise ValueError(f"empty benchmark summary: {path}")
-    missing = required - set(rows[0])
+    missing = required - columns
     if missing:
         raise ValueError(f"{path} is missing columns: {', '.join(sorted(missing))}")
     return {(row["profile"], row["case"]): row for row in rows}
@@ -33,6 +34,18 @@ def percent_change(old: float, new: float) -> float:
     if old == 0:
         return 0.0 if new == 0 else float("inf")
     return (new - old) / old * 100.0
+
+
+def row_complete(row: dict[str, str]) -> bool:
+    status = row.get("overall_status", "success")
+    if status and status != "success":
+        return False
+    try:
+        for column, _ in METRICS:
+            float(row.get(column, ""))
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def main() -> int:
@@ -67,17 +80,21 @@ def main() -> int:
         "peak_memory_kib": args.memory_regression,
     }
     regressions = 0
+    incomplete = 0
     print("profile\tcase\tmetric\tbaseline\tcurrent\tchange_percent\tstatus")
     for key in common:
         old_row = baseline[key]
         new_row = current[key]
-        for column, label, _ in METRICS:
-            try:
-                old = float(old_row[column])
-                new = float(new_row[column])
-            except ValueError:
-                print(f"comparison error: non-numeric {column} for {key}", file=sys.stderr)
-                return 2
+        if not row_complete(old_row):
+            print(f"warning: baseline row is incomplete; skipping {key[0]}/{key[1]}", file=sys.stderr)
+            continue
+        if not row_complete(new_row):
+            incomplete += 1
+            print(f"{key[0]}\t{key[1]}\tall\t-\t-\t-\tINCOMPLETE")
+            continue
+        for column, label in METRICS:
+            old = float(old_row[column])
+            new = float(new_row[column])
             change = percent_change(old, new)
             threshold = thresholds[column]
             status = "REGRESSION" if change > threshold else "ok"
@@ -87,11 +104,15 @@ def main() -> int:
             print(f"{key[0]}\t{key[1]}\t{label}\t{old:g}\t{new:g}\t{change_text}\t{status}")
 
     missing_current = sorted(set(baseline) - set(current))
+    incomplete += len(missing_current)
     for profile, case in missing_current:
         print(f"warning: current summary is missing {profile}/{case}", file=sys.stderr)
 
+    if incomplete:
+        print(f"\n{incomplete} current benchmark row(s) are incomplete or missing.", file=sys.stderr)
     if regressions:
-        print(f"\n{regressions} benchmark regression(s) exceeded the configured thresholds.", file=sys.stderr)
+        print(f"{regressions} benchmark regression(s) exceeded the configured thresholds.", file=sys.stderr)
+    if regressions or incomplete:
         return 1 if args.fail_on_regression else 0
     print("\nNo benchmark regressions exceeded the configured thresholds.")
     return 0
