@@ -86,6 +86,12 @@ Run the complete production pipeline against every generated workload:
 bash benchmarks/run-workloads.sh benchmarks/workloads
 ```
 
+The runner keeps the machine awake for the **entire benchmark session**, not
+only the Hardcore case: macOS uses `caffeinate`, while Linux uses a usable
+`systemd-inhibit`. A benchmark refuses to start without that protection. If an
+external inhibitor is already active, `HARDCORE_BENCHMARK_ALLOW_SLEEP=1` can be
+used as an explicit override.
+
 The real-world runner executes two intentionally different reference cases:
 
 - `hardcore-full` — normal Hardcore Archive behavior, including transforms,
@@ -120,7 +126,9 @@ missing workload root with media enabled.
 - creation, verification/recheck, and extraction wall time;
 - creation user and system CPU time;
 - average CPU utilization across the complete creation process;
-- peak resident memory;
+- sampled **aggregate resident memory for the complete live process tree**
+  (Hardcore/7-Zip plus concurrent helpers and descendants), rather than the
+  largest RSS of one child process;
 - machine CPU, logical-thread count, RAM, kernel, 7-Zip version, git commit and
   NVIDIA GPU/driver information when `nvidia-smi` is available.
 
@@ -167,7 +175,18 @@ environment.tsv   machine, version, corpus, and hash-worker context
 ```
 
 The real-world runner uses the same filenames, but `summary.tsv` is keyed by
-`profile` plus `case` and adds CPU-time/utilization fields.
+`profile` plus `case` and adds CPU-time/utilization and phase-status fields. Each
+measured phase also gets a `*.log`. If a phase fails, its wall/CPU/RAM metrics,
+exit code and log are written before the runner decides what can safely continue.
+For example, a failed post-create inspection does not discard the completed
+creation measurement, and extraction can still run when the archive exists.
+Blocked phases are recorded explicitly as `not-run:<reason>`. The runner exits
+nonzero after all safe work is recorded if any case failed.
+
+Every real-world case also snapshots source metadata immediately before and after
+the case. If the source changes, `*.source-changes.txt` names each added, removed
+or modified path and the metadata fields that changed. This makes long-run
+source-change failures diagnosable instead of reporting only a generic mismatch.
 
 The baseline `summary.tsv` puts the requested metrics in direct columns:
 
@@ -187,12 +206,14 @@ verification, and extraction.
 `results.tsv` retains one row per phase so regressions can be attributed to the
 specific stage rather than only the overall maximum.
 
-Wall time and peak memory are measured by `benchmarks/measure.py` using a fresh
-process for every phase. Wall time uses a monotonic high-resolution clock. Peak
-RSS is normalized to KiB across Linux and macOS using `resource.getrusage`, which
-avoids GNU/BSD `/usr/bin/time` output differences. The real-world runner uses
-`measure-extended.py` to add child-process user/system CPU time and average CPU
-utilization.
+The byte-preserving baseline still uses `benchmarks/measure.py`. The real-world
+runner uses `measure-extended.py`: wall time uses a monotonic clock; user/system
+CPU time is retained; and a periodic process-table sample follows the benchmark
+root PID through its live descendants and sums their RSS to produce
+`peak_memory_kib`. The default sample interval is 0.5 seconds and can be changed
+with `HARDCORE_BENCHMARK_SAMPLE_INTERVAL` (0.05–5 seconds). This is intentionally
+an aggregate process-tree memory metric, which is the relevant quantity for the
+shared CPU/RAM scheduler.
 
 ## Baseline corpus contents
 
