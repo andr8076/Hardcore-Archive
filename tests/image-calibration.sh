@@ -79,6 +79,38 @@ cache_miss_status=$?
 set -e
 [[ $cache_miss_status == 3 ]]
 
+# Concurrent batch/nested children must not benchmark against each other. The
+# first process owns the per-cache lock; the second waits and then consumes the
+# cache entry produced by the first.
+: > "$OXI_CALLS"
+python3 "$CALIBRATOR" \
+    --oxipng "$TMP/bin/oxipng" \
+    --cpu-threads 8 \
+    --max-workers 4 \
+    --cache-dir "$TMP/cache" \
+    --cpu-model concurrent-cpu \
+    --platform test \
+    --time-budget 5 \
+    --repeats 1 >"$TMP/concurrent-a.out" 2>"$TMP/concurrent-a.err" &
+pid_a=$!
+python3 "$CALIBRATOR" \
+    --oxipng "$TMP/bin/oxipng" \
+    --cpu-threads 8 \
+    --max-workers 4 \
+    --cache-dir "$TMP/cache" \
+    --cpu-model concurrent-cpu \
+    --platform test \
+    --time-budget 5 \
+    --repeats 1 >"$TMP/concurrent-b.out" 2>"$TMP/concurrent-b.err" &
+pid_b=$!
+wait "$pid_a"
+wait "$pid_b"
+cat "$TMP/concurrent-a.out" "$TMP/concurrent-b.out" > "$TMP/concurrent.out"
+[[ $(grep -c $'4\t2\t8\tcalibrated-new' "$TMP/concurrent.out") == 1 ]]
+[[ $(grep -c $'4\t2\t8\tcalibrated-cache' "$TMP/concurrent.out") == 1 ]]
+concurrent_calls=$(wc -l < "$OXI_CALLS")
+(( concurrent_calls >= 7 && concurrent_calls <= 10 ))
+
 # Exercise the shell integration independently of benchmark timing.
 cat > "$TMP/stub-calibrator.py" <<'PY'
 #!/usr/bin/env python3
