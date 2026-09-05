@@ -18,4 +18,12 @@ source "$HARDCORE_ARCHIVE_ROOT/lib/platform.sh"
 source "$HARDCORE_ARCHIVE_ROOT/lib/config.sh"
 # shellcheck source=/dev/null
 source "$HARDCORE_ARCHIVE_ROOT/lib/visual.sh"
+# Keep read-only inspection out of the long-running visual/archive launcher.
+# This also gives inspection one small, pipefail-safe implementation.
+if [[ ${1:-} == --inspect ]]; then
+    # shellcheck source=/dev/null
+    source "$HARDCORE_ARCHIVE_ROOT/lib/inspect.sh"
+    hardcore_inspect_main "$@"
+    exit $?
+fi
 hardcore_visual_launcher_main "$@"
