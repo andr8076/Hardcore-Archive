@@ -75,14 +75,13 @@ hardcore_images_choose_cpu_schedule() {
     local cpu_threads=$1 image_count=$2 png_count=$3 requested_jobs=${4:-auto}
     local available_mib=${5:-0} cpu_model=${6:-unknown} analyze_only=${7:-false}
     local fallback jobs threads budget worker_cap calibrator cache_dir result
-    local calibrated_jobs calibrated_threads calibrated_budget calibrated_source source
+    local calibrated_jobs calibrated_threads calibrated_budget calibrated_source
     local -a args
 
     [[ $png_count =~ ^[0-9]+$ ]] || return 2
     fallback=$(hardcore_images_compute_cpu_schedule \
         "$cpu_threads" "$image_count" "$requested_jobs" "$available_mib") || return 2
     IFS=$'\t' read -r jobs threads budget <<< "$fallback"
-    source=heuristic
 
     if [[ $requested_jobs != auto ]]; then
         printf '%s\t%s\t%s\texplicit\n' "$jobs" "$threads" "$budget"
@@ -96,6 +95,13 @@ hardcore_images_choose_cpu_schedule() {
     # full CPU budget. JPEG-only sets keep the aggressive deterministic policy.
     if (( png_count < 2 )); then
         printf '%s\t%s\t%s\theuristic\n' "$jobs" "$threads" "$budget"
+        return 0
+    fi
+    # jpegtran is effectively file-parallel rather than internally threaded.
+    # An OxiPNG-derived low worker count can therefore hurt a JPEG-heavy mixed
+    # set, so keep the high fan-out deterministic policy when PNG is the minority.
+    if (( png_count * 2 < image_count )); then
+        printf '%s\t%s\t%s\theuristic-jpeg-dominant\n' "$jobs" "$threads" "$budget"
         return 0
     fi
     if [[ ${HARDCORE_ARCHIVE_IMAGE_CALIBRATION_DISABLE:-0} == 1 ]]; then
