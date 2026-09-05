@@ -6,7 +6,10 @@ RUNNER="$ROOT/lib/hardcore-archive-resource-run.py"
 POLICY="$ROOT/lib/resource-pool.sh"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/hardcore-resource-pool-test.XXXXXX")
 cleanup() {
-    jobs -pr | xargs -r kill 2>/dev/null || true
+    local pid
+    while IFS= read -r pid; do
+        [[ -n $pid ]] && kill "$pid" 2>/dev/null || true
+    done < <(jobs -pr)
     rm -rf -- "$TMP"
 }
 trap cleanup EXIT
