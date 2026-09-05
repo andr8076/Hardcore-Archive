@@ -72,7 +72,8 @@ hardcore_resource_pool_init() {
         --cpu-initial "$cpu_initial" \
         --cpu-max "$cpu_max" \
         --ram-initial-mib "$ram_initial" \
-        --ram-max-mib "$ram_max"
+        --ram-max-mib "$ram_max" \
+        --ram-chunk-mib 64
 }
 
 hardcore_resource_pool_expand_full() {

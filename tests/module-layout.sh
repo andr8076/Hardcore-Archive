@@ -4,7 +4,7 @@ IFS=$'\n\t'
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 
 required=(
-    common platform config doctor inventory planner scheduler archive video images timing calibration-identity video-acceleration media-policy runtime
+    common platform config doctor inventory planner scheduler archive video images resource-pool timing calibration-identity video-acceleration media-policy runtime
     containers nested verify restore reporting visual
 )
 for module in "${required[@]}"; do
@@ -20,6 +20,7 @@ bash -n "$ROOT/lib/hardcore-archive-image-helper.sh"
 python3 -m py_compile "$ROOT/lib/hardcore-archive-media.py"
 python3 -m py_compile "$ROOT/lib/hardcore-archive-compressibility.py"
 python3 -m py_compile "$ROOT/lib/hardcore-archive-image-calibrate.py"
+python3 -m py_compile "$ROOT/lib/hardcore-archive-resource-run.py"
 bash -n "$ROOT/packaging/media-runtime/build.sh"
 bash -n "$ROOT/packaging/media-runtime/smoke-test.sh"
 bash -n "$ROOT/tests/bundled-runtime.sh"
@@ -43,6 +44,12 @@ grep -Fq 'hardcore_run_sourced "$HARDCORE_POLICY_RUNNER"' "$ROOT/lib/scheduler.s
 grep -Fq 'hardcore-archive-image-helper.sh' "$ROOT/lib/hardcore-archive-core.sh"
 grep -Fq 'hardcore_images_choose_cpu_schedule' "$ROOT/lib/hardcore-archive-core.sh"
 grep -Fq 'HARDCORE_ARCHIVE_IMAGE_SCHEDULER_CACHE_DIR' "$ROOT/lib/hardcore-archive-core.sh"
+grep -Fq 'source "$(dirname -- "${BASH_SOURCE[0]}")/resource-pool.sh"' "$ROOT/lib/hardcore-archive-core.sh"
+grep -Fq 'hardcore_resource_pool_init' "$ROOT/lib/hardcore-archive-core.sh"
+grep -Fq 'compress_nonvideo_with_resources' "$ROOT/lib/hardcore-archive-core.sh"
+grep -Fq 'hardcore_resource_pool_expand_full' "$ROOT/lib/hardcore-archive-core.sh"
+grep -Fq -- '--resource-pool "$RESOURCE_POOL_DIR"' "$ROOT/lib/hardcore-archive-core.sh"
+grep -Fq 'HARDCORE_RESOURCE_GRANTED_CPU' "$ROOT/lib/hardcore-archive-image-helper.sh"
 grep -Fq -- '--threads-per-worker "$IMAGE_THREADS_PER_WORKER"' "$ROOT/lib/hardcore-archive-core.sh"
 ! grep -Fq 'RAYON_NUM_THREADS=2 oxipng' "$ROOT/lib/hardcore-archive-image-helper.sh"
 ! grep -Eq 'apply_runtime_patch|build_runtime_core|HARDCORE_RUNTIME' \

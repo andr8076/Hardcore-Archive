@@ -226,6 +226,11 @@ optimize_one() {
 
 if [[ ${1:-} == --worker-direct ]]; then
     shift
+    if [[ ${HARDCORE_RESOURCE_GRANTED_CPU:-} =~ ^[1-9][0-9]*$ ]]; then
+        # The shared scheduler may grant fewer CPUs than this PNG's calibrated
+        # maximum while LZMA/video are active. Use the actual grant.
+        set -- "$1" "$2" "$3" "$4" "$5" "$HARDCORE_RESOURCE_GRANTED_CPU" "$7"
+    fi
     optimize_one "$@"
     exit 0
 fi

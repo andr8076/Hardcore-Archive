@@ -90,4 +90,24 @@ impossible_rc=$?
 set -e
 [[ $impossible_rc != 0 ]]
 
+# RAM capacity rounds down, while claims round up.
+POOL="$TMP/ram-rounding"
+python3 "$RUNNER" init \
+    --pool "$POOL" --cpu-initial 1 --cpu-max 1 \
+    --ram-initial-mib 65 --ram-max-mib 300
+set +e
+python3 "$RUNNER" run \
+    --pool "$POOL" --cpu-min 1 --cpu-max 1 --ram-mib 128 \
+    --label rounding-block --wait-timeout 0.2 -- true >/dev/null 2>&1
+rounding_rc=$?
+set -e
+[[ $rounding_rc != 0 ]]
+python3 "$RUNNER" expand --pool "$POOL" --cpu-total 1 --ram-total-mib 130
+ROUNDING_OUT="$TMP/rounding.out"; export ROUNDING_OUT
+python3 "$RUNNER" run \
+    --pool "$POOL" --cpu-min 1 --cpu-max 1 --ram-mib 128 \
+    --label rounding-pass --wait-timeout 2 -- \
+    sh -c 'printf "%s\n" "$HARDCORE_RESOURCE_GRANTED_RAM_MIB" > "$ROUNDING_OUT"'
+[[ $(cat "$ROUNDING_OUT") == 128 ]]
+
 printf 'Shared resource-pool tests passed.\n'

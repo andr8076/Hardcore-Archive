@@ -34,7 +34,7 @@ import time
 from typing import Iterable
 
 SCHEMA_VERSION = 1
-DEFAULT_RAM_CHUNK_MIB = 256
+DEFAULT_RAM_CHUNK_MIB = 64
 
 
 def positive_int(value: str) -> int:
@@ -145,8 +145,12 @@ def initialize(args: argparse.Namespace) -> int:
     cpu_dir.mkdir(exist_ok=True)
     ram_dir.mkdir(exist_ok=True)
 
-    ram_max_slots = math.ceil(args.ram_max_mib / args.ram_chunk_mib)
-    ram_initial_slots = math.ceil(args.ram_initial_mib / args.ram_chunk_mib) if args.ram_initial_mib else 0
+    # Capacity rounds down so tokenization can never expose more RAM than
+    # the caller declared safe. Individual claims still round upward.
+    ram_max_slots = args.ram_max_mib // args.ram_chunk_mib
+    ram_initial_slots = args.ram_initial_mib // args.ram_chunk_mib if args.ram_initial_mib else 0
+    if ram_max_slots < 1:
+        raise RuntimeError("RAM pool maximum is smaller than one token chunk")
     create_tokens(cpu_dir, args.cpu_initial)
     create_tokens(ram_dir, ram_initial_slots)
     atomic_json(
@@ -170,7 +174,7 @@ def expand(args: argparse.Namespace) -> int:
         raise RuntimeError("requested CPU expansion exceeds pool maximum")
     if args.ram_total_mib > meta["ram_max_mib"]:
         raise RuntimeError("requested RAM expansion exceeds pool maximum")
-    ram_slots = math.ceil(args.ram_total_mib / meta["ram_chunk_mib"]) if args.ram_total_mib else 0
+    ram_slots = args.ram_total_mib // meta["ram_chunk_mib"] if args.ram_total_mib else 0
     create_tokens(pool / "cpu", args.cpu_total)
     create_tokens(pool / "ram", ram_slots)
     return 0
