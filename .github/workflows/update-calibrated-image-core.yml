@@ -47,12 +47,12 @@ jobs:
               'image scheduler state',
           )
 
-          old_usage = '''  --image-jobs N|auto      Concurrent lossless image workers. Default: auto.
-                           Automatic mode leaves resources for LZMA and video.'''
-          new_usage = '''  --image-jobs N|auto      Concurrent lossless image workers. Default: auto.
-                           Automatic mode calibrates OxiPNG process/thread fan-out
-                           for this CPU, caches the winner, and yields to LZMA/video.'''
-          once(old_usage, new_usage, 'image usage text')
+          once(
+              'Automatic mode leaves resources for LZMA and video.',
+              'Automatic mode calibrates OxiPNG process/thread fan-out\n'
+              '                           for this CPU, caches the winner, and yields to LZMA/video.',
+              'image usage text',
+          )
 
           start = text.index('# Image workers run beside LZMA. Automatic mode now targets full CPU')
           end = text.index('\n\nVIDEO_PARALLEL_RESERVE_MIB=0', start)
