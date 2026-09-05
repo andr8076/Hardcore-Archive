@@ -1,0 +1,431 @@
+#!/usr/bin/env python3
+from pathlib import Path
+
+
+def replace_once(text: str, old: str, new: str, label: str) -> str:
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"{label}: expected one match, found {count}")
+    return text.replace(old, new, 1)
+
+
+# Resource runner: capacity rounds down, claims round up.
+path = Path("lib/hardcore-archive-resource-run.py")
+text = path.read_text(encoding="utf-8")
+text = replace_once(text, "DEFAULT_RAM_CHUNK_MIB = 256", "DEFAULT_RAM_CHUNK_MIB = 64", "RAM chunk")
+text = replace_once(
+    text,
+    "    ram_max_slots = math.ceil(args.ram_max_mib / args.ram_chunk_mib)\n"
+    "    ram_initial_slots = math.ceil(args.ram_initial_mib / args.ram_chunk_mib) if args.ram_initial_mib else 0\n",
+    "    # Capacity rounds down so tokenization can never expose more RAM than\n"
+    "    # the caller declared safe. Individual claims still round upward.\n"
+    "    ram_max_slots = args.ram_max_mib // args.ram_chunk_mib\n"
+    "    ram_initial_slots = args.ram_initial_mib // args.ram_chunk_mib if args.ram_initial_mib else 0\n"
+    "    if ram_max_slots < 1:\n"
+    "        raise RuntimeError(\"RAM pool maximum is smaller than one token chunk\")\n",
+    "RAM init rounding",
+)
+text = replace_once(
+    text,
+    "    ram_slots = math.ceil(args.ram_total_mib / meta[\"ram_chunk_mib\"]) if args.ram_total_mib else 0\n",
+    "    ram_slots = args.ram_total_mib // meta[\"ram_chunk_mib\"] if args.ram_total_mib else 0\n",
+    "RAM expansion rounding",
+)
+path.write_text(text, encoding="utf-8")
+
+# Shell policy: fixed 64-MiB accounting granularity.
+path = Path("lib/resource-pool.sh")
+text = path.read_text(encoding="utf-8")
+text = replace_once(
+    text,
+    '        --ram-initial-mib "$ram_initial" \\\n        --ram-max-mib "$ram_max"\n',
+    '        --ram-initial-mib "$ram_initial" \\\n        --ram-max-mib "$ram_max" \\\n        --ram-chunk-mib 64\n',
+    "resource pool RAM chunk",
+)
+path.write_text(text, encoding="utf-8")
+
+# Image helper: use the actual flexible CPU grant from the pool.
+path = Path("lib/hardcore-archive-image-helper.sh")
+text = path.read_text(encoding="utf-8")
+text = replace_once(
+    text,
+    '''if [[ ${1:-} == --worker-direct ]]; then
+    shift
+    optimize_one "$@"
+    exit 0
+fi''',
+    '''if [[ ${1:-} == --worker-direct ]]; then
+    shift
+    if [[ ${HARDCORE_RESOURCE_GRANTED_CPU:-} =~ ^[1-9][0-9]*$ ]]; then
+        # The shared scheduler may grant fewer CPUs than this PNG's calibrated
+        # maximum while LZMA/video are active. Use the actual grant.
+        set -- "$1" "$2" "$3" "$4" "$5" "$HARDCORE_RESOURCE_GRANTED_CPU" "$7"
+    fi
+    optimize_one "$@"
+    exit 0
+fi''',
+    "image worker CPU grant",
+)
+path.write_text(text, encoding="utf-8")
+
+# Static archive engine.
+path = Path("lib/hardcore-archive-core.sh")
+text = path.read_text(encoding="utf-8")
+text = replace_once(
+    text,
+    'source "$(dirname -- "${BASH_SOURCE[0]}")/images.sh"\n',
+    'source "$(dirname -- "${BASH_SOURCE[0]}")/images.sh"\n'
+    'source "$(dirname -- "${BASH_SOURCE[0]}")/resource-pool.sh"\n',
+    "resource pool source",
+)
+text = replace_once(
+    text,
+    "IMAGE_OPTIMIZER_AVAILABLE=false\n",
+    '''IMAGE_OPTIMIZER_AVAILABLE=false
+
+# Per-run shared CPU/RAM scheduler. LZMA2 keeps its full-quality reservation;
+# media workers claim only the remaining capacity until compression completes.
+RESOURCE_POOL_ENABLED=false
+RESOURCE_POOL_NEEDED=false
+RESOURCE_POOL_MODE="not-needed"
+RESOURCE_POOL_DIR=""
+RESOURCE_POOL_RUNNER=""
+RESOURCE_POOL_INITIAL_CPU=0
+RESOURCE_POOL_INITIAL_RAM_MIB=0
+RESOURCE_POOL_MAX_RAM_MIB=0
+RESOURCE_POOL_EXPANDED=false
+RESOURCE_VIDEO_CPU_CLAIM=0
+RESOURCE_VIDEO_QUALITY_THREADS=0
+RESOURCE_VIDEO_QUALITY_ENV="auto"
+RESOURCE_VIDEO_RAM_CLAIM_MIB=0
+RESOURCE_RAM_CHUNK_MIB=64
+''',
+    "resource pool globals",
+)
+
+start = text.index("# Preserve compression quality first. The dictionary above is selected exactly")
+end = text.index("\nFREE_DESTINATION_BYTES=", start)
+new_resource_block = '''# Preserve compression quality first. The dictionary above was selected exactly
+# as if LZMA2 were running alone. Instead of statically shrinking/serializing
+# media work, expose only the CPU/RAM left after that reservation through one
+# crash-safe token pool. Once LZMA2 finishes, the pool expands to the full safe
+# machine budget and waiting media workers can immediately use the released
+# capacity without changing archive quality settings.
+RESOURCE_POOL_RUNNER=${HARDCORE_ARCHIVE_RESOURCE_RUNNER:-"$(dirname -- "${BASH_SOURCE[0]}")/hardcore-archive-resource-run.py"}
+RESOURCE_POOL_DIR="$JOB_WORK_DIR/resource-pool.$$"
+RESOURCE_POOL_MAX_RAM_MIB=$((MEMORY_BUDGET_MIB / RESOURCE_RAM_CHUNK_MIB * RESOURCE_RAM_CHUNK_MIB))
+(( RESOURCE_POOL_MAX_RAM_MIB >= RESOURCE_RAM_CHUNK_MIB )) || \
+    die "Safe RAM budget is too small for shared resource scheduling."
+
+RESOURCE_POOL_INITIAL_CPU=$(hardcore_resource_media_initial_cpu \
+    "$CPU_THREADS" "$THREADS" "$NONVIDEO_COUNT") || die "Could not calculate initial media CPU capacity."
+RESOURCE_POOL_INITIAL_RAM_MIB=$(hardcore_resource_media_initial_ram \
+    "$RESOURCE_POOL_MAX_RAM_MIB" "$ESTIMATED_COMPRESSION_RAM_MIB" "$NONVIDEO_COUNT") || \
+    die "Could not calculate initial media RAM capacity."
+RESOURCE_POOL_INITIAL_RAM_MIB=$((RESOURCE_POOL_INITIAL_RAM_MIB / RESOURCE_RAM_CHUNK_MIB * RESOURCE_RAM_CHUNK_MIB))
+
+RESOURCE_VIDEO_QUALITY_THREADS=$(hardcore_resource_quality_cpu_threads \
+    "$CPU_THREADS" "$QUALITY_CHECK") || die "Could not calculate the video quality CPU claim."
+RESOURCE_VIDEO_CPU_CLAIM=$(hardcore_resource_video_cpu_claim \
+    "$CPU_THREADS" "$QUALITY_CHECK") || die "Could not calculate the video CPU claim."
+if (( RESOURCE_VIDEO_QUALITY_THREADS > 0 )); then
+    RESOURCE_VIDEO_QUALITY_ENV=$RESOURCE_VIDEO_QUALITY_THREADS
+else
+    RESOURCE_VIDEO_QUALITY_ENV=auto
+fi
+
+RESOURCE_VIDEO_RAM_CLAIM_MIB=0
+if $VIDEO_TRANSCODE && $VIDEO_PARALLEL && (( VIDEO_TRANSCODE_COUNT > 0 )); then
+    RESOURCE_VIDEO_RAM_CLAIM_MIB=2048
+    (( RESOURCE_VIDEO_RAM_CLAIM_MIB > RESOURCE_POOL_MAX_RAM_MIB )) && \
+        RESOURCE_VIDEO_RAM_CLAIM_MIB=$RESOURCE_POOL_MAX_RAM_MIB
+fi
+
+RESOURCE_POOL_NEEDED=false
+if (( IMAGE_COUNT > 0 && IMAGE_JOBS_EFFECTIVE > 0 )) && \
+   $IMAGE_OPTIMIZE && $IMAGE_OPTIMIZER_AVAILABLE; then
+    RESOURCE_POOL_NEEDED=true
+fi
+if $VIDEO_TRANSCODE && $VIDEO_PARALLEL && (( VIDEO_TRANSCODE_COUNT > 0 )); then
+    RESOURCE_POOL_NEEDED=true
+fi
+
+if $RESOURCE_POOL_NEEDED; then
+    [[ -f $RESOURCE_POOL_RUNNER ]] || die "Trusted resource scheduler is missing: $RESOURCE_POOL_RUNNER"
+    command -v python3 >/dev/null 2>&1 || die "Shared resource scheduling requires Python 3."
+    RESOURCE_POOL_ENABLED=true
+    if (( NONVIDEO_COUNT == 0 )); then
+        RESOURCE_POOL_EXPANDED=true
+    else
+        RESOURCE_POOL_EXPANDED=false
+    fi
+
+    if $ANALYZE_ONLY; then
+        RESOURCE_POOL_MODE="planned"
+    else
+        rm -rf --one-file-system -- "$RESOURCE_POOL_DIR"
+        hardcore_resource_pool_init \
+            "$RESOURCE_POOL_RUNNER" "$RESOURCE_POOL_DIR" \
+            "$RESOURCE_POOL_INITIAL_CPU" "$CPU_THREADS" \
+            "$RESOURCE_POOL_INITIAL_RAM_MIB" "$RESOURCE_POOL_MAX_RAM_MIB" || \
+            die "Could not initialize the shared CPU/RAM resource pool."
+        RESOURCE_POOL_MODE="active"
+    fi
+
+    # The pool decides whether an image can overlap LZMA/video. Starting a
+    # worker with zero currently available tokens is safe: it waits for release.
+    if (( IMAGE_COUNT > 0 && IMAGE_JOBS_EFFECTIVE > 0 )) && \
+       $IMAGE_OPTIMIZE && $IMAGE_OPTIMIZER_AVAILABLE; then
+        IMAGE_PARALLEL=true
+    fi
+fi
+
+# Keep these plan fields for the batch scheduler. They describe maximum lane
+# claims; actual simultaneous use is bounded dynamically by the pool.
+VIDEO_PARALLEL_RESERVE_MIB=0
+if $VIDEO_TRANSCODE && $VIDEO_PARALLEL && (( VIDEO_TRANSCODE_COUNT > 0 )); then
+    VIDEO_PARALLEL_RESERVE_MIB=$RESOURCE_VIDEO_RAM_CLAIM_MIB
+fi
+IMAGE_PARALLEL_RESERVE_MIB=0
+if (( IMAGE_COUNT > 0 && IMAGE_JOBS_EFFECTIVE > 0 )) && \
+   $IMAGE_OPTIMIZE && $IMAGE_OPTIMIZER_AVAILABLE; then
+    IMAGE_PARALLEL_RESERVE_MIB=$((IMAGE_JOBS_EFFECTIVE * 256))
+fi
+'''
+text = text[:start] + new_resource_block + text[end:]
+
+plan_anchor = 'printf \'RAM kept free:           %s MiB\\n\' "$OS_RESERVE_MIB"\n'
+text = replace_once(
+    text,
+    plan_anchor,
+    plan_anchor + '''printf 'Shared resource pool:    %s\\n' "$RESOURCE_POOL_MODE"
+if $RESOURCE_POOL_ENABLED; then
+    printf 'Initial media CPU pool:  %s / %s logical threads\\n' "$RESOURCE_POOL_INITIAL_CPU" "$CPU_THREADS"
+    printf 'Initial media RAM pool:  %s / %s MiB\\n' "$RESOURCE_POOL_INITIAL_RAM_MIB" "$RESOURCE_POOL_MAX_RAM_MIB"
+    if $VIDEO_TRANSCODE && $VIDEO_PARALLEL && (( VIDEO_TRANSCODE_COUNT > 0 )); then
+        printf 'Video resource claim:    %s CPU / %s MiB RAM\\n' "$RESOURCE_VIDEO_CPU_CLAIM" "$RESOURCE_VIDEO_RAM_CLAIM_MIB"
+    fi
+fi
+''',
+    "resource pool plan output",
+)
+text = replace_once(
+    text,
+    '''        printf 'Image execution:         %s\\n' "$($IMAGE_PARALLEL && printf 'Parallel with LZMA2' || printf 'Sequential before LZMA2')"''',
+    '''        printf 'Image execution:         %s\\n' "$($IMAGE_PARALLEL && printf 'Parallel via shared pool with LZMA2 (token-gated)' || printf 'Sequential before LZMA2')"''',
+    "image execution plan",
+)
+
+# Pass the pool to image workers.
+image_start = text.index("start_image_pipeline() {")
+image_end = text.index("\n}\n\nwait_for_image_pipeline()", image_start) + 2
+segment = text[image_start:image_end]
+segment = replace_once(
+    segment,
+    'start_image_pipeline() {\n    (( IMAGE_COUNT > 0 )) || return 0\n    prepare_image_stage\n',
+    'start_image_pipeline() {\n    local -a resource_args=()\n    (( IMAGE_COUNT > 0 )) || return 0\n    prepare_image_stage\n    if $RESOURCE_POOL_ENABLED; then\n        resource_args=(--resource-pool "$RESOURCE_POOL_DIR" --resource-runner "$RESOURCE_POOL_RUNNER")\n    fi\n',
+    "image resource args",
+)
+old_threads = '            --threads-per-worker "$IMAGE_THREADS_PER_WORKER" &'
+if segment.count(old_threads) != 2:
+    raise SystemExit(f"image helper launch: expected two matches, found {segment.count(old_threads)}")
+segment = segment.replace(
+    old_threads,
+    '            --threads-per-worker "$IMAGE_THREADS_PER_WORKER" \\\n            "${resource_args[@]}" &',
+)
+text = text[:image_start] + segment + text[image_end:]
+
+# Parallel video receives one exact pool claim.
+video_start = text.index("start_video_pipeline() {")
+video_end = text.index("\n}\n\nwait_for_video_pipeline()", video_start) + 2
+segment = text[video_start:video_end]
+segment = replace_once(segment, "start_video_pipeline() {\n", "start_video_pipeline() {\n    local -a launch_command\n", "video launch array")
+old_launch = '''    if command -v setsid >/dev/null 2>&1; then
+        setsid env _IS_CHILD_PROCESS=1 bash "$VIDEO_HELPER" "${VIDEO_HELPER_ARGS[@]}" \
+            >"$VIDEO_LOG" 2>&1 &
+        VIDEO_PIPELINE_GROUP=true
+    else
+        env _IS_CHILD_PROCESS=1 bash "$VIDEO_HELPER" "${VIDEO_HELPER_ARGS[@]}" \
+            >"$VIDEO_LOG" 2>&1 &
+        VIDEO_PIPELINE_GROUP=false
+    fi'''
+new_launch = '''    launch_command=(
+        env _IS_CHILD_PROCESS=1
+        HARDCORE_ARCHIVE_VIDEO_QUALITY_THREADS="$RESOURCE_VIDEO_QUALITY_ENV"
+        bash "$VIDEO_HELPER" "${VIDEO_HELPER_ARGS[@]}"
+    )
+    if $RESOURCE_POOL_ENABLED && $VIDEO_PARALLEL; then
+        launch_command=(
+            python3 "$RESOURCE_POOL_RUNNER" run
+            --pool "$RESOURCE_POOL_DIR"
+            --cpu-min "$RESOURCE_VIDEO_CPU_CLAIM"
+            --cpu-max "$RESOURCE_VIDEO_CPU_CLAIM"
+            --ram-mib "$RESOURCE_VIDEO_RAM_CLAIM_MIB"
+            --label video
+            --priority high
+            -- "${launch_command[@]}"
+        )
+    fi
+
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "${launch_command[@]}" >"$VIDEO_LOG" 2>&1 &
+        VIDEO_PIPELINE_GROUP=true
+    else
+        "${launch_command[@]}" >"$VIDEO_LOG" 2>&1 &
+        VIDEO_PIPELINE_GROUP=false
+    fi'''
+segment = replace_once(segment, old_launch, new_launch, "video resource launch")
+text = text[:video_start] + segment + text[video_end:]
+
+# Expand the media pool immediately when LZMA2 releases its reservation.
+execution_marker = '\ncd -- "$SOURCE_PARENT"\n\nif (( VIDEO_COUNT > 0 )) && $VIDEO_TRANSCODE; then\n'
+marker = text.rfind(execution_marker)
+if marker < 0:
+    raise SystemExit("execution marker not found")
+wrapper = '''
+resource_pool_release_lzma_reservation() {
+    if $RESOURCE_POOL_ENABLED && ! $RESOURCE_POOL_EXPANDED; then
+        hardcore_resource_pool_expand_full \
+            "$RESOURCE_POOL_RUNNER" "$RESOURCE_POOL_DIR" \
+            "$CPU_THREADS" "$RESOURCE_POOL_MAX_RAM_MIB" || \
+            die "Could not release LZMA2 capacity into the shared resource pool."
+        RESOURCE_POOL_EXPANDED=true
+        printf '\\nShared resource pool: LZMA2 finished; CPU/RAM reservation released to waiting media workers.\\n'
+    fi
+}
+
+compress_nonvideo_with_resources() {
+    compress_nonvideo_with_fallback "$@"
+    resource_pool_release_lzma_reservation
+}
+'''
+text = text[:marker] + "\n" + wrapper + text[marker:]
+execution_start = text.rfind(execution_marker)
+execution = text[execution_start:]
+old_call = 'compress_nonvideo_with_fallback "$DICTIONARY_MIB"'
+if execution.count(old_call) != 5:
+    raise SystemExit(f"LZMA execution calls: expected five, found {execution.count(old_call)}")
+execution = execution.replace(old_call, 'compress_nonvideo_with_resources "$DICTIONARY_MIB"')
+text = text[:execution_start] + execution
+
+# Add scheduler state to the persistent report if the known report block matches.
+report_old = '''        printf 'Image mode/workers: %s / %s\\n' "$IMAGE_MODE" "$IMAGE_JOBS_EFFECTIVE"
+    printf 'Image scheduler: %s\\n' "$IMAGE_SCHEDULER_SOURCE"'''
+if report_old in text:
+    report_new = report_old + '''
+        printf 'Shared resource pool: %s\\n' "$RESOURCE_POOL_MODE"
+        if $RESOURCE_POOL_ENABLED; then
+            printf 'Initial media pool: %s/%s CPU, %s/%s MiB RAM\\n' \
+                "$RESOURCE_POOL_INITIAL_CPU" "$CPU_THREADS" "$RESOURCE_POOL_INITIAL_RAM_MIB" "$RESOURCE_POOL_MAX_RAM_MIB"
+        fi'''
+    text = text.replace(report_old, report_new, 1)
+
+path.write_text(text, encoding="utf-8")
+
+# Frontend policy suite.
+path = Path("tests/frontend-policy.sh")
+text = path.read_text(encoding="utf-8")
+text = replace_once(
+    text,
+    'bash "$ROOT/tests/resource-utilization.sh"\n',
+    'bash "$ROOT/tests/resource-utilization.sh"\nbash "$ROOT/tests/resource-pool.sh"\n',
+    "frontend resource pool test",
+)
+path.write_text(text, encoding="utf-8")
+
+# Module/static wiring checks.
+path = Path("tests/module-layout.sh")
+text = path.read_text(encoding="utf-8")
+text = replace_once(
+    text,
+    "    common platform config doctor inventory planner scheduler archive video images timing calibration-identity video-acceleration media-policy runtime\n",
+    "    common platform config doctor inventory planner scheduler archive video images resource-pool timing calibration-identity video-acceleration media-policy runtime\n",
+    "module list",
+)
+text = replace_once(
+    text,
+    'python3 -m py_compile "$ROOT/lib/hardcore-archive-image-calibrate.py"\n',
+    'python3 -m py_compile "$ROOT/lib/hardcore-archive-image-calibrate.py"\npython3 -m py_compile "$ROOT/lib/hardcore-archive-resource-run.py"\n',
+    "resource runner compile",
+)
+anchor = 'grep -Fq \'HARDCORE_ARCHIVE_IMAGE_SCHEDULER_CACHE_DIR\' "$ROOT/lib/hardcore-archive-core.sh"\n'
+text = replace_once(
+    text,
+    anchor,
+    anchor
+    + '''grep -Fq 'source "$(dirname -- "${BASH_SOURCE[0]}")/resource-pool.sh"' "$ROOT/lib/hardcore-archive-core.sh"
+grep -Fq 'hardcore_resource_pool_init' "$ROOT/lib/hardcore-archive-core.sh"
+grep -Fq 'compress_nonvideo_with_resources' "$ROOT/lib/hardcore-archive-core.sh"
+grep -Fq 'hardcore_resource_pool_expand_full' "$ROOT/lib/hardcore-archive-core.sh"
+grep -Fq -- '--resource-pool "$RESOURCE_POOL_DIR"' "$ROOT/lib/hardcore-archive-core.sh"
+grep -Fq 'HARDCORE_RESOURCE_GRANTED_CPU' "$ROOT/lib/hardcore-archive-image-helper.sh"
+''',
+    "layout resource assertions",
+)
+path.write_text(text, encoding="utf-8")
+
+# Conservative RAM-rounding test.
+path = Path("tests/resource-pool.sh")
+text = path.read_text(encoding="utf-8")
+final = "printf 'Shared resource-pool tests passed.\\n'\n"
+addition = r'''# RAM capacity rounds down, while claims round up.
+POOL="$TMP/ram-rounding"
+python3 "$RUNNER" init \
+    --pool "$POOL" --cpu-initial 1 --cpu-max 1 \
+    --ram-initial-mib 65 --ram-max-mib 300
+set +e
+python3 "$RUNNER" run \
+    --pool "$POOL" --cpu-min 1 --cpu-max 1 --ram-mib 128 \
+    --label rounding-block --wait-timeout 0.2 -- true >/dev/null 2>&1
+rounding_rc=$?
+set -e
+[[ $rounding_rc != 0 ]]
+python3 "$RUNNER" expand --pool "$POOL" --cpu-total 1 --ram-total-mib 130
+ROUNDING_OUT="$TMP/rounding.out"; export ROUNDING_OUT
+python3 "$RUNNER" run \
+    --pool "$POOL" --cpu-min 1 --cpu-max 1 --ram-mib 128 \
+    --label rounding-pass --wait-timeout 2 -- \
+    sh -c 'printf "%s\n" "$HARDCORE_RESOURCE_GRANTED_RAM_MIB" > "$ROUNDING_OUT"'
+[[ $(cat "$ROUNDING_OUT") == 128 ]]
+
+'''
+text = replace_once(text, final, addition + final, "RAM rounding test")
+path.write_text(text, encoding="utf-8")
+
+# Image integration test: actual grant replaces calibrated maximum.
+path = Path("tests/image-performance-policy.sh")
+text = path.read_text(encoding="utf-8")
+text = replace_once(
+    text,
+    'IMAGES="$ROOT/lib/images.sh"\n',
+    'IMAGES="$ROOT/lib/images.sh"\nRUNNER="$ROOT/lib/hardcore-archive-resource-run.py"\n',
+    "image test runner",
+)
+anchor = "grep -Fq 'oxipng-maximum+bounded-zopfli' \"$TMP/result\"\n\n"
+resource_case = r'''grep -Fq 'oxipng-maximum+bounded-zopfli' "$TMP/result"
+
+RESOURCE_POOL="$TMP/image-resource-pool"
+python3 "$RUNNER" init \
+    --pool "$RESOURCE_POOL" --cpu-initial 2 --cpu-max 6 \
+    --ram-initial-mib 256 --ram-max-mib 1024
+: > "$OXI_LOG"
+: > "$NICE_LOG"
+: > "$TMP/result"
+rm -rf "$TMP/stage"; mkdir -p "$TMP/stage"
+bash "$HELPER" \
+    --source-parent "$TMP/source" \
+    --stage-parent "$TMP/stage" \
+    --list "$TMP/list" \
+    --result "$TMP/result" \
+    --log "$TMP/helper.log" \
+    --mode balanced \
+    --jobs 1 \
+    --threads-per-worker 6 \
+    --resource-pool "$RESOURCE_POOL" \
+    --resource-runner "$RUNNER"
+grep -Fq -- '--threads 2' "$OXI_LOG"
+! grep -Fq -- '--threads 6' "$OXI_LOG"
+
+'''
+text = replace_once(text, anchor, resource_case, "image flexible grant test")
+path.write_text(text, encoding="utf-8")
