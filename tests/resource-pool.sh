@@ -28,6 +28,18 @@ export HARDCORE_ARCHIVE_VIDEO_QUALITY_THREADS
 [[ $(hardcore_resource_video_cpu_claim 4 required) == 4 ]]
 [[ $(hardcore_resource_video_cpu_claim 16 off) == 2 ]]
 
+# Nested CPU claims target up to four independent recursive jobs. RAM claims
+# reproduce the child's automatic dictionary sizing and stay on 64 MiB tokens.
+[[ $(hardcore_resource_nested_cpu_max 8 84) == 2 ]]
+[[ $(hardcore_resource_nested_cpu_max 8 2) == 4 ]]
+[[ $(hardcore_resource_nested_cpu_max 8 1) == 8 ]]
+[[ $(hardcore_resource_nested_cpu_max 4 20) == 1 ]]
+small_nested_ram=$(hardcore_resource_nested_ram_claim $((8 * 1024 * 1024)) 4096 4096)
+large_nested_ram=$(hardcore_resource_nested_ram_claim $((1024 * 1024 * 1024)) 4096 4096)
+[[ $small_nested_ram =~ ^[0-9]+$ && $large_nested_ram =~ ^[0-9]+$ ]]
+(( small_nested_ram % 64 == 0 && large_nested_ram % 64 == 0 ))
+(( small_nested_ram < large_nested_ram && large_nested_ram <= 4096 ))
+
 # Flexible image-style claims consume the CPU currently exposed by the pool and
 # publish the exact grant to the executed worker.
 POOL="$TMP/flexible"

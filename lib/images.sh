@@ -6,28 +6,34 @@ HARDCORE_IMAGES_SH_LOADED=1
 
 hardcore_images_runtime_ready() { return 0; }
 
+# Recursive nested workers reserve CPU tokens in their parent's pool. Their
+# child engine still observes the physical host CPU count, so this inherited
+# limit keeps PNG/JPEG planning inside the already-reserved parent grant.
+hardcore_images_effective_cpu_threads() {
+    local cpu_threads=$1 limit=${HARDCORE_ARCHIVE_CPU_LIMIT:-}
+    [[ $cpu_threads =~ ^[1-9][0-9]*$ ]] || return 2
+    if [[ $limit =~ ^[1-9][0-9]*$ ]] && (( limit < cpu_threads )); then
+        cpu_threads=$limit
+    fi
+    printf '%s\n' "$cpu_threads"
+}
+
 # Compatibility helper: automatic image dispatch may have at most one waiting
 # worker per logical CPU because every image worker requires at least one CPU
 # token. RAM is deliberately NOT used here. The shared CPU/RAM pool is the
 # single authority that decides how many workers may actually execute.
 hardcore_images_worker_cap() {
     local cpu_threads=$1 available_mib=${2:-0}
-    [[ $cpu_threads =~ ^[1-9][0-9]*$ ]] || return 2
+    cpu_threads=$(hardcore_images_effective_cpu_threads "$cpu_threads") || return 2
     [[ $available_mib =~ ^[0-9]+$ ]] || return 2
     printf '%s\n' "$cpu_threads"
 }
 
 # Print: dispatch-slots<TAB>threads-per-worker<TAB>cpu-budget
-#
-# `dispatch-slots` only bounds the number of lightweight workers waiting on the
-# shared pool. In automatic mode it cannot restrict useful execution because
-# every worker needs >=1 CPU token and there are only cpu_threads tokens total.
-# Explicit --image-jobs remains a user-requested outer concurrency limit.
 hardcore_images_compute_cpu_schedule() {
     local cpu_threads=$1 image_count=$2 requested_jobs=${3:-auto} available_mib=${4:-0}
     local jobs threads
-
-    [[ $cpu_threads =~ ^[1-9][0-9]*$ ]] || return 2
+    cpu_threads=$(hardcore_images_effective_cpu_threads "$cpu_threads") || return 2
     [[ $image_count =~ ^[0-9]+$ ]] || return 2
     [[ $requested_jobs == auto || $requested_jobs =~ ^[1-9][0-9]*$ ]] || return 2
     [[ $available_mib =~ ^[0-9]+$ ]] || return 2
@@ -36,7 +42,6 @@ hardcore_images_compute_cpu_schedule() {
         printf '0\t1\t0\n'
         return 0
     fi
-
     if [[ $requested_jobs == auto ]]; then
         jobs=$image_count
         (( jobs > cpu_threads )) && jobs=$cpu_threads
@@ -46,7 +51,6 @@ hardcore_images_compute_cpu_schedule() {
         (( jobs > image_count )) && jobs=$image_count
     fi
     (( jobs < 1 )) && jobs=1
-
     threads=$(((cpu_threads + jobs - 1) / jobs))
     (( threads < 1 )) && threads=1
     printf '%s\t%s\t%s\n' "$jobs" "$threads" "$cpu_threads"
@@ -55,7 +59,7 @@ hardcore_images_compute_cpu_schedule() {
 hardcore_images_png_fallback_threads() {
     local cpu_threads=$1 png_count=$2 dispatch_slots=$3 requested_jobs=${4:-auto}
     local png_parallel threads
-    [[ $cpu_threads =~ ^[1-9][0-9]*$ ]] || return 2
+    cpu_threads=$(hardcore_images_effective_cpu_threads "$cpu_threads") || return 2
     [[ $png_count =~ ^[0-9]+$ ]] || return 2
     [[ $dispatch_slots =~ ^[1-9][0-9]*$ ]] || return 2
 
@@ -63,7 +67,6 @@ hardcore_images_png_fallback_threads() {
         printf '1\n'
         return 0
     fi
-
     if [[ $requested_jobs == auto ]]; then
         png_parallel=$png_count
         (( png_parallel > cpu_threads )) && png_parallel=$cpu_threads
@@ -78,15 +81,8 @@ hardcore_images_png_fallback_threads() {
 }
 
 # Print: dispatch-slots<TAB>png-cpu-max<TAB>cpu-budget<TAB>scheduler-source
-#
-# JPEG and PNG workers are intentionally heterogeneous:
-#   * JPEG/optipng workers claim exactly one CPU in the worker helper.
-#   * OxiPNG workers claim 1..png-cpu-max CPUs and use the actual grant.
-#
-# The launcher does not shrink dispatch slots for RAM. The shared resource pool
-# already accounts each active image worker's RAM and is the only runtime gate.
-# OxiPNG calibration therefore tunes only the per-PNG CPU ceiling; its measured
-# process count no longer limits JPEG fan-out or mixed-image dispatch.
+# JPEG workers claim exactly one CPU; OxiPNG claims a flexible range up to the
+# calibrated ceiling. The shared pool remains the runtime authority.
 hardcore_images_choose_cpu_schedule() {
     local cpu_threads=$1 image_count=$2 png_count=$3 requested_jobs=${4:-auto}
     local available_mib=${5:-0} cpu_model=${6:-unknown} analyze_only=${7:-false}
@@ -94,6 +90,7 @@ hardcore_images_choose_cpu_schedule() {
     local calibration_workers calibrated_jobs calibrated_threads calibrated_budget calibrated_source
     local -a args
 
+    cpu_threads=$(hardcore_images_effective_cpu_threads "$cpu_threads") || return 2
     [[ $png_count =~ ^[0-9]+$ ]] || return 2
     (( png_count <= image_count )) || return 2
     fallback=$(hardcore_images_compute_cpu_schedule \
@@ -104,7 +101,6 @@ hardcore_images_choose_cpu_schedule() {
         printf '0\t1\t0\tinactive\n'
         return 0
     fi
-
     png_threads=$(hardcore_images_png_fallback_threads \
         "$cpu_threads" "$png_count" "$jobs" "$requested_jobs") || return 2
 
@@ -117,8 +113,6 @@ hardcore_images_choose_cpu_schedule() {
         return 0
     fi
     if (( png_count == 1 )); then
-        # One PNG can opportunistically consume every CPU token not currently
-        # held by JPEG/LZMA/video work; the resource pool grants only what is free.
         printf '%s\t%s\t%s\theterogeneous-single-png\n' "$jobs" "$cpu_threads" "$budget"
         return 0
     fi
@@ -142,8 +136,6 @@ hardcore_images_choose_cpu_schedule() {
         return 0
     }
 
-    # This only bounds the synthetic PNG calibration wave. It is not a runtime
-    # worker cap and is independent of available RAM.
     calibration_workers=$png_count
     (( calibration_workers > cpu_threads )) && calibration_workers=$cpu_threads
     (( calibration_workers < 1 )) && calibration_workers=1

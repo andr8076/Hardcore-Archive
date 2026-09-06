@@ -5547,6 +5547,10 @@ SWAP_TOTAL_MIB=$((${SWAP_TOTAL_KIB:-0} / 1024))
 SWAP_FREE_MIB=$((${SWAP_FREE_KIB:-0} / 1024))
 
 CPU_THREADS=$(platform_cpu_threads)
+if [[ ${HARDCORE_ARCHIVE_CPU_LIMIT:-} =~ ^[1-9][0-9]*$ ]] && \
+   (( HARDCORE_ARCHIVE_CPU_LIMIT < CPU_THREADS )); then
+    CPU_THREADS=$HARDCORE_ARCHIVE_CPU_LIMIT
+fi
 CPU_MODEL=$(platform_cpu_model)
 [[ -n ${CPU_MODEL:-} ]] || CPU_MODEL="Unknown CPU"
 
@@ -5609,6 +5613,10 @@ MEMORY_BUDGET_MIB=$((MEM_AVAILABLE_MIB - OS_RESERVE_MIB))
 TOTAL_MEMORY_CAP_MIB=$((MEM_TOTAL_MIB * 85 / 100))
 (( MEMORY_BUDGET_MIB > TOTAL_MEMORY_CAP_MIB )) && MEMORY_BUDGET_MIB=$TOTAL_MEMORY_CAP_MIB
 (( MEMORY_BUDGET_MIB < 256 )) && MEMORY_BUDGET_MIB=256
+if [[ ${HARDCORE_ARCHIVE_RAM_LIMIT_MIB:-} =~ ^[1-9][0-9]*$ ]] && \
+   (( HARDCORE_ARCHIVE_RAM_LIMIT_MIB < MEMORY_BUDGET_MIB )); then
+    MEMORY_BUDGET_MIB=$HARDCORE_ARCHIVE_RAM_LIMIT_MIB
+fi
 
 # BT4 needs roughly 10.5-11.5 times the dictionary size for compression.
 # An additional 512 MiB is reserved for 7-Zip buffers and process overhead.
@@ -7670,6 +7678,7 @@ fi
 
 # This function can terminate the process on a fatal archive error, so keep
 # its existing errexit behavior instead of invoking it inside an if-wrapper.
+source "$(dirname -- "${BASH_SOURCE[0]}")/nested.sh"
 NESTED_TIMING_STARTED=$(hardcore_timing_now 2>/dev/null) || NESTED_TIMING_STARTED=0
 prepare_and_add_nested_archives
 hardcore_timing_record nested_processing "$NESTED_TIMING_STARTED" 0
