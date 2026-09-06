@@ -56,23 +56,19 @@ hardcore_resource_quality_cpu_threads() {
 hardcore_resource_video_cpu_claim() {
     local cpu_threads=$1 quality_check=$2 quality claim
     quality=$(hardcore_resource_quality_cpu_threads "$cpu_threads" "$quality_check") || return 2
-    # Hardware video still needs decode/control CPU. Keep the same +2 allowance
-    # used by the existing batch resource planner around VMAF workers.
     claim=$((quality + 2))
     (( claim < 1 )) && claim=1
     (( claim > cpu_threads )) && claim=$cpu_threads
     printf '%s\n' "$claim"
 }
 
-# Nested archives are independent jobs, but each recursive child may itself run
-# LZMA2, JPEG/PNG work and hardware video. Give the pool enough waiting workers
-# to keep the machine busy while keeping each child large enough to run the
-# ratio-preserving two-thread LZMA2 path on ordinary >=8-thread machines.
+# Target at most four independent recursive children. On the common eight-thread
+# machine this gives each busy child two CPU tokens, preserving the normal LZMA2
+# ratio policy while allowing four unrelated nested archives to make progress.
 hardcore_resource_nested_cpu_max() {
     local cpu_threads=$1 nested_count=$2 target cpu_max
     [[ $cpu_threads =~ ^[1-9][0-9]*$ ]] || return 2
     [[ $nested_count =~ ^[1-9][0-9]*$ ]] || return 2
-
     target=$nested_count
     (( target > 4 )) && target=4
     (( target > cpu_threads )) && target=$cpu_threads
@@ -83,24 +79,25 @@ hardcore_resource_nested_cpu_max() {
     printf '%s\n' "$cpu_max"
 }
 
-# Reserve enough RAM for the same automatic LZMA2 dictionary that an isolated
-# recursive child would choose for the archive's declared expanded payload.
-# The claim is rounded up to the resource pool's 64 MiB token size. Smaller
-# archives therefore coexist naturally; a large archive consumes most/all RAM
-# tokens and serializes itself without changing its compression-quality policy.
-hardcore_resource_nested_ram_claim() {
-    local expanded_bytes=$1 pool_max_mib=$2 format_max_mib=${3:-4096}
-    local mib=1048576 expanded_mib max_by_ram limit dict=4 claim candidate
+# Reproduce the core engine's automatic dictionary choice, but against the RAM
+# actually reserved for this recursive worker instead of the whole host. The
+# default 256 MiB headroom covers one image worker overlapping child LZMA2.
+hardcore_resource_nested_dictionary_mib() {
+    local expanded_bytes=$1 pool_max_mib=$2 format_max_mib=${3:-4096} extra_mib=${4:-256}
+    local mib=1048576 expanded_mib usable_mib max_by_ram limit dict=4 candidate
     local -a candidates=(4096 3072 2048 1536 1024 768 512 384 256 192 128 96 64 48 32 24 16 12 8 4)
 
     [[ $expanded_bytes =~ ^[0-9]+$ ]] || return 2
     [[ $pool_max_mib =~ ^[1-9][0-9]*$ ]] || return 2
     [[ $format_max_mib =~ ^[1-9][0-9]*$ ]] || return 2
+    [[ $extra_mib =~ ^[0-9]+$ ]] || return 2
 
     expanded_mib=$(((expanded_bytes + mib - 1) / mib))
     (( expanded_mib < 4 )) && expanded_mib=4
-    if (( pool_max_mib > 512 )); then
-        max_by_ram=$(((pool_max_mib - 512) * 2 / 23))
+    usable_mib=$((pool_max_mib - extra_mib))
+    (( usable_mib < 0 )) && usable_mib=0
+    if (( usable_mib > 512 )); then
+        max_by_ram=$(((usable_mib - 512) * 2 / 23))
     else
         max_by_ram=4
     fi
@@ -110,15 +107,21 @@ hardcore_resource_nested_ram_claim() {
     (( limit > max_by_ram )) && limit=$max_by_ram
     (( limit > expanded_mib )) && limit=$expanded_mib
     (( limit < 4 )) && limit=4
-
     for candidate in "${candidates[@]}"; do
         if (( candidate <= limit )); then
             dict=$candidate
             break
         fi
     done
+    printf '%s\n' "$dict"
+}
 
-    claim=$((dict * 23 / 2 + 512))
+hardcore_resource_nested_ram_claim() {
+    local expanded_bytes=$1 pool_max_mib=$2 format_max_mib=${3:-4096} extra_mib=${4:-256}
+    local dict claim
+    dict=$(hardcore_resource_nested_dictionary_mib \
+        "$expanded_bytes" "$pool_max_mib" "$format_max_mib" "$extra_mib") || return 2
+    claim=$((dict * 23 / 2 + 512 + extra_mib))
     claim=$(((claim + 63) / 64 * 64))
     (( claim > pool_max_mib )) && claim=$pool_max_mib
     (( claim < 64 )) && claim=64
