@@ -25,28 +25,34 @@ jobs:
           text = path.read_text(encoding='utf-8')
 
           cpu_marker = 'CPU_THREADS=$(platform_cpu_threads)\nCPU_MODEL=$(platform_cpu_model)\n'
-          cpu_replacement = '''CPU_THREADS=$(platform_cpu_threads)
-if [[ ${HARDCORE_ARCHIVE_CPU_LIMIT:-} =~ ^[1-9][0-9]*$ ]] && \
-   (( HARDCORE_ARCHIVE_CPU_LIMIT < CPU_THREADS )); then
-    CPU_THREADS=$HARDCORE_ARCHIVE_CPU_LIMIT
-fi
-CPU_MODEL=$(platform_cpu_model)
-'''
+          cpu_replacement = '\n'.join([
+              'CPU_THREADS=$(platform_cpu_threads)',
+              'if [[ ${HARDCORE_ARCHIVE_CPU_LIMIT:-} =~ ^[1-9][0-9]*$ ]] && \\',
+              '   (( HARDCORE_ARCHIVE_CPU_LIMIT < CPU_THREADS )); then',
+              '    CPU_THREADS=$HARDCORE_ARCHIVE_CPU_LIMIT',
+              'fi',
+              'CPU_MODEL=$(platform_cpu_model)',
+              '',
+          ])
           if 'HARDCORE_ARCHIVE_CPU_LIMIT < CPU_THREADS' not in text:
               if text.count(cpu_marker) != 1:
                   raise SystemExit(f'expected one CPU limit insertion point, found {text.count(cpu_marker)}')
               text = text.replace(cpu_marker, cpu_replacement, 1)
 
-          ram_marker = '''MEMORY_BUDGET_MIB=$((MEM_AVAILABLE_MIB - OS_RESERVE_MIB))
-TOTAL_MEMORY_CAP_MIB=$((MEM_TOTAL_MIB * 85 / 100))
-(( MEMORY_BUDGET_MIB > TOTAL_MEMORY_CAP_MIB )) && MEMORY_BUDGET_MIB=$TOTAL_MEMORY_CAP_MIB
-(( MEMORY_BUDGET_MIB < 256 )) && MEMORY_BUDGET_MIB=256
-'''
-          ram_replacement = ram_marker + '''if [[ ${HARDCORE_ARCHIVE_RAM_LIMIT_MIB:-} =~ ^[1-9][0-9]*$ ]] && \
-   (( HARDCORE_ARCHIVE_RAM_LIMIT_MIB < MEMORY_BUDGET_MIB )); then
-    MEMORY_BUDGET_MIB=$HARDCORE_ARCHIVE_RAM_LIMIT_MIB
-fi
-'''
+          ram_lines = [
+              'MEMORY_BUDGET_MIB=$((MEM_AVAILABLE_MIB - OS_RESERVE_MIB))',
+              'TOTAL_MEMORY_CAP_MIB=$((MEM_TOTAL_MIB * 85 / 100))',
+              '(( MEMORY_BUDGET_MIB > TOTAL_MEMORY_CAP_MIB )) && MEMORY_BUDGET_MIB=$TOTAL_MEMORY_CAP_MIB',
+              '(( MEMORY_BUDGET_MIB < 256 )) && MEMORY_BUDGET_MIB=256',
+          ]
+          ram_marker = '\n'.join(ram_lines) + '\n'
+          ram_replacement = '\n'.join(ram_lines + [
+              'if [[ ${HARDCORE_ARCHIVE_RAM_LIMIT_MIB:-} =~ ^[1-9][0-9]*$ ]] && \\',
+              '   (( HARDCORE_ARCHIVE_RAM_LIMIT_MIB < MEMORY_BUDGET_MIB )); then',
+              '    MEMORY_BUDGET_MIB=$HARDCORE_ARCHIVE_RAM_LIMIT_MIB',
+              'fi',
+              '',
+          ])
           if 'HARDCORE_ARCHIVE_RAM_LIMIT_MIB < MEMORY_BUDGET_MIB' not in text:
               if text.count(ram_marker) != 1:
                   raise SystemExit(f'expected one RAM limit insertion point, found {text.count(ram_marker)}')
