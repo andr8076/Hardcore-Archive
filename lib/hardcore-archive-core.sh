@@ -7670,6 +7670,7 @@ fi
 
 # This function can terminate the process on a fatal archive error, so keep
 # its existing errexit behavior instead of invoking it inside an if-wrapper.
+source "$(dirname -- "${BASH_SOURCE[0]}")/nested.sh"
 NESTED_TIMING_STARTED=$(hardcore_timing_now 2>/dev/null) || NESTED_TIMING_STARTED=0
 prepare_and_add_nested_archives
 hardcore_timing_record nested_processing "$NESTED_TIMING_STARTED" 0
