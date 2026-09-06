@@ -227,8 +227,8 @@ optimize_one() {
 if [[ ${1:-} == --worker-direct ]]; then
     shift
     if [[ ${HARDCORE_RESOURCE_GRANTED_CPU:-} =~ ^[1-9][0-9]*$ ]]; then
-        # The shared scheduler may grant fewer CPUs than this PNG's calibrated
-        # maximum while LZMA/video are active. Use the actual grant.
+        # OxiPNG consumes the actual flexible grant. JPEG workers are exact
+        # one-CPU claims, so this also keeps their direct execution at one CPU.
         set -- "$1" "$2" "$3" "$4" "$5" "$HARDCORE_RESOURCE_GRANTED_CPU" "$7"
     fi
     optimize_one "$@"
@@ -237,13 +237,20 @@ fi
 
 if [[ ${1:-} == --worker ]]; then
     shift
-    # Worker arguments are: source stage result log mode threads relative.
+    # Worker arguments are: source stage result log mode png_cpu_max relative.
+    # JPEG/optipng are file-parallel and claim exactly one CPU. OxiPNG alone may
+    # claim a flexible CPU range; the resource pool decides the actual grant.
     relative=${7:-}
     requested_threads=${6:-1}
     worker_cpu_max=1
+    worker_label='image-single-cpu'
     lower_relative=${relative,,}
     if [[ $lower_relative == *.png ]] && has oxipng; then
         worker_cpu_max=$requested_threads
+        worker_label='image-png'
+    elif [[ $lower_relative == *.jpg || $lower_relative == *.jpeg || $lower_relative == *.jpe || $lower_relative == *.jfif ]]; then
+        worker_cpu_max=1
+        worker_label='image-jpeg'
     fi
     [[ $worker_cpu_max =~ ^[1-9][0-9]*$ ]] || worker_cpu_max=1
 
@@ -253,7 +260,7 @@ if [[ ${1:-} == --worker ]]; then
             --cpu-min 1 \
             --cpu-max "$worker_cpu_max" \
             --ram-mib 256 \
-            --label image \
+            --label "$worker_label" \
             --priority low \
             -- bash "$0" --worker-direct "$@"
     fi
@@ -302,8 +309,9 @@ fi
 : >"$result_file"
 : >"$log_file"
 worker_launcher=(bash)
-# Image workers remain lower priority as a second line of defense. The shared
-# token pool now provides the primary CPU/RAM coordination with video and LZMA.
+# Image workers remain lower priority as a second line of defense. In automatic
+# scheduling `jobs` is at most the CPU-token count, so this launcher bound never
+# constrains useful execution beyond the shared pool's >=1 CPU requirement.
 if has nice; then
     worker_launcher=(nice -n 5 bash)
 fi
