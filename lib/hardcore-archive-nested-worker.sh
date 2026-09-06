@@ -2,22 +2,10 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-source_parent=''
-relative=''
-output_rel=''
-stage_parent=''
-task_dir=''
-result_file=''
-log_file=''
-seven_zip=''
-script_path=''
-depth=0
-max_depth=0
-video_transcode=false
-video_encoder=''
-calibration_namespace=''
-gpu_lock=''
-diagnostics_dir=''
+source_parent=''; relative=''; output_rel=''; stage_parent=''; task_dir=''
+result_file=''; log_file=''; seven_zip=''; script_path=''
+depth=0; max_depth=0; dictionary_mib=4
+video_transcode=false; video_encoder=''; calibration_namespace=''; gpu_lock=''; diagnostics_dir=''
 declare -a inherited=()
 
 while (( $# > 0 )); do
@@ -33,6 +21,7 @@ while (( $# > 0 )); do
         --script) script_path=$2; shift 2 ;;
         --depth) depth=$2; shift 2 ;;
         --max-depth) max_depth=$2; shift 2 ;;
+        --dictionary-mib) dictionary_mib=$2; shift 2 ;;
         --video-transcode) video_transcode=$2; shift 2 ;;
         --video-encoder) video_encoder=$2; shift 2 ;;
         --calibration-namespace) calibration_namespace=$2; shift 2 ;;
@@ -45,7 +34,7 @@ done
 
 [[ -n $source_parent && -n $relative && -n $output_rel && -n $stage_parent && -n $task_dir ]] || exit 2
 [[ -n $result_file && -n $log_file && -n $seven_zip && -n $script_path ]] || exit 2
-[[ $depth =~ ^[0-9]+$ && $max_depth =~ ^[0-9]+$ ]] || exit 2
+[[ $depth =~ ^[0-9]+$ && $max_depth =~ ^[0-9]+$ && $dictionary_mib =~ ^[1-9][0-9]*$ ]] || exit 2
 case $video_transcode in true|false) ;; *) exit 2 ;; esac
 
 mkdir -p -- "$task_dir" "$(dirname -- "$result_file")" "$(dirname -- "$log_file")"
@@ -68,8 +57,11 @@ grant_cpu=${HARDCORE_RESOURCE_GRANTED_CPU:-1}
 grant_ram=${HARDCORE_RESOURCE_GRANTED_RAM_MIB:-0}
 [[ $grant_cpu =~ ^[1-9][0-9]*$ ]] || grant_cpu=1
 [[ $grant_ram =~ ^[1-9][0-9]*$ ]] || grant_ram=256
-build_threads=$grant_cpu
-(( build_threads > 2 )) && build_threads=2
+lzma_threads=$grant_cpu
+(( lzma_threads > 2 )) && lzma_threads=2
+image_jobs=$grant_cpu
+(( image_jobs > 4 )) && image_jobs=4
+(( image_jobs < 1 )) && image_jobs=1
 
 cleanup() {
     rm -rf --one-file-system -- "$extracted" "$normalized" "$child_work" 2>/dev/null || true
@@ -119,30 +111,33 @@ contains_direct_video() {
     printf 'Nested archive: %s\n' "$relative"
     printf 'Depth: %s\n' "$((depth + 1))"
     printf 'Resource grant: %s CPU / %s MiB RAM\n' "$grant_cpu" "$grant_ram"
+    printf 'Recursive policy: dictionary %s MiB / LZMA threads %s / image jobs %s\n' \
+        "$dictionary_mib" "$lzma_threads" "$image_jobs"
     printf 'Started: %s\n\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
 } >> "$log_file"
 
-if (( depth >= max_depth )); then
-    fallback max-depth-reached
-    exit 0
-fi
-
+if (( depth >= max_depth )); then fallback max-depth-reached; exit 0; fi
 if ! "$seven_zip" x -y -spd -o"$extracted" "$input" >>"$log_file" 2>&1; then
-    fallback source-extraction-failed
-    exit 0
+    fallback source-extraction-failed; exit 0
 fi
 
 child_rc=0
 child_diag=${diagnostics_dir:-$task_dir/diagnostics}
 mkdir -p -- "$child_diag"
+# The parent resource runner is accounting, not an OS cgroup. Pin every known
+# recursive concurrency knob to the actual grant. Images additionally honor
+# HARDCORE_ARCHIVE_CPU_LIMIT; grandchildren build a hierarchical pool capped by
+# these same CPU/RAM values. Video is sequential inside a nested child so its
+# hardware-memory envelope does not overlap child LZMA/image work.
 child_command=(
     env
     HARDCORE_ARCHIVE_INHIBITED=1
     HARDCORE_ARCHIVE_DEPENDENCIES_APPROVED=1
     HARDCORE_ARCHIVE_NESTED_CHILD=1
-    HARDCORE_ARCHIVE_PARENT_CPU_GRANT="$grant_cpu"
-    HARDCORE_ARCHIVE_PARENT_RAM_GRANT_MIB="$grant_ram"
+    HARDCORE_ARCHIVE_CPU_LIMIT="$grant_cpu"
+    HARDCORE_ARCHIVE_RAM_LIMIT_MIB="$grant_ram"
     HARDCORE_ARCHIVE_PARENT_GPU_LOCK="$gpu_lock"
+    HARDCORE_ARCHIVE_VIDEO_QUALITY_THREADS="$grant_cpu"
     HARDCORE_ARCHIVE_CALIBRATION_NAMESPACE="$calibration_namespace"
     HARDCORE_ARCHIVE_DIAGNOSTIC_DIR="$child_diag"
     HARDCORE_ARCHIVE_LIVE_LOG="$log_file"
@@ -150,14 +145,17 @@ child_command=(
     HARDCORE_ARCHIVE_NESTED_DEPTH=$((depth + 1))
     bash "$script_path"
     "${inherited[@]}"
+    --dictionary "${dictionary_mib}m"
+    --threads "$lzma_threads"
+    --image-jobs "$image_jobs"
+    --video-sequential
     --work-dir "$child_work"
     "$extracted" "$child_archive"
 )
 
-# CPU/RAM remain independently token-gated. Hardware video is a physical
-# single-lane device on the parent job, so conservatively hold the inherited
-# GPU lock for recursive children that directly contain video. Deeper nested
-# workers inherit the same lock and apply it when their video becomes visible.
+# Hardware video is a physical single-lane device. CPU/RAM remain parallel, but
+# recursive children with direct video conservatively share the inherited GPU
+# lock. Deeper workers inherit and apply exactly the same lock.
 if [[ $video_transcode == true && -n $gpu_lock ]] && contains_direct_video; then
     mkdir -p -- "$(dirname -- "$gpu_lock")"
     flock "$gpu_lock" "${child_command[@]}" >>"$log_file" 2>&1 || child_rc=$?
@@ -176,8 +174,7 @@ if (( child_rc != 0 )); then
 fi
 
 if ! "$seven_zip" x -y -spd -o"$normalized" "$child_archive" >>"$log_file" 2>&1; then
-    fallback child-extraction-failed
-    exit 0
+    fallback child-extraction-failed; exit 0
 fi
 
 remove_internal_entries "$normalized"
@@ -189,14 +186,12 @@ if (( root_count == 1 )); then
 fi
 
 if ! (cd -- "$content_root" && "$seven_zip" a "$full_output" \
-    -t7z -m0=lzma2 -mx=9 -ms=on "-mmt=${build_threads}" -spd -scsUTF-8 -bsp1 -y .) >>"$log_file" 2>&1; then
-    fallback candidate-build-failed
-    exit 0
+    -t7z -m0=lzma2 -mx=9 -ms=on "-mmt=${lzma_threads}" -spd -scsUTF-8 -bsp1 -y .) >>"$log_file" 2>&1; then
+    fallback candidate-build-failed; exit 0
 fi
 if ! "$seven_zip" t "$full_output" >>"$log_file" 2>&1; then
     candidate_size=$(stat -c '%s' -- "$full_output" 2>/dev/null || printf 0)
-    fallback candidate-integrity-failed "$candidate_size"
-    exit 0
+    fallback candidate-integrity-failed "$candidate_size"; exit 0
 fi
 
 candidate_size=$(stat -c '%s' -- "$full_output" 2>/dev/null || printf 0)
@@ -205,5 +200,4 @@ if (( candidate_size > 0 && candidate_size < original_size )); then
 else
     fallback candidate-not-smaller "$candidate_size"
 fi
-
 printf 'Finished: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" >> "$log_file"
