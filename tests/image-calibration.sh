@@ -111,10 +111,26 @@ cat "$TMP/concurrent-a.out" "$TMP/concurrent-b.out" > "$TMP/concurrent.out"
 concurrent_calls=$(wc -l < "$OXI_CALLS")
 (( concurrent_calls >= 7 && concurrent_calls <= 10 ))
 
-# Exercise the shell integration independently of benchmark timing.
+# Exercise heterogeneous shell integration independently of benchmark timing.
+# Calibration controls only the PNG CPU ceiling; total image dispatch stays at
+# the CPU-token count so JPEG workers are never constrained by a PNG result.
+CALIB_ARGS="$TMP/calibrator.args"
+export CALIB_ARGS
 cat > "$TMP/stub-calibrator.py" <<'PY'
 #!/usr/bin/env python3
-print("4\t2\t8\tcalibrated-cache")
+import os, sys
+args=sys.argv[1:]
+with open(os.environ['CALIB_ARGS'],'a',encoding='utf-8') as handle:
+    handle.write(' '.join(args)+'\n')
+max_workers=int(args[args.index('--max-workers')+1])
+cpu=int(args[args.index('--cpu-threads')+1])
+if max_workers <= 2:
+    jobs=max_workers
+    threads=(cpu+jobs-1)//jobs
+else:
+    jobs=4
+    threads=(cpu+jobs-1)//jobs
+print(f"{jobs}\t{threads}\t{cpu}\tcalibrated-cache")
 PY
 chmod +x "$TMP/stub-calibrator.py"
 PATH="$TMP/bin:$PATH"
@@ -125,20 +141,36 @@ export HARDCORE_ARCHIVE_IMAGE_SCHEDULER_CACHE_DIR="$TMP/cache"
 source "$IMAGES"
 
 chosen=$(hardcore_images_choose_cpu_schedule 8 10 10 auto 8192 fixture false)
-[[ $chosen == $'4\t2\t8\tcalibrated-cache' ]]
+[[ $chosen == $'8\t2\t8\theterogeneous-calibrated-cache' ]]
 
+# Available RAM no longer changes dispatch or calibration fan-out.
+low_ram=$(hardcore_images_choose_cpu_schedule 8 10 10 auto 512 fixture false)
+[[ $low_ram == $'8\t2\t8\theterogeneous-calibrated-cache' ]]
+
+# Two PNGs may each flex up to four CPUs; the launcher still has two slots.
 clamped=$(hardcore_images_choose_cpu_schedule 8 2 2 auto 8192 fixture false)
-[[ $clamped == $'2\t4\t8\tcalibrated-cache-clamped' ]]
+[[ $clamped == $'2\t4\t8\theterogeneous-calibrated-cache' ]]
+grep -Fq -- '--max-workers 2' "$CALIB_ARGS"
 
+# JPEG-heavy mixed sets still use PNG calibration instead of forcing the whole
+# lane down to the old one-thread heuristic.
 jpeg_dominant=$(hardcore_images_choose_cpu_schedule 8 100 10 auto 8192 fixture false)
-[[ $jpeg_dominant == $'8\t1\t8\theuristic-jpeg-dominant' ]]
+[[ $jpeg_dominant == $'8\t2\t8\theterogeneous-calibrated-cache' ]]
 
+# Explicit image-jobs remains an intentional user cap. JPEG workers still claim
+# one CPU; PNG workers may flex within the CPU share implied by the requested fan-out.
 explicit=$(hardcore_images_choose_cpu_schedule 8 100 10 3 8192 fixture false)
-[[ $explicit == $'3\t3\t8\texplicit' ]]
+[[ $explicit == $'3\t3\t8\theterogeneous-explicit' ]]
+
+single_png=$(hardcore_images_choose_cpu_schedule 8 100 1 auto 8192 fixture false)
+[[ $single_png == $'8\t8\t8\theterogeneous-single-png' ]]
+
+jpeg_only=$(hardcore_images_choose_cpu_schedule 8 100 0 auto 8192 fixture false)
+[[ $jpeg_only == $'8\t1\t8\theterogeneous-jpeg-only' ]]
 
 export HARDCORE_ARCHIVE_IMAGE_CALIBRATION_DISABLE=1
 disabled=$(hardcore_images_choose_cpu_schedule 8 10 10 auto 8192 fixture false)
-[[ $disabled == $'8\t1\t8\theuristic-disabled' ]]
+[[ $disabled == $'8\t1\t8\theterogeneous-heuristic-disabled' ]]
 unset HARDCORE_ARCHIVE_IMAGE_CALIBRATION_DISABLE
 
-printf 'Image scheduler calibration tests passed.\n'
+printf 'Heterogeneous image scheduler calibration tests passed.\n'
