@@ -35,7 +35,8 @@ chmod +x "$TMP/bin/fake7z"
 
 # The fake worker deliberately finishes b before a. It still runs through the
 # real shared pool, records its actual token grant, and creates a valid smaller
-# staged candidate/result row.
+# staged candidate/result row. mkdir is the portable cross-platform lock here;
+# the production pool itself uses kernel fcntl locks in Python.
 cat > "$TMP/fake-worker.sh" <<'SH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -51,25 +52,27 @@ while (( $# > 0 )); do
         *) shift; [[ $# -gt 0 && ${1:-} != --* ]] && shift || true ;;
     esac
 done
-{
-    flock 9
-    active=$(cat "$EVENT_DIR/active" 2>/dev/null || printf 0)
-    active=$((active + 1)); printf '%s\n' "$active" > "$EVENT_DIR/active"
-    maximum=$(cat "$EVENT_DIR/max" 2>/dev/null || printf 0)
-    (( active > maximum )) && printf '%s\n' "$active" > "$EVENT_DIR/max"
-    printf 'start\t%s\t%s\t%s\n' "$relative" "$HARDCORE_RESOURCE_GRANTED_CPU" "$HARDCORE_RESOURCE_GRANTED_RAM_MIB" >> "$EVENT_DIR/events"
-} 9>"$EVENT_DIR/lock"
+lock_events() {
+    while ! mkdir "$EVENT_DIR/lockdir" 2>/dev/null; do sleep 0.01; done
+}
+unlock_events() { rmdir "$EVENT_DIR/lockdir"; }
+lock_events
+active=$(cat "$EVENT_DIR/active" 2>/dev/null || printf 0)
+active=$((active + 1)); printf '%s\n' "$active" > "$EVENT_DIR/active"
+maximum=$(cat "$EVENT_DIR/max" 2>/dev/null || printf 0)
+(( active > maximum )) && printf '%s\n' "$active" > "$EVENT_DIR/max"
+printf 'start\t%s\t%s\t%s\n' "$relative" "$HARDCORE_RESOURCE_GRANTED_CPU" "$HARDCORE_RESOURCE_GRANTED_RAM_MIB" >> "$EVENT_DIR/events"
+unlock_events
 case $relative in *a.zip) sleep 0.40 ;; *) sleep 0.10 ;; esac
 mkdir -p -- "$(dirname -- "$stage/$output")" "$(dirname -- "$result")"
 truncate -s 50000 "$stage/$output"
 printf 'repacked\t%s\t%s\t100000\t50000\t50000\tcandidate-smaller\n' "$relative" "$output" > "$result"
 printf 'fake worker complete: %s\n' "$relative" >> "$log"
-{
-    flock 9
-    active=$(cat "$EVENT_DIR/active")
-    active=$((active - 1)); printf '%s\n' "$active" > "$EVENT_DIR/active"
-    printf 'end\t%s\n' "$relative" >> "$EVENT_DIR/events"
-} 9>"$EVENT_DIR/lock"
+lock_events
+active=$(cat "$EVENT_DIR/active")
+active=$((active - 1)); printf '%s\n' "$active" > "$EVENT_DIR/active"
+printf 'end\t%s\n' "$relative" >> "$EVENT_DIR/events"
+unlock_events
 SH
 chmod +x "$TMP/fake-worker.sh"
 
@@ -126,8 +129,8 @@ human_bytes() { printf '%s B' "$1"; }
 die() { printf 'TEST DIE: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'TEST WARN: %s\n' "$*" >&2; }
 # nested.sh normally runs under the core's GNU command contract. This unit test
-# sources the module directly on both Linux and macOS, so provide a deterministic
-# GNU-style byte-granularity df fixture instead of depending on host df syntax.
+# sources the module directly on both Linux and macOS, so make the two GNU-style
+# probes it needs deterministic and independent of host utility syntax.
 df() {
     if [[ ${1:-} == -PB1 ]]; then
         printf 'Filesystem 1B-blocks Used Available Capacity Mounted on\n'
@@ -135,6 +138,17 @@ df() {
         return 0
     fi
     command df "$@"
+}
+stat() {
+    if [[ ${1:-} == -c && ${2:-} == '%s' ]]; then
+        local path=${4:-${3:-}}
+        python3 - "$path" <<'PY'
+import os, sys
+print(os.stat(sys.argv[1], follow_symlinks=False).st_size)
+PY
+        return 0
+    fi
+    command stat "$@"
 }
 choose_nested_work_root() { NESTED_WORK_ROOT="$TMP/work"; }
 archive_replacement_path() { printf '%s.7z' "${1%.*}"; }
