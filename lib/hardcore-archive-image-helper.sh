@@ -4,6 +4,8 @@ IFS=$'\n\t'
 
 has() { command -v "$1" >/dev/null 2>&1; }
 
+ZOPFLI_ADAPTIVE_RUNNER=${HARDCORE_ARCHIVE_ZOPFLI_RUNNER:-"$(dirname -- "${BASH_SOURCE[0]}")/hardcore-archive-zopfli-adaptive.py"}
+
 jpeg_pixel_hash() {
     djpeg "$1" 2>/dev/null | sha256sum | awk '{print $1}'
 }
@@ -29,12 +31,6 @@ png_pixel_hash() {
     local bit_depth pixel_format
     if has ffmpeg; then
         bit_depth=$(png_bit_depth "$1") || return 1
-        # OxiPNG may losslessly change PNG color type, palette, grayscale mode,
-        # or sub-8-bit depth. FFmpeg's native framemd5 hashes those storage
-        # representations differently even when the rendered pixels are equal.
-        # Canonicalize <=8-bit inputs to RGBA8 before hashing. Keep 16-bit PNGs
-        # on a distinct RGBA64 path so high-bit-depth precision is never silently
-        # accepted through an 8-bit comparison.
         if (( bit_depth == 16 )); then
             pixel_format=rgba64le
         else
@@ -113,6 +109,9 @@ run_oxipng_baseline() {
     esac
 }
 
+# Compatibility fallback for installations where Python or the adaptive helper
+# is unexpectedly unavailable. Normal production runs use the measured adaptive
+# controller below.
 run_oxipng_zopfli_refinement() {
     local threads=$1 target=$2 budget=$3
     local -a args=(-q -o 2 --zopfli --preserve)
@@ -136,6 +135,7 @@ optimize_one() {
     local input output output_dir temp_dir original_size lower source_hash candidate_hash
     local baseline progressive candidate candidate_size best='' best_size=0 tool='unavailable'
     local zopfli zopfli_size zopfli_budget line actual_threads source_depth candidate_depth
+    local zopfli_result zopfli_status zopfli_path zopfli_tool zopfli_telemetry
 
     actual_threads=${HARDCORE_RESOURCE_GRANTED_CPU:-$threads}
     [[ $actual_threads =~ ^[1-9][0-9]*$ ]] || actual_threads=$threads
@@ -191,24 +191,44 @@ optimize_one() {
             if [[ $mode == maximum && -n $best ]] && \
                oxipng_supports '--zopfli' && \
                zopfli_refinement_worthwhile "$original_size" "$best_size"; then
-                zopfli="$temp_dir/zopfli.png"
-                cp --reflink=auto --preserve=all -- "$best" "$zopfli"
                 zopfli_budget=$(zopfli_budget_seconds "$best_size")
-                printf 'Zopfli refinement: %s, budget %ss, threads %s\n' "$relative" "$zopfli_budget" "$threads" >>"$log_file"
-                if run_oxipng_zopfli_refinement "$threads" "$zopfli" "$zopfli_budget" >>"$log_file" 2>&1 && [[ -s $zopfli ]]; then
-                    zopfli_size=$(stat -c '%s' -- "$zopfli")
-                    if (( zopfli_size < best_size )); then
-                        best=$zopfli
+                zopfli_telemetry="${log_file%.log}.zopfli.tsv"
+
+                if has python3 && [[ -f $ZOPFLI_ADAPTIVE_RUNNER ]]; then
+                    zopfli_result=$(python3 "$ZOPFLI_ADAPTIVE_RUNNER" run \
+                        --oxipng "$(command -v oxipng)" \
+                        --baseline "$best" \
+                        --work-dir "$temp_dir" \
+                        --threads "$threads" \
+                        --budget "$zopfli_budget" \
+                        --relative "$relative" \
+                        --log-file "$log_file" \
+                        --telemetry-file "$zopfli_telemetry" || true)
+                    IFS=$'\t' read -r zopfli_status zopfli_path zopfli_size zopfli_tool <<< "$zopfli_result"
+                    if [[ $zopfli_status == optimized && $zopfli_size =~ ^[0-9]+$ && -s $zopfli_path ]] && \
+                       (( zopfli_size < best_size )); then
+                        best=$zopfli_path
                         best_size=$zopfli_size
-                        tool='oxipng-maximum+bounded-zopfli'
+                        tool="oxipng-maximum+${zopfli_tool}"
                     fi
                 else
-                    printf 'Zopfli refinement skipped/expired; keeping baseline candidate for %s\n' "$relative" >>"$log_file"
+                    zopfli="$temp_dir/zopfli.png"
+                    cp --reflink=auto --preserve=all -- "$best" "$zopfli"
+                    printf 'Zopfli adaptive controller unavailable; using legacy bounded pass: %s, budget %ss, threads %s\n' \
+                        "$relative" "$zopfli_budget" "$threads" >>"$log_file"
+                    if run_oxipng_zopfli_refinement "$threads" "$zopfli" "$zopfli_budget" >>"$log_file" 2>&1 && [[ -s $zopfli ]]; then
+                        zopfli_size=$(stat -c '%s' -- "$zopfli")
+                        if (( zopfli_size < best_size )); then
+                            best=$zopfli
+                            best_size=$zopfli_size
+                            tool='oxipng-maximum+bounded-zopfli-legacy'
+                        fi
+                    else
+                        printf 'Zopfli legacy refinement skipped/expired; keeping baseline candidate for %s\n' "$relative" >>"$log_file"
+                    fi
                 fi
             fi
 
-            # Decode only the final winner. OxiPNG candidates are temporary, so
-            # an interrupted/invalid refinement can never replace the source.
             if [[ -n $best ]]; then
                 candidate_hash=$(png_pixel_hash "$best" || true)
                 if [[ -z $source_hash || $candidate_hash != "$source_hash" ]]; then
@@ -261,8 +281,6 @@ optimize_one() {
 if [[ ${1:-} == --worker-direct ]]; then
     shift
     if [[ ${HARDCORE_RESOURCE_GRANTED_CPU:-} =~ ^[1-9][0-9]*$ ]]; then
-        # OxiPNG consumes the actual flexible grant. JPEG workers are exact
-        # one-CPU claims, so this also keeps their direct execution at one CPU.
         set -- "$1" "$2" "$3" "$4" "$5" "$HARDCORE_RESOURCE_GRANTED_CPU" "$7"
     fi
     optimize_one "$@"
@@ -271,9 +289,6 @@ fi
 
 if [[ ${1:-} == --worker ]]; then
     shift
-    # Worker arguments are: source stage result log mode png_cpu_max relative.
-    # JPEG/optipng are file-parallel and claim exactly one CPU. OxiPNG alone may
-    # claim a flexible CPU range; the resource pool decides the actual grant.
     relative=${7:-}
     requested_threads=${6:-1}
     worker_cpu_max=1
@@ -342,13 +357,16 @@ fi
 
 : >"$result_file"
 : >"$log_file"
+zopfli_telemetry="${log_file%.log}.zopfli.tsv"
+rm -f -- "$zopfli_telemetry"
 worker_launcher=(bash)
-# Image workers remain lower priority as a second line of defense. In automatic
-# scheduling `jobs` is at most the CPU-token count, so this launcher bound never
-# constrains useful execution beyond the shared pool's >=1 CPU requirement.
 if has nice; then
     worker_launcher=(nice -n 5 bash)
 fi
 xargs -r -d '\n' -P "$jobs" -I '{}' \
     "${worker_launcher[@]}" "$0" --worker "$source_parent" "$stage_parent" "$result_file" "$log_file" "$mode" "$threads_per_worker" '{}' \
     <"$list_file"
+
+if has python3 && [[ -f $ZOPFLI_ADAPTIVE_RUNNER && -f $zopfli_telemetry ]]; then
+    python3 "$ZOPFLI_ADAPTIVE_RUNNER" summary --telemetry-file "$zopfli_telemetry" >>"$log_file" 2>&1 || true
+fi
