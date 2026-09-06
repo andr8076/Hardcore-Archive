@@ -125,6 +125,17 @@ export HARDCORE_ARCHIVE_NESTED_HELPER_SOURCE
 human_bytes() { printf '%s B' "$1"; }
 die() { printf 'TEST DIE: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'TEST WARN: %s\n' "$*" >&2; }
+# nested.sh normally runs under the core's GNU command contract. This unit test
+# sources the module directly on both Linux and macOS, so provide a deterministic
+# GNU-style byte-granularity df fixture instead of depending on host df syntax.
+df() {
+    if [[ ${1:-} == -PB1 ]]; then
+        printf 'Filesystem 1B-blocks Used Available Capacity Mounted on\n'
+        printf 'fixture 17179869184 0 8589934592 0%% /\n'
+        return 0
+    fi
+    command df "$@"
+}
 choose_nested_work_root() { NESTED_WORK_ROOT="$TMP/work"; }
 archive_replacement_path() { printf '%s.7z' "${1%.*}"; }
 resolve_current_script() { printf '%s/fake-core.sh\n' "$TMP"; }
