@@ -109,7 +109,19 @@ chmod +x "$TMP/fake-resource-run.py"
 
 PATH="$TMP/bin:$PATH"
 export PATH
-truncate -s $((1024 * 1024)) "$TMP/source/test.png"
+# Keep the large synthetic payload used by the optimization-policy test, but
+# give it a real PNG signature + IHDR so production header validation is tested
+# instead of relying on an all-zero file merely named .png.
+python3 - "$TMP/source/test.png" <<'PY'
+from pathlib import Path
+import struct, sys
+path = Path(sys.argv[1])
+size = 1024 * 1024
+signature = b'\x89PNG\r\n\x1a\n'
+ihdr = struct.pack('>I', 13) + b'IHDR' + struct.pack('>IIBBBBB', 16, 16, 8, 2, 0, 0, 0)
+prefix = signature + ihdr
+path.write_bytes(prefix + b'\0' * (size - len(prefix)))
+PY
 truncate -s $((1024 * 1024)) "$TMP/source/test.jpg"
 printf 'test.png\n' > "$TMP/list"
 

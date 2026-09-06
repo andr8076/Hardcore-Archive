@@ -8,9 +8,40 @@ jpeg_pixel_hash() {
     djpeg "$1" 2>/dev/null | sha256sum | awk '{print $1}'
 }
 
+png_bit_depth() {
+    local header depth_hex
+    header=$(od -An -tx1 -N26 "$1" 2>/dev/null | tr -d '[:space:]') || return 1
+    (( ${#header} >= 52 )) || return 1
+    [[ ${header:0:16} == 89504e470d0a1a0a ]] || return 1
+    [[ ${header:24:8} == 49484452 ]] || return 1
+    depth_hex=${header:48:2}
+    case $depth_hex in
+        01) printf '1\n' ;;
+        02) printf '2\n' ;;
+        04) printf '4\n' ;;
+        08) printf '8\n' ;;
+        10) printf '16\n' ;;
+        *) return 1 ;;
+    esac
+}
+
 png_pixel_hash() {
+    local bit_depth pixel_format
     if has ffmpeg; then
-        ffmpeg -hide_banner -v error -nostdin -i "$1" -map 0:v:0 -f framemd5 - 2>/dev/null |
+        bit_depth=$(png_bit_depth "$1") || return 1
+        # OxiPNG may losslessly change PNG color type, palette, grayscale mode,
+        # or sub-8-bit depth. FFmpeg's native framemd5 hashes those storage
+        # representations differently even when the rendered pixels are equal.
+        # Canonicalize <=8-bit inputs to RGBA8 before hashing. Keep 16-bit PNGs
+        # on a distinct RGBA64 path so high-bit-depth precision is never silently
+        # accepted through an 8-bit comparison.
+        if (( bit_depth == 16 )); then
+            pixel_format=rgba64le
+        else
+            pixel_format=rgba
+        fi
+        ffmpeg -hide_banner -v error -nostdin -i "$1" -map 0:v:0 \
+            -pix_fmt "$pixel_format" -f framemd5 - 2>/dev/null |
             sha256sum | awk '{print $1}'
     elif has pngcheck; then
         pngcheck -q "$1" >/dev/null 2>&1 || return 1
@@ -104,7 +135,7 @@ optimize_one() {
     local source_parent=$1 stage_parent=$2 result_file=$3 log_file=$4 mode=$5 threads=$6 relative=$7
     local input output output_dir temp_dir original_size lower source_hash candidate_hash
     local baseline progressive candidate candidate_size best='' best_size=0 tool='unavailable'
-    local zopfli zopfli_size zopfli_budget line actual_threads
+    local zopfli zopfli_size zopfli_budget line actual_threads source_depth candidate_depth
 
     actual_threads=${HARDCORE_RESOURCE_GRANTED_CPU:-$threads}
     [[ $actual_threads =~ ^[1-9][0-9]*$ ]] || actual_threads=$threads
@@ -181,7 +212,10 @@ optimize_one() {
             if [[ -n $best ]]; then
                 candidate_hash=$(png_pixel_hash "$best" || true)
                 if [[ -z $source_hash || $candidate_hash != "$source_hash" ]]; then
-                    printf 'Final PNG pixel validation failed; preserving original: %s\n' "$relative" >>"$log_file"
+                    source_depth=$(png_bit_depth "$input" 2>/dev/null || printf '?')
+                    candidate_depth=$(png_bit_depth "$best" 2>/dev/null || printf '?')
+                    printf 'Final PNG pixel validation failed; preserving original: %s (source depth %s, candidate depth %s)\n' \
+                        "$relative" "$source_depth" "$candidate_depth" >>"$log_file"
                     best=''
                     best_size=0
                     tool='oxipng-validation-failed'
