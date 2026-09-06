@@ -59,9 +59,10 @@ grant_ram=${HARDCORE_RESOURCE_GRANTED_RAM_MIB:-0}
 [[ $grant_ram =~ ^[1-9][0-9]*$ ]] || grant_ram=256
 lzma_threads=$grant_cpu
 (( lzma_threads > 2 )) && lzma_threads=2
-image_jobs=$grant_cpu
-(( image_jobs > 4 )) && image_jobs=4
-(( image_jobs < 1 )) && image_jobs=1
+# The parent RAM claim reserves exactly one 256 MiB image worker beside LZMA2.
+# File-level parallelism comes from multiple independent nested workers instead
+# of multiplying hidden image RAM inside each recursive child.
+image_jobs=1
 
 cleanup() {
     rm -rf --one-file-system -- "$extracted" "$normalized" "$child_work" 2>/dev/null || true
@@ -124,11 +125,6 @@ fi
 child_rc=0
 child_diag=${diagnostics_dir:-$task_dir/diagnostics}
 mkdir -p -- "$child_diag"
-# The parent resource runner is accounting, not an OS cgroup. Pin every known
-# recursive concurrency knob to the actual grant. Images additionally honor
-# HARDCORE_ARCHIVE_CPU_LIMIT; grandchildren build a hierarchical pool capped by
-# these same CPU/RAM values. Video is sequential inside a nested child so its
-# hardware-memory envelope does not overlap child LZMA/image work.
 child_command=(
     env
     HARDCORE_ARCHIVE_INHIBITED=1
@@ -153,9 +149,6 @@ child_command=(
     "$extracted" "$child_archive"
 )
 
-# Hardware video is a physical single-lane device. CPU/RAM remain parallel, but
-# recursive children with direct video conservatively share the inherited GPU
-# lock. Deeper workers inherit and apply exactly the same lock.
 if [[ $video_transcode == true && -n $gpu_lock ]] && contains_direct_video; then
     mkdir -p -- "$(dirname -- "$gpu_lock")"
     flock "$gpu_lock" "${child_command[@]}" >>"$log_file" 2>&1 || child_rc=$?
