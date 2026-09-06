@@ -64,6 +64,67 @@ hardcore_resource_video_cpu_claim() {
     printf '%s\n' "$claim"
 }
 
+# Nested archives are independent jobs, but each recursive child may itself run
+# LZMA2, JPEG/PNG work and hardware video. Give the pool enough waiting workers
+# to keep the machine busy while keeping each child large enough to run the
+# ratio-preserving two-thread LZMA2 path on ordinary >=8-thread machines.
+hardcore_resource_nested_cpu_max() {
+    local cpu_threads=$1 nested_count=$2 target cpu_max
+    [[ $cpu_threads =~ ^[1-9][0-9]*$ ]] || return 2
+    [[ $nested_count =~ ^[1-9][0-9]*$ ]] || return 2
+
+    target=$nested_count
+    (( target > 4 )) && target=4
+    (( target > cpu_threads )) && target=$cpu_threads
+    (( target < 1 )) && target=1
+    cpu_max=$(((cpu_threads + target - 1) / target))
+    (( cpu_max > 8 )) && cpu_max=8
+    (( cpu_max < 1 )) && cpu_max=1
+    printf '%s\n' "$cpu_max"
+}
+
+# Reserve enough RAM for the same automatic LZMA2 dictionary that an isolated
+# recursive child would choose for the archive's declared expanded payload.
+# The claim is rounded up to the resource pool's 64 MiB token size. Smaller
+# archives therefore coexist naturally; a large archive consumes most/all RAM
+# tokens and serializes itself without changing its compression-quality policy.
+hardcore_resource_nested_ram_claim() {
+    local expanded_bytes=$1 pool_max_mib=$2 format_max_mib=${3:-4096}
+    local mib=1048576 expanded_mib max_by_ram limit dict=4 claim candidate
+    local -a candidates=(4096 3072 2048 1536 1024 768 512 384 256 192 128 96 64 48 32 24 16 12 8 4)
+
+    [[ $expanded_bytes =~ ^[0-9]+$ ]] || return 2
+    [[ $pool_max_mib =~ ^[1-9][0-9]*$ ]] || return 2
+    [[ $format_max_mib =~ ^[1-9][0-9]*$ ]] || return 2
+
+    expanded_mib=$(((expanded_bytes + mib - 1) / mib))
+    (( expanded_mib < 4 )) && expanded_mib=4
+    if (( pool_max_mib > 512 )); then
+        max_by_ram=$(((pool_max_mib - 512) * 2 / 23))
+    else
+        max_by_ram=4
+    fi
+    (( max_by_ram < 4 )) && max_by_ram=4
+
+    limit=$format_max_mib
+    (( limit > max_by_ram )) && limit=$max_by_ram
+    (( limit > expanded_mib )) && limit=$expanded_mib
+    (( limit < 4 )) && limit=4
+
+    for candidate in "${candidates[@]}"; do
+        if (( candidate <= limit )); then
+            dict=$candidate
+            break
+        fi
+    done
+
+    claim=$((dict * 23 / 2 + 512))
+    claim=$(((claim + 63) / 64 * 64))
+    (( claim > pool_max_mib )) && claim=$pool_max_mib
+    (( claim < 64 )) && claim=64
+    printf '%s\n' "$claim"
+}
+
 hardcore_resource_pool_init() {
     local runner=$1 pool=$2 cpu_initial=$3 cpu_max=$4 ram_initial=$5 ram_max=$6
     [[ -f $runner ]] || return 2
