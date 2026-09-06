@@ -158,9 +158,12 @@ run_case maximum
 grep -Fq -- '-o 6' "$OXI_LOG"
 grep -Fq -- '--threads 6' "$OXI_LOG"
 grep -Fq -- '--zopfli' "$OXI_LOG"
+grep -Fq -- '--zi 1' "$OXI_LOG"
 grep -Fq -- '--zi 5' "$OXI_LOG"
 grep -Fq -- '--ziwi 2' "$OXI_LOG"
-grep -Fq 'oxipng-maximum+bounded-zopfli' "$TMP/result"
+grep -Fq 'oxipng-maximum+adaptive-zopfli-strong' "$TMP/result"
+grep -Fq 'Zopfli adaptive summary: attempts=1' "$TMP/helper.log"
+grep -Fq 'extra_bytes_per_second=' "$TMP/helper.log"
 
 # Actual resource-pool integration: only two CPU tokens are initially exposed,
 # so a PNG with a six-CPU ceiling must consume the actual two-CPU grant.
@@ -221,6 +224,7 @@ assert 'IMAGE_SCHEDULER_SOURCE' in core
 assert 'HARDCORE_ARCHIVE_IMAGE_SCHEDULER_CACHE_DIR' in core
 assert '--threads-per-worker "$IMAGE_THREADS_PER_WORKER"' in core
 assert 'hardcore-archive-image-helper.sh' in core
+assert 'hardcore-archive-zopfli-adaptive.py' in helper
 assert "worker_label='image-jpeg'" in helper
 assert "worker_label='image-png'" in helper
 assert '--cpu-min 1' in helper
