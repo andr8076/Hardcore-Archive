@@ -137,10 +137,12 @@ run_logged_stage() { shift 2; "$@"; }
 source "$NESTED"
 prepare_and_add_nested_archives
 
-# Both jobs must really have overlapped through the shared pool.
+# Both jobs must really have overlapped through the shared pool. A 1 MiB
+# expanded payload gets a 4 MiB recursive dictionary plus 256 MiB child-lane
+# headroom, rounded to the shared pool's 64 MiB RAM tokens = 832 MiB.
 (( $(cat "$EVENT_DIR/max") >= 2 ))
-grep -Fq $'start\tsource/a.zip\t2\t576' "$EVENT_DIR/events"
-grep -Fq $'start\tsource/b.zip\t2\t576' "$EVENT_DIR/events"
+grep -Fq $'start\tsource/a.zip\t2\t832' "$EVENT_DIR/events"
+grep -Fq $'start\tsource/b.zip\t2\t832' "$EVENT_DIR/events"
 
 # Completion order was b then a, but the shared manifest is deterministic and
 # follows source order because workers never append to it directly.
@@ -152,12 +154,13 @@ mapfile -t rows < "$NESTED_RESULT_MANIFEST"
 [[ $(cat "$NESTED_REPACKED_LIST") == $'source/a.7z\nsource/b.7z' ]]
 [[ ! -s $NESTED_FALLBACK_LIST ]]
 
-# Static integration: recursive children must be clamped to their parent grant,
-# nested candidates must force pool creation, and the parallel module must
-# override the old serial implementation before execution.
-grep -Fq 'HARDCORE_ARCHIVE_PARENT_CPU_GRANT' "$CORE"
-grep -Fq 'HARDCORE_ARCHIVE_PARENT_RAM_GRANT_MIB' "$CORE"
-grep -Fq '$NESTED_REPACK && (( NESTED_COUNT > 0 ))' "$CORE"
+# Static integration: recursive children must clamp the legacy core to their
+# actual grant, and the parallel module must override the old serial function
+# before the nested execution stage begins.
+grep -Fq 'HARDCORE_ARCHIVE_CPU_LIMIT < CPU_THREADS' "$CORE"
+grep -Fq 'HARDCORE_ARCHIVE_RAM_LIMIT_MIB < MEMORY_BUDGET_MIB' "$CORE"
 grep -Fq 'source "$(dirname -- "${BASH_SOURCE[0]}")/nested.sh"' "$CORE"
+grep -Fq 'HARDCORE_ARCHIVE_CPU_LIMIT="$grant_cpu"' "$WORKER"
+grep -Fq 'HARDCORE_ARCHIVE_RAM_LIMIT_MIB="$grant_ram"' "$WORKER"
 
 printf 'Parallel nested-archive scheduling tests passed.\n'
