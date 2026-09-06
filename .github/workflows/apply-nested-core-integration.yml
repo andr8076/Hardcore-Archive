@@ -26,7 +26,7 @@ jobs:
           source_line = 'source "$(dirname -- "${BASH_SOURCE[0]}")/nested.sh"'
           if source_line in text:
               raise SystemExit(0)
-          needle = 'NESTED_TIMING_STARTED=$SECONDS\nprepare_and_add_nested_archives\n'
+          needle = 'NESTED_TIMING_STARTED=$(hardcore_timing_now 2>/dev/null) || NESTED_TIMING_STARTED=0\nprepare_and_add_nested_archives\n'
           if text.count(needle) != 1:
               raise SystemExit(f'expected exactly one nested execution handoff, found {text.count(needle)}')
           replacement = source_line + '\n' + needle
