@@ -4,7 +4,7 @@ IFS=$'\n\t'
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 
 required=(
-    common platform config doctor inventory planner scheduler archive video images resource-pool timing calibration-identity video-acceleration media-policy runtime
+    common platform config doctor inventory planner scheduler archive video images resource-pool timing calibration-identity video-acceleration video-quality-final media-policy runtime
     containers nested verify restore reporting visual inspect
 )
 for module in "${required[@]}"; do
@@ -22,6 +22,7 @@ python3 -m py_compile "$ROOT/lib/hardcore-archive-compressibility.py"
 python3 -m py_compile "$ROOT/lib/hardcore-archive-image-calibrate.py"
 python3 -m py_compile "$ROOT/lib/hardcore-archive-resource-run.py"
 python3 -m py_compile "$ROOT/lib/hardcore-archive-zopfli-adaptive.py"
+python3 -m py_compile "$ROOT/lib/hardcore-archive-video-quality.py"
 bash -n "$ROOT/packaging/media-runtime/build.sh"
 bash -n "$ROOT/packaging/media-runtime/smoke-test.sh"
 bash -n "$ROOT/tests/bundled-runtime.sh"

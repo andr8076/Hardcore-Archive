@@ -76,10 +76,12 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/media-policy.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/images.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/resource-pool.sh"
 hardcore_timing_init
-SCRIPT_VERSION="2026-09-04"
+SCRIPT_VERSION="2026-09-07"
 METADATA_HELPER=${HARDCORE_ARCHIVE_METADATA_HELPER:-}
 MEDIA_HELPER=${HARDCORE_ARCHIVE_MEDIA_HELPER:-"$(dirname -- "${BASH_SOURCE[0]}")/hardcore-archive-media.py"}
 export HARDCORE_ARCHIVE_MEDIA_HELPER=$MEDIA_HELPER
+VIDEO_QUALITY_HELPER=${HARDCORE_ARCHIVE_VIDEO_QUALITY_HELPER:-"$(dirname -- "${BASH_SOURCE[0]}")/hardcore-archive-video-quality.py"}
+VIDEO_QUALITY_FINAL_SH=${HARDCORE_ARCHIVE_VIDEO_QUALITY_FINAL_SH:-"$(dirname -- "${BASH_SOURCE[0]}")/video-quality-final.sh"}
 MIB=$((1024 * 1024))
 GIB=$((1024 * MIB))
 
@@ -120,6 +122,18 @@ VIDEO_NO_DENOISE=false
 VIDEO_COPY_AUDIO=false
 VIDEO_MIN_VMAF="92"
 VIDEO_MIN_SAVINGS_PERCENT="3"
+VIDEO_QUALITY_VALIDATION=${HARDCORE_ARCHIVE_VIDEO_QUALITY_VALIDATION:-sampled}
+VIDEO_QUALITY_SAMPLE_SECONDS=${HARDCORE_ARCHIVE_VIDEO_QUALITY_SAMPLE_SECONDS:-4}
+VIDEO_QUALITY_INTERVAL_SECONDS=${HARDCORE_ARCHIVE_VIDEO_QUALITY_INTERVAL_SECONDS:-300}
+VIDEO_QUALITY_MIN_SAMPLES=${HARDCORE_ARCHIVE_VIDEO_QUALITY_MIN_SAMPLES:-5}
+VIDEO_QUALITY_MAX_SAMPLES=${HARDCORE_ARCHIVE_VIDEO_QUALITY_MAX_SAMPLES:-16}
+VIDEO_QUALITY_COMPLEXITY_SAMPLES=${HARDCORE_ARCHIVE_VIDEO_QUALITY_COMPLEXITY_SAMPLES:-2}
+VIDEO_QUALITY_LOW_PERCENTILE=${HARDCORE_ARCHIVE_VIDEO_QUALITY_LOW_PERCENTILE:-10}
+VIDEO_QUALITY_PERCENTILE_DELTA=${HARDCORE_ARCHIVE_VIDEO_QUALITY_PERCENTILE_DELTA:-4}
+VIDEO_QUALITY_SUSTAINED_DELTA=${HARDCORE_ARCHIVE_VIDEO_QUALITY_SUSTAINED_DELTA:-6}
+VIDEO_QUALITY_SUSTAINED_SECONDS=${HARDCORE_ARCHIVE_VIDEO_QUALITY_SUSTAINED_SECONDS:-1}
+VIDEO_QUALITY_RETRIES=${HARDCORE_ARCHIVE_VIDEO_QUALITY_RETRIES:-1}
+VIDEO_QUALITY_RETRY_STEP=${HARDCORE_ARCHIVE_VIDEO_QUALITY_RETRY_STEP:-2}
 VIDEO_PREFLIGHT=true
 VIDEO_WRITE_MANIFEST=true
 VIDEO_SPECIAL_POLICY="ask"
@@ -350,7 +364,10 @@ Video policy:
                            "omit" deliberately excludes those files entirely.
   --video-min-vmaf V       Minimum accepted VMAF score. Default: 92.
   --video-min-savings P    Minimum accepted saving. Default: 3 percent.
-  --video-no-preflight     Disable representative sample testing.
+  --video-no-preflight     Disable representative calibration/preflight testing.
+  --video-quality-validation MODE
+                           sampled (bounded duration-scaled coverage) or full.
+                           Default: sampled. Full scores the completed timeline.
   --quality-check MODE     auto, off, or required. Default: auto.
   --no-video-manifest      Omit the video transformation manifest.
 
@@ -937,6 +954,26 @@ load_config_file() {
             VIDEO_SPECIAL_POLICY) VIDEO_SPECIAL_POLICY=${value,,} ;;
             VIDEO_MIN_VMAF) VIDEO_MIN_VMAF=$value ;;
             VIDEO_MIN_SAVINGS_PERCENT) VIDEO_MIN_SAVINGS_PERCENT=$value ;;
+            VIDEO_QUALITY_VALIDATION|VIDEO_QUALITY_SAMPLE_SECONDS|VIDEO_QUALITY_INTERVAL_SECONDS|\
+            VIDEO_QUALITY_MIN_SAMPLES|VIDEO_QUALITY_MAX_SAMPLES|VIDEO_QUALITY_COMPLEXITY_SAMPLES|\
+            VIDEO_QUALITY_LOW_PERCENTILE|VIDEO_QUALITY_PERCENTILE_DELTA|VIDEO_QUALITY_SUSTAINED_DELTA|\
+            VIDEO_QUALITY_SUSTAINED_SECONDS|VIDEO_QUALITY_RETRIES|VIDEO_QUALITY_RETRY_STEP)
+                [[ ${HARDCORE_ARCHIVE_VIDEO_QUALITY_POLICY_INHERITED:-0} == 1 ]] && continue
+                case $key in
+                    VIDEO_QUALITY_VALIDATION) VIDEO_QUALITY_VALIDATION=${value,,} ;;
+                    VIDEO_QUALITY_SAMPLE_SECONDS) VIDEO_QUALITY_SAMPLE_SECONDS=$value ;;
+                    VIDEO_QUALITY_INTERVAL_SECONDS) VIDEO_QUALITY_INTERVAL_SECONDS=$value ;;
+                    VIDEO_QUALITY_MIN_SAMPLES) VIDEO_QUALITY_MIN_SAMPLES=$value ;;
+                    VIDEO_QUALITY_MAX_SAMPLES) VIDEO_QUALITY_MAX_SAMPLES=$value ;;
+                    VIDEO_QUALITY_COMPLEXITY_SAMPLES) VIDEO_QUALITY_COMPLEXITY_SAMPLES=$value ;;
+                    VIDEO_QUALITY_LOW_PERCENTILE) VIDEO_QUALITY_LOW_PERCENTILE=$value ;;
+                    VIDEO_QUALITY_PERCENTILE_DELTA) VIDEO_QUALITY_PERCENTILE_DELTA=$value ;;
+                    VIDEO_QUALITY_SUSTAINED_DELTA) VIDEO_QUALITY_SUSTAINED_DELTA=$value ;;
+                    VIDEO_QUALITY_SUSTAINED_SECONDS) VIDEO_QUALITY_SUSTAINED_SECONDS=$value ;;
+                    VIDEO_QUALITY_RETRIES) VIDEO_QUALITY_RETRIES=$value ;;
+                    VIDEO_QUALITY_RETRY_STEP) VIDEO_QUALITY_RETRY_STEP=$value ;;
+                esac
+                ;;
             VIDEO_CALIBRATION_CACHE|VIDEO_CALIBRATION_EARLY_ABORT)
                 [[ ${HARDCORE_ARCHIVE_CALIBRATION_POLICY_INHERITED:-0} == 1 ]] && continue
                 bool=$(config_bool "$value") || { warn "Invalid $key value in config: $value"; continue; }
@@ -1445,7 +1482,7 @@ readonly AV1_PRESET=2
 readonly HEVC_CRF=28
 readonly HEVC_PRESET=slow
 readonly DENOISE_FILTER='hqdn3d=1.2:1.0:3.0:2.5'
-readonly SCRIPT_VERSION='2026-09-07-integrated-video-r4'
+readonly SCRIPT_VERSION='2026-09-07-integrated-video-r5'
 
 codec_choice='av1'
 force_encoder=''
@@ -1459,6 +1496,18 @@ video_preflight=true
 quality_check=auto
 quality_vmaf_threshold=''
 quality_ssim_threshold=0.985
+video_quality_validation=${HARDCORE_ARCHIVE_VIDEO_QUALITY_VALIDATION:-sampled}
+video_quality_sample_seconds=${HARDCORE_ARCHIVE_VIDEO_QUALITY_SAMPLE_SECONDS:-4}
+video_quality_interval_seconds=${HARDCORE_ARCHIVE_VIDEO_QUALITY_INTERVAL_SECONDS:-300}
+video_quality_min_samples=${HARDCORE_ARCHIVE_VIDEO_QUALITY_MIN_SAMPLES:-5}
+video_quality_max_samples=${HARDCORE_ARCHIVE_VIDEO_QUALITY_MAX_SAMPLES:-16}
+video_quality_complexity_samples=${HARDCORE_ARCHIVE_VIDEO_QUALITY_COMPLEXITY_SAMPLES:-2}
+video_quality_low_percentile=${HARDCORE_ARCHIVE_VIDEO_QUALITY_LOW_PERCENTILE:-10}
+video_quality_percentile_delta=${HARDCORE_ARCHIVE_VIDEO_QUALITY_PERCENTILE_DELTA:-4}
+video_quality_sustained_delta=${HARDCORE_ARCHIVE_VIDEO_QUALITY_SUSTAINED_DELTA:-6}
+video_quality_sustained_seconds=${HARDCORE_ARCHIVE_VIDEO_QUALITY_SUSTAINED_SECONDS:-1}
+video_quality_retries=${HARDCORE_ARCHIVE_VIDEO_QUALITY_RETRIES:-1}
+video_quality_retry_step=${HARDCORE_ARCHIVE_VIDEO_QUALITY_RETRY_STEP:-2}
 preflight_sample_seconds=12
 preflight_min_duration=60
 preflight_min_size=$((128 * 1024 * 1024))
@@ -1496,6 +1545,8 @@ USAGE
 }
 
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+[[ -n ${HARDCORE_ARCHIVE_VIDEO_QUALITY_FINAL_SH:-} && -f ${HARDCORE_ARCHIVE_VIDEO_QUALITY_FINAL_SH:-} ]] || die 'Completed-video quality runner is unavailable.'
+source "$HARDCORE_ARCHIVE_VIDEO_QUALITY_FINAL_SH"
 has_command() { command -v "$1" >/dev/null 2>&1; }
 # HARDCORE_MEDIA_NESTED_FIX_V1
 has_encoder() { ffmpeg -hide_banner -encoders 2>/dev/null | awk -v wanted="$1" 'NF >= 2 && $2 == wanted {found=1} END {exit(found ? 0 : 1)}'; }
@@ -3270,7 +3321,7 @@ else
     printf 'Audio:              %s\n' "${audio_plan[0]}"
     for ((i=1; i<${#audio_plan[@]}; i++)); do printf '                    %s\n' "${audio_plan[$i]}"; done
 fi
-printf 'Validation:         Codec, duration and full decode\n'
+printf 'Validation:         Codec, duration, full decode + completed-output VMAF (%s)\n' "$video_quality_validation"
 printf '%s\n' '════════════════════════════════════════════════════════════'
 
 if [[ -e "$output" && "$same_output_as_input" != true && "$assume_yes" != true ]]; then
@@ -3281,10 +3332,16 @@ if [[ "$assume_yes" != true ]]; then
     ask_yes_no 'Start compression?' y || { printf 'Cancelled.\n'; exit 0; }
 fi
 
-if ! hardcore_video_encode_full; then
+encode_rc=0
+hardcore_video_encode_full || encode_rc=$?
+if (( encode_rc != 0 )); then
     rm -f -- "$temporary"
     temporary=''
-    die 'Video encoding or validation failed after compatible preprocessing retries.'
+    if (( encode_rc == 3 )); then
+        printf 'Completed output did not pass the configured visual-quality acceptance policy. Original preserved unchanged.\n'
+        exit 3
+    fi
+    die 'Video encoding or structural validation failed after compatible preprocessing retries.'
 fi
 
 output_video_stream_count=$(stream_count_file v "$temporary")
@@ -4118,6 +4175,16 @@ while (( $# > 0 )); do
             VIDEO_MIN_SAVINGS_PERCENT=${1#*=}
             shift
             ;;
+        --video-quality-validation)
+            (( $# >= 2 )) || die "--video-quality-validation requires sampled or full."
+            VIDEO_QUALITY_VALIDATION=${2,,}
+            shift 2
+            ;;
+        --video-quality-validation=*)
+            VIDEO_QUALITY_VALIDATION=${1#*=}
+            VIDEO_QUALITY_VALIDATION=${VIDEO_QUALITY_VALIDATION,,}
+            shift
+            ;;
         --video-no-preflight)
             VIDEO_PREFLIGHT=false
             shift
@@ -4367,6 +4434,45 @@ fi
 LC_NUMERIC=C awk -v p="$VIDEO_MIN_SAVINGS_PERCENT" 'BEGIN {exit !(p >= 0 && p <= 100)}' ||     die "Video minimum savings must be between 0 and 100."
 [[ $VIDEO_MIN_VMAF =~ ^[0-9]+([.][0-9]+)?$ ]] || die "Video minimum VMAF must be numeric."
 LC_NUMERIC=C awk -v v="$VIDEO_MIN_VMAF" 'BEGIN {exit !(v >= 0 && v <= 100)}' || die "Video minimum VMAF must be between 0 and 100."
+case "$VIDEO_QUALITY_VALIDATION" in
+    sampled|full) ;;
+    *) die "Video quality validation must be sampled or full." ;;
+esac
+[[ $VIDEO_QUALITY_SAMPLE_SECONDS =~ ^[0-9]+([.][0-9]+)?$ ]] || die "Video quality sample seconds must be numeric."
+LC_NUMERIC=C awk -v v="$VIDEO_QUALITY_SAMPLE_SECONDS" 'BEGIN {exit !(v>=1 && v<=30)}' || die "Video quality sample seconds must be between 1 and 30."
+[[ $VIDEO_QUALITY_INTERVAL_SECONDS =~ ^[0-9]+([.][0-9]+)?$ ]] || die "Video quality interval seconds must be numeric."
+LC_NUMERIC=C awk -v v="$VIDEO_QUALITY_INTERVAL_SECONDS" 'BEGIN {exit !(v>=30 && v<=86400)}' || die "Video quality interval seconds must be between 30 and 86400."
+[[ $VIDEO_QUALITY_MIN_SAMPLES =~ ^[1-9][0-9]*$ && $VIDEO_QUALITY_MAX_SAMPLES =~ ^[1-9][0-9]*$ ]] || die "Video quality sample bounds must be positive integers."
+(( VIDEO_QUALITY_MIN_SAMPLES <= VIDEO_QUALITY_MAX_SAMPLES && VIDEO_QUALITY_MAX_SAMPLES <= 32 )) || die "Video quality sample bounds must satisfy min <= max <= 32."
+[[ $VIDEO_QUALITY_COMPLEXITY_SAMPLES =~ ^[0-9]+$ ]] || die "Video quality complexity samples must be a non-negative integer."
+(( VIDEO_QUALITY_COMPLEXITY_SAMPLES <= 8 && VIDEO_QUALITY_COMPLEXITY_SAMPLES < VIDEO_QUALITY_MAX_SAMPLES )) || die "Video quality complexity samples must be below max samples and at most 8."
+for _quality_value in VIDEO_QUALITY_LOW_PERCENTILE VIDEO_QUALITY_PERCENTILE_DELTA VIDEO_QUALITY_SUSTAINED_DELTA VIDEO_QUALITY_SUSTAINED_SECONDS; do
+    _quality_number=${!_quality_value}
+    [[ $_quality_number =~ ^[0-9]+([.][0-9]+)?$ ]] || die "$_quality_value must be numeric."
+done
+LC_NUMERIC=C awk -v v="$VIDEO_QUALITY_LOW_PERCENTILE" 'BEGIN {exit !(v>=0 && v<=50)}' || die "Video quality low percentile must be between 0 and 50."
+LC_NUMERIC=C awk -v v="$VIDEO_QUALITY_PERCENTILE_DELTA" 'BEGIN {exit !(v>=0 && v<=30)}' || die "Video quality percentile delta must be between 0 and 30."
+LC_NUMERIC=C awk -v v="$VIDEO_QUALITY_SUSTAINED_DELTA" 'BEGIN {exit !(v>=0 && v<=30)}' || die "Video quality sustained delta must be between 0 and 30."
+LC_NUMERIC=C awk -v v="$VIDEO_QUALITY_SUSTAINED_SECONDS" 'BEGIN {exit !(v>0 && v<=10)}' || die "Video quality sustained seconds must be greater than 0 and at most 10."
+[[ $VIDEO_QUALITY_RETRIES =~ ^[0-3]$ ]] || die "Video quality retries must be an integer from 0 to 3."
+[[ $VIDEO_QUALITY_RETRY_STEP =~ ^[1-9][0-9]*$ ]] || die "Video quality retry step must be a positive integer."
+(( VIDEO_QUALITY_RETRY_STEP <= 20 )) || die "Video quality retry step must be at most 20."
+
+# Child archive/video jobs inherit the exact acceptance policy selected by the
+# parent. Their config loader deliberately leaves these exported values alone.
+export HARDCORE_ARCHIVE_VIDEO_QUALITY_POLICY_INHERITED=1
+export HARDCORE_ARCHIVE_VIDEO_QUALITY_VALIDATION="$VIDEO_QUALITY_VALIDATION"
+export HARDCORE_ARCHIVE_VIDEO_QUALITY_SAMPLE_SECONDS="$VIDEO_QUALITY_SAMPLE_SECONDS"
+export HARDCORE_ARCHIVE_VIDEO_QUALITY_INTERVAL_SECONDS="$VIDEO_QUALITY_INTERVAL_SECONDS"
+export HARDCORE_ARCHIVE_VIDEO_QUALITY_MIN_SAMPLES="$VIDEO_QUALITY_MIN_SAMPLES"
+export HARDCORE_ARCHIVE_VIDEO_QUALITY_MAX_SAMPLES="$VIDEO_QUALITY_MAX_SAMPLES"
+export HARDCORE_ARCHIVE_VIDEO_QUALITY_COMPLEXITY_SAMPLES="$VIDEO_QUALITY_COMPLEXITY_SAMPLES"
+export HARDCORE_ARCHIVE_VIDEO_QUALITY_LOW_PERCENTILE="$VIDEO_QUALITY_LOW_PERCENTILE"
+export HARDCORE_ARCHIVE_VIDEO_QUALITY_PERCENTILE_DELTA="$VIDEO_QUALITY_PERCENTILE_DELTA"
+export HARDCORE_ARCHIVE_VIDEO_QUALITY_SUSTAINED_DELTA="$VIDEO_QUALITY_SUSTAINED_DELTA"
+export HARDCORE_ARCHIVE_VIDEO_QUALITY_SUSTAINED_SECONDS="$VIDEO_QUALITY_SUSTAINED_SECONDS"
+export HARDCORE_ARCHIVE_VIDEO_QUALITY_RETRIES="$VIDEO_QUALITY_RETRIES"
+export HARDCORE_ARCHIVE_VIDEO_QUALITY_RETRY_STEP="$VIDEO_QUALITY_RETRY_STEP"
 
 dependency_preflight_create_critical
 
@@ -5442,6 +5548,10 @@ dependency_preflight_create_optional "$VIDEO_COUNT" "$IMAGE_JPEG_COUNT" \
 
 if $VIDEO_TRANSCODE && (( VIDEO_COUNT > 0 )); then
     [[ -f $MEDIA_HELPER ]] || die "The trusted special-media helper is missing: $MEDIA_HELPER"
+    [[ -f $VIDEO_QUALITY_FINAL_SH ]] || die "The completed-video quality runner is missing: $VIDEO_QUALITY_FINAL_SH"
+    if [[ $QUALITY_CHECK != off ]]; then
+        [[ -f $VIDEO_QUALITY_HELPER ]] || die "The completed-video quality policy helper is missing: $VIDEO_QUALITY_HELPER"
+    fi
     set +e
     hardcore_media_resolve
     media_policy_rc=$?
@@ -5612,7 +5722,12 @@ choose_work_root
 JOB_ID=$(printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' \
     "$SOURCE" "$VIDEO_CODEC" "$VIDEO_ENCODER" "$VIDEO_MODE" \
     "$VIDEO_MIN_VMAF" "$VIDEO_MIN_SAVINGS_PERCENT" "$VIDEO_NO_SCALE" "$VIDEO_NO_DENOISE" \
-    "$IMAGE_OPTIMIZE" "$IMAGE_MODE" | \
+    "$IMAGE_OPTIMIZE" "$IMAGE_MODE" \
+    "video-acceptance-v1-duration-scaled" "$VIDEO_QUALITY_VALIDATION" \
+    "$VIDEO_QUALITY_SAMPLE_SECONDS" "$VIDEO_QUALITY_INTERVAL_SECONDS" "$VIDEO_QUALITY_MIN_SAMPLES" \
+    "$VIDEO_QUALITY_MAX_SAMPLES" "$VIDEO_QUALITY_COMPLEXITY_SAMPLES" "$VIDEO_QUALITY_LOW_PERCENTILE" \
+    "$VIDEO_QUALITY_PERCENTILE_DELTA" "$VIDEO_QUALITY_SUSTAINED_DELTA" "$VIDEO_QUALITY_SUSTAINED_SECONDS" \
+    "$VIDEO_QUALITY_RETRIES" "$VIDEO_QUALITY_RETRY_STEP" | \
     sha256sum | awk '{print substr($1,1,24)}')
 JOB_WORK_DIR="$WORK_ROOT/jobs/$JOB_ID"
 if ! $RESUME_ENABLED; then
@@ -6583,8 +6698,12 @@ video_cache_key() {
         "$SCRIPT_VERSION" "$relative" "$stat_value" "$source_hash" "$stream_signature" \
         "$VIDEO_CODEC" "$VIDEO_ENCODER" "$VIDEO_MODE" "$VIDEO_MIN_VMAF" "$VIDEO_MIN_SAVINGS_PERCENT" \
         "$VIDEO_NO_SCALE" "$VIDEO_NO_DENOISE" "$VIDEO_AUDIO_COPY" "$QUALITY_CHECK" "$ffmpeg_version" \
-        "video-preprocessing-v3-source-display-vmaf" "${HARDCORE_ARCHIVE_VIDEO_ACCELERATION:-auto}" \
-        "${HARDCORE_ARCHIVE_VIDEO_GPU_FILTERS:-auto}" "${HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE:-0}" | \
+        "video-acceptance-v1-duration-scaled" "${HARDCORE_ARCHIVE_VIDEO_ACCELERATION:-auto}" \
+        "${HARDCORE_ARCHIVE_VIDEO_GPU_FILTERS:-auto}" "${HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE:-0}" \
+        "${VIDEO_QUALITY_VALIDATION:-sampled}" "${VIDEO_QUALITY_SAMPLE_SECONDS:-4}" "${VIDEO_QUALITY_INTERVAL_SECONDS:-300}" \
+        "${VIDEO_QUALITY_MIN_SAMPLES:-5}" "${VIDEO_QUALITY_MAX_SAMPLES:-16}" "${VIDEO_QUALITY_COMPLEXITY_SAMPLES:-2}" \
+        "${VIDEO_QUALITY_LOW_PERCENTILE:-10}" "${VIDEO_QUALITY_PERCENTILE_DELTA:-4}" "${VIDEO_QUALITY_SUSTAINED_DELTA:-6}" \
+        "${VIDEO_QUALITY_SUSTAINED_SECONDS:-1}" "${VIDEO_QUALITY_RETRIES:-1}" "${VIDEO_QUALITY_RETRY_STEP:-2}" | \
         sha256sum | awk '{print $1}'
 }
 
@@ -6708,6 +6827,20 @@ start_video_pipeline() {
     launch_command=(
         env _IS_CHILD_PROCESS=1
         HARDCORE_ARCHIVE_VIDEO_QUALITY_THREADS="$RESOURCE_VIDEO_QUALITY_ENV"
+        HARDCORE_ARCHIVE_VIDEO_QUALITY_HELPER="$VIDEO_QUALITY_HELPER"
+        HARDCORE_ARCHIVE_VIDEO_QUALITY_FINAL_SH="$VIDEO_QUALITY_FINAL_SH"
+        HARDCORE_ARCHIVE_VIDEO_QUALITY_VALIDATION="$VIDEO_QUALITY_VALIDATION"
+        HARDCORE_ARCHIVE_VIDEO_QUALITY_SAMPLE_SECONDS="$VIDEO_QUALITY_SAMPLE_SECONDS"
+        HARDCORE_ARCHIVE_VIDEO_QUALITY_INTERVAL_SECONDS="$VIDEO_QUALITY_INTERVAL_SECONDS"
+        HARDCORE_ARCHIVE_VIDEO_QUALITY_MIN_SAMPLES="$VIDEO_QUALITY_MIN_SAMPLES"
+        HARDCORE_ARCHIVE_VIDEO_QUALITY_MAX_SAMPLES="$VIDEO_QUALITY_MAX_SAMPLES"
+        HARDCORE_ARCHIVE_VIDEO_QUALITY_COMPLEXITY_SAMPLES="$VIDEO_QUALITY_COMPLEXITY_SAMPLES"
+        HARDCORE_ARCHIVE_VIDEO_QUALITY_LOW_PERCENTILE="$VIDEO_QUALITY_LOW_PERCENTILE"
+        HARDCORE_ARCHIVE_VIDEO_QUALITY_PERCENTILE_DELTA="$VIDEO_QUALITY_PERCENTILE_DELTA"
+        HARDCORE_ARCHIVE_VIDEO_QUALITY_SUSTAINED_DELTA="$VIDEO_QUALITY_SUSTAINED_DELTA"
+        HARDCORE_ARCHIVE_VIDEO_QUALITY_SUSTAINED_SECONDS="$VIDEO_QUALITY_SUSTAINED_SECONDS"
+        HARDCORE_ARCHIVE_VIDEO_QUALITY_RETRIES="$VIDEO_QUALITY_RETRIES"
+        HARDCORE_ARCHIVE_VIDEO_QUALITY_RETRY_STEP="$VIDEO_QUALITY_RETRY_STEP"
         bash "$VIDEO_HELPER" "${VIDEO_HELPER_ARGS[@]}"
     )
     if $RESOURCE_POOL_ENABLED && $VIDEO_PARALLEL; then
@@ -7065,7 +7198,12 @@ write_video_manifest() {
         printf 'Bytes omitted by explicit choice: %s\n' "$VIDEO_OMITTED_BYTES"
         printf 'Minimum accepted VMAF: %s\n' "$VIDEO_MIN_VMAF"
         printf 'Minimum accepted saving: %s%%\n' "$VIDEO_MIN_SAVINGS_PERCENT"
-        printf 'Preflight sampling: %s\n' "$($VIDEO_PREFLIGHT && printf 'enabled' || printf 'disabled')"
+        printf 'Calibration/preflight sampling: %s\n' "$($VIDEO_PREFLIGHT && printf 'enabled' || printf 'disabled')"
+        printf 'Completed-output quality validation: %s\n' "$VIDEO_QUALITY_VALIDATION"
+        printf 'Completed-output sample policy: %ss windows, interval %ss, %s..%s samples + up to %s complexity windows\n' \
+            "$VIDEO_QUALITY_SAMPLE_SECONDS" "$VIDEO_QUALITY_INTERVAL_SECONDS" "$VIDEO_QUALITY_MIN_SAMPLES" "$VIDEO_QUALITY_MAX_SAMPLES" "$VIDEO_QUALITY_COMPLEXITY_SAMPLES"
+        printf 'Local quality criteria: p%s >= target-%s; sustained %ss below target-%s rejects\n' \
+            "$VIDEO_QUALITY_LOW_PERCENTILE" "$VIDEO_QUALITY_PERCENTILE_DELTA" "$VIDEO_QUALITY_SUSTAINED_SECONDS" "$VIDEO_QUALITY_SUSTAINED_DELTA"
         printf 'Original video bytes: %s\n' "$VIDEO_BYTES"
         printf 'Archived video bytes: %s\n' "$((VIDEO_COMPRESSED_BYTES + VIDEO_FALLBACK_BYTES))"
         printf 'Saved video bytes: %s\n' "$VIDEO_SAVED_BYTES"

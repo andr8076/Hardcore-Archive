@@ -73,6 +73,25 @@ VIDEO_CUDA_DEVICE=0
 VIDEO_CALIBRATION_CACHE=true
 # On a far-below-target plateau, check highest quality before rejecting the codec.
 VIDEO_CALIBRATION_EARLY_ABORT=true
+# Completed outputs are independently validated after the full encode.
+# sampled: bounded duration-scaled windows; full: score the complete timeline.
+VIDEO_QUALITY_VALIDATION=sampled
+# Sampled mode: 4-second windows; at least five, increasing with duration, capped at 16.
+VIDEO_QUALITY_SAMPLE_SECONDS=4
+VIDEO_QUALITY_INTERVAL_SECONDS=300
+VIDEO_QUALITY_MIN_SAMPLES=5
+VIDEO_QUALITY_MAX_SAMPLES=16
+# Add up to two deterministic high-packet-rate windows as difficult-scene hints.
+VIDEO_QUALITY_COMPLEXITY_SAMPLES=2
+# Every sampled window mean must still meet QUALITY_CHECK. In addition,
+# p10 may fall at most 4 points and >=1s below target-6 rejects.
+VIDEO_QUALITY_LOW_PERCENTILE=10
+VIDEO_QUALITY_PERCENTILE_DELTA=4
+VIDEO_QUALITY_SUSTAINED_DELTA=6
+VIDEO_QUALITY_SUSTAINED_SECONDS=1
+# One bounded higher-quality retry is allowed; the VMAF target never moves.
+VIDEO_QUALITY_RETRIES=1
+VIDEO_QUALITY_RETRY_STEP=2
 # Optional shared directory (default: platform cache/hardcore-archive/video-calibration-v1).
 # VIDEO_CALIBRATION_CACHE_DIR=/path/to/calibration-cache
 VIDEO_MIN_SAVINGS_PERCENT=3

@@ -282,16 +282,36 @@ hardcore_video_encode_attempt() {
 }
 
 hardcore_video_encode_full() {
-    local attempt=0
+    local preprocessing_attempt=0 quality_retry_count=0
     hardcore_video_accel_prepare "$video_encoder"
-    while (( attempt < 3 )); do
-        attempt=$((attempt + 1))
-        rm -f -- "$temporary"
-        if hardcore_video_encode_attempt; then return 0; fi
-        rm -f -- "$temporary"
-        # At most one full retry for each of AUTO's two hardware encoders.
-        # Never reuse GPU-filter calibration after changing preprocessing.
-        (( attempt < 3 )) && hardcore_video_accel_force_cpu "$video_encoder" || return 1
+    while (( preprocessing_attempt < 3 )); do
+        preprocessing_attempt=$((preprocessing_attempt + 1))
+        quality_retry_count=0
+        while true; do
+            rm -f -- "$temporary"
+            if hardcore_video_encode_attempt; then
+                if hardcore_video_validate_completed_quality "$temporary"; then
+                    return 0
+                fi
+                rm -f -- "$temporary"
+                if [[ ${VIDEO_FINAL_QUALITY_RETRYABLE:-false} == true ]] &&
+                   (( quality_retry_count < video_quality_retries )) &&
+                   hardcore_video_raise_quality; then
+                    quality_retry_count=$((quality_retry_count + 1))
+                    printf 'Completed-output quality retry %s/%s.
+' "$quality_retry_count" "$video_quality_retries"
+                    continue
+                fi
+                return 3
+            fi
+
+            rm -f -- "$temporary"
+            break
+        done
+
+        # Structural/encode failure still follows the existing preprocessing
+        # fallback path. A quality rejection never silently changes the target.
+        (( preprocessing_attempt < 3 )) && hardcore_video_accel_force_cpu "$video_encoder" || return 1
         calibrate_and_choose_video_codec || return 1
         run_video_preflight || return 1
     done

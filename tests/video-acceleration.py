@@ -48,6 +48,9 @@ measure_preflight_quality() {
     [[ ${GPU_BAD_QUALITY:-0} != 1 || $LAST_SAMPLE_MODE != gpu ]] || MEASURED_QUALITY_SCORE=74
     return 0
 }
+hardcore_video_validate_completed_quality() { return 0; }
+hardcore_video_raise_quality() { return 1; }
+video_quality_retries=0
 hardcore_video_speed_probe() {
     local mode
     mode=$(hardcore_video_accel_mode "$2")

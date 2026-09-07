@@ -17,6 +17,8 @@ HELPER_PATH = ROOT / "lib/hardcore-archive-video-quality.py"
 spec = importlib.util.spec_from_file_location("hardcore_video_quality", HELPER_PATH)
 assert spec and spec.loader
 quality = importlib.util.module_from_spec(spec)
+import sys
+sys.modules[spec.name] = quality
 spec.loader.exec_module(quality)
 
 
@@ -165,9 +167,11 @@ class EvaluationTests(unittest.TestCase):
 class StaticIntegrationTests(unittest.TestCase):
     def test_core_wires_completed_output_policy_and_cache_identity(self):
         core = (ROOT / "lib/hardcore-archive-core.sh").read_text()
-        self.assertIn("hardcore_video_validate_completed_quality", core)
+        self.assertIn("video-quality-final.sh", core)
+        acceleration = (ROOT / "lib/video-acceleration.sh").read_text()
+        self.assertIn("hardcore_video_validate_completed_quality", acceleration)
         self.assertIn("VIDEO_QUALITY_VALIDATION", core)
-        self.assertIn("completed-video-quality-v1", core)
+        self.assertIn("video-acceptance-v1-duration-scaled", core)
         self.assertIn("VIDEO_QUALITY_LOW_PERCENTILE", core)
         self.assertIn("VIDEO_QUALITY_SUSTAINED_SECONDS", core)
         self.assertIn("VIDEO_QUALITY_RETRIES", core)
