@@ -25,15 +25,22 @@ jobs:
           text=path.read_text()
           old='quality = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(quality)\n'
           new='quality = importlib.util.module_from_spec(spec)\nimport sys\nsys.modules[spec.name] = quality\nspec.loader.exec_module(quality)\n'
-          if old not in text:
+          if old in text:
+              path.write_text(text.replace(old,new,1))
+          elif 'sys.modules[spec.name] = quality' not in text:
               raise SystemExit('test-loader patch anchor missing')
-          path.write_text(text.replace(old,new,1))
           PY
           python3 tools/apply-final-video-quality.py
           bash -n lib/hardcore-archive-core.sh
           bash -n lib/video-acceleration.sh
           bash -n lib/video-quality-final.sh
           python3 -m py_compile lib/hardcore-archive-video-quality.py
+          python3 - <<'PY'
+          import importlib.util, sys
+          spec=importlib.util.spec_from_file_location('q','lib/hardcore-archive-video-quality.py')
+          q=importlib.util.module_from_spec(spec); sys.modules[spec.name]=q; spec.loader.exec_module(q)
+          print('sample-counts:', len(q.plan_uniform_windows(60)), len(q.plan_uniform_windows(3600)), len(q.plan_uniform_windows(86400)))
+          PY
           python3 tests/video-final-quality.py
           python3 tests/video-quality-performance.py
           python3 tests/video-acceleration.py
