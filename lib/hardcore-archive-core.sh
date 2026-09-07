@@ -2242,18 +2242,16 @@ quality_display_geometry() {
     fi
     [[ $rotation =~ ^-?[0-9]+$ ]] || rotation=0
     rotation=$(( (rotation % 360 + 360) % 360 ))
-    case $rotation in
-        90|270)
-            display_width=$(LC_NUMERIC=C awk -v h="$coded_height" -v n="$sar_num" -v d="$sar_den" \
-                'BEGIN {printf "%.9f", h*d/n}')
-            display_height=$coded_width
-            ;;
-        *)
-            display_width=$(LC_NUMERIC=C awk -v w="$coded_width" -v n="$sar_num" -v d="$sar_den" \
-                'BEGIN {printf "%.9f", w*n/d}')
-            display_height=$coded_height
-            ;;
-    esac
+    # First construct the viewed square-pixel raster, then rotate that canvas.
+    # For example 720x576 at SAR 16:15 is 768x576, or 576x768 when rotated 90°.
+    display_width=$(LC_NUMERIC=C awk -v w="$coded_width" -v n="$sar_num" -v d="$sar_den" \
+        'BEGIN {printf "%.9f", w*n/d}')
+    display_height=$coded_height
+    if (( rotation == 90 || rotation == 270 )); then
+        local swapped=$display_width
+        display_width=$display_height
+        display_height=$swapped
+    fi
     display_width=$(quality_round_even "$display_width") || return 1
     display_height=$(quality_round_even "$display_height") || return 1
     printf '%s\t%s' "$display_width" "$display_height"
