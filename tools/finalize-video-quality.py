@@ -24,6 +24,25 @@ if final_identity in core:
     core = core.replace(final_identity, original_identity, 1)
 elif original_identity not in core:
     raise SystemExit("calibration identity cleanup anchor missing")
+
+# video_cache_key is intentionally usable as a standalone helper in tests and
+# tooling, so use the shipped acceptance defaults if the surrounding core has
+# not initialized the policy globals yet. Normal runs still hash their explicit
+# configured values.
+resume_identity = '''        "$VIDEO_QUALITY_VALIDATION" "$VIDEO_QUALITY_SAMPLE_SECONDS" "$VIDEO_QUALITY_INTERVAL_SECONDS" \\
+        "$VIDEO_QUALITY_MIN_SAMPLES" "$VIDEO_QUALITY_MAX_SAMPLES" "$VIDEO_QUALITY_COMPLEXITY_SAMPLES" \\
+        "$VIDEO_QUALITY_LOW_PERCENTILE" "$VIDEO_QUALITY_PERCENTILE_DELTA" "$VIDEO_QUALITY_SUSTAINED_DELTA" \\
+        "$VIDEO_QUALITY_SUSTAINED_SECONDS" "$VIDEO_QUALITY_RETRIES" "$VIDEO_QUALITY_RETRY_STEP" | \\
+'''
+resume_identity_safe = '''        "${VIDEO_QUALITY_VALIDATION:-sampled}" "${VIDEO_QUALITY_SAMPLE_SECONDS:-4}" "${VIDEO_QUALITY_INTERVAL_SECONDS:-300}" \\
+        "${VIDEO_QUALITY_MIN_SAMPLES:-5}" "${VIDEO_QUALITY_MAX_SAMPLES:-16}" "${VIDEO_QUALITY_COMPLEXITY_SAMPLES:-2}" \\
+        "${VIDEO_QUALITY_LOW_PERCENTILE:-10}" "${VIDEO_QUALITY_PERCENTILE_DELTA:-4}" "${VIDEO_QUALITY_SUSTAINED_DELTA:-6}" \\
+        "${VIDEO_QUALITY_SUSTAINED_SECONDS:-1}" "${VIDEO_QUALITY_RETRIES:-1}" "${VIDEO_QUALITY_RETRY_STEP:-2}" | \\
+'''
+if resume_identity in core:
+    core = core.replace(resume_identity, resume_identity_safe, 1)
+elif resume_identity_safe not in core:
+    raise SystemExit("completed resume identity cleanup anchor missing")
 core_path.write_text(core)
 
 # Wire completed-output quality acceptance into the full encode loop. Keep
