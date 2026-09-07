@@ -32,6 +32,7 @@ jobs:
           "$BASH_BIN" tests/runtime-bootstrap.sh
           "$BASH_BIN" tests/ffmpeg-detection.sh
           "$BASH_BIN" tests/png-validation.sh
+          python3 tests/video-quality-performance.py
           python3 tests/zopfli-adaptive.py
           python3 tests/benchmark-workloads.py
           # Native macOS ACLs must actually round-trip on an Apple filesystem;
