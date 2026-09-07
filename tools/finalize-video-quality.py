@@ -4,6 +4,28 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# The completed-output acceptance policy must invalidate completed transcode
+# resume identities, but it does not change the existing calibration scoring
+# policy. Keep calibration/preprocessing reuse independent and let the completed
+# candidate be revalidated under the current acceptance policy.
+core_path = ROOT / "lib/hardcore-archive-core.sh"
+core = core_path.read_text()
+core = core.replace(
+    "'calibration-v5-source-display-final-acceptance-policy'",
+    "'calibration-v4-source-display-resolution-bicubic-sar-nearest-vmaf-model'",
+)
+final_identity = '''        "$quality_vmaf_threshold" \\
+        "final=${video_quality_validation}:${video_quality_sample_seconds}:${video_quality_interval_seconds}:${video_quality_min_samples}:${video_quality_max_samples}:${video_quality_complexity_samples}:${video_quality_low_percentile}:${video_quality_percentile_delta}:${video_quality_sustained_delta}:${video_quality_sustained_seconds}:${video_quality_retries}:${video_quality_retry_step}" \\
+        "$(hardcore_video_accel_signature "$encoder")" | sha256sum | awk '{print $1}') || return 0
+'''
+original_identity = '''        "$quality_vmaf_threshold" "$(hardcore_video_accel_signature "$encoder")" | sha256sum | awk '{print $1}') || return 0
+'''
+if final_identity in core:
+    core = core.replace(final_identity, original_identity, 1)
+elif original_identity not in core:
+    raise SystemExit("calibration identity cleanup anchor missing")
+core_path.write_text(core)
+
 # Wire completed-output quality acceptance into the full encode loop. Keep
 # structural preprocessing retries separate from bounded higher-quality retries.
 accel_path = ROOT / "lib/video-acceleration.sh"
@@ -69,6 +91,23 @@ elif 'hardcore_video_validate_completed_quality "$temporary"' not in accel:
     raise SystemExit("video encode integration anchor missing")
 accel_path.write_text(accel)
 
+# Existing acceleration tests isolate preprocessing/encode behavior. Stub the
+# new completed-output gate there so those tests remain about acceleration; the
+# dedicated final-quality suite exercises the real gate and retry behavior.
+accel_test_path = ROOT / "tests/video-acceleration.py"
+accel_test = accel_test_path.read_text()
+probe_anchor = '''hardcore_video_speed_probe() {
+'''
+if 'hardcore_video_validate_completed_quality() { return 0; }' not in accel_test:
+    accel_test = accel_test.replace(
+        probe_anchor,
+        '''hardcore_video_validate_completed_quality() { return 0; }
+hardcore_video_raise_quality() { return 1; }
+video_quality_retries=0
+hardcore_video_speed_probe() {
+''', 1)
+accel_test_path.write_text(accel_test)
+
 # Correct static test expectations to verify the modular integration and current
 # cache-policy identity rather than obsolete implementation labels.
 test_path = ROOT / "tests/video-final-quality.py"
@@ -95,8 +134,8 @@ test_path.write_text(test)
 performance_path = ROOT / "tests/video-quality-performance.py"
 performance = performance_path.read_text()
 performance = performance.replace(
-    '"calibration-v4-source-display-resolution-bicubic-sar-nearest-vmaf-model"',
-    '"calibration-v5-source-display-final-acceptance-policy"')
+    '"calibration-v5-source-display-final-acceptance-policy"',
+    '"calibration-v4-source-display-resolution-bicubic-sar-nearest-vmaf-model"')
 performance = performance.replace(
     '\'"video-preprocessing-v3-source-display-vmaf"\'',
     '\'"video-acceptance-v1-duration-scaled"\'')
