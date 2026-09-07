@@ -27,7 +27,9 @@ assert "json.load(handle)['pooled_metrics']['vmaf']['mean']" in text
 assert 'grep -Eo \'"mean"[[:space:]]*:[[:space:]]*[0-9]+' not in text
 assert 'encoder_args=("-rc_mode" "CQP" "-global_quality:v" "$quality")' in text
 assert 'test_real_encode av1_vaapi av1 -rc_mode CQP -global_quality:v "$AV1_CRF"' in text
-assert 'Strict quality policy: VMAF failure is a preflight failure' in text
+assert 'Strict quality policy: model/VMAF failure preserves the original' in text
+assert "QUALITY_VMAF_POLICY_VERSION='source-display-v1'" in text
+assert 'quality_vmaf_filter_graph' in text
 assert '[[ "$quality_check" == off && "$duration_is_long" != true ]]' in text
 assert 'elif [[ $quality_check != off ]]; then' in text
 assert 'Sample VMAF quality validation was unavailable. Original preserved unchanged.' in text
