@@ -46,6 +46,7 @@ hardcore_video_validate_completed_quality() {
 
     VIDEO_FINAL_QUALITY_RESULT=''
     VIDEO_FINAL_QUALITY_REASON=''
+    VIDEO_FINAL_QUALITY_RETRYABLE=false
     if [[ ${quality_check:-off} == off ]]; then
         printf 'Completed-output VMAF validation: explicitly disabled by quality policy.\n'
         return 0
@@ -98,15 +99,16 @@ hardcore_video_validate_completed_quality() {
         fi
     done < "$plan"
 
-    set +e
-    result=$(python3 "$HARDCORE_ARCHIVE_VIDEO_QUALITY_HELPER" evaluate \
+    if result=$(python3 "$HARDCORE_ARCHIVE_VIDEO_QUALITY_HELPER" evaluate \
         --manifest "$manifest" --duration "$duration" --threshold "$quality_vmaf_threshold" \
         --low-percentile "$video_quality_low_percentile" \
         --percentile-delta "$video_quality_percentile_delta" \
         --sustained-delta "$video_quality_sustained_delta" \
-        --sustained-seconds "$video_quality_sustained_seconds")
-    rc=$?
-    set -e 2>/dev/null || true
+        --sustained-seconds "$video_quality_sustained_seconds"); then
+        rc=0
+    else
+        rc=$?
+    fi
     elapsed=$((SECONDS - started))
     VIDEO_FINAL_QUALITY_RESULT=$result
 
@@ -145,6 +147,7 @@ PYFINALQUALITY
     fi
 
     VIDEO_FINAL_QUALITY_REASON=${reasons:-quality-evaluation-failed}
+    [[ $status == reject && $rc -eq 3 ]] && VIDEO_FINAL_QUALITY_RETRYABLE=true
     printf 'Completed-output VMAF acceptance REJECTED: %s\n' "$VIDEO_FINAL_QUALITY_REASON"
     return 1
 }
