@@ -1,0 +1,46 @@
+name: One-shot stale branch cleanup
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/one-shot-branch-cleanup.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Delete all non-main development branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          branches=(
+            'benchmarks/real-world-profiles'
+            'feature/content-aware-copy-routing'
+            'fix/benchmark-harness-resilience'
+            'fix/content-aware-video-routing'
+            'fix/png-canonical-pixel-validation'
+            'fix/vmaf-source-display-resolution'
+            'perf/adaptive-oxipng'
+            'perf/adaptive-zopfli-effort'
+            'perf/calibrated-image-scheduler'
+            'perf/full-throttle-images'
+            'perf/heterogeneous-image-scheduler'
+            'perf/parallel-nested-archives'
+            'perf/shared-resource-pool'
+          )
+          for branch in "${branches[@]}"; do
+            if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+              echo "Deleting $branch"
+              git push origin --delete "$branch"
+            else
+              echo "Already absent: $branch"
+            fi
+          done
+          echo 'Remaining remote branches:'
+          git ls-remote --heads origin
