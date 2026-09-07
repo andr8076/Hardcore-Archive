@@ -3,7 +3,8 @@ name: One-shot completed video quality validation
 on:
   push:
     branches: [main]
-    paths: [.github/workflows/one-shot-video-quality-validation.yml]
+    paths:
+      - .github/workflows/one-shot-video-quality-validation.yml
 
 permissions:
   contents: write
@@ -19,104 +20,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          path=Path('tests/video-final-quality.py')
-          text=path.read_text()
-          old='quality = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(quality)\n'
-          new='quality = importlib.util.module_from_spec(spec)\nimport sys\nsys.modules[spec.name] = quality\nspec.loader.exec_module(quality)\n'
-          if old in text:
-              text=text.replace(old,new,1)
-          elif 'sys.modules[spec.name] = quality' not in text:
-              raise SystemExit('test-loader patch anchor missing')
-          # The completed validator intentionally lives in its own module. The
-          # static integration test should verify the real module boundary and
-          # encode-loop call, not require the function body to be embedded in core.
-          old_assert='        self.assertIn("hardcore_video_validate_completed_quality", core)\n'
-          if old_assert in text:
-              text=text.replace(old_assert,
-                  '        self.assertIn("video-quality-final.sh", core)\n'
-                  '        acceleration = (ROOT / "lib/video-acceleration.sh").read_text()\n'
-                  '        self.assertIn("hardcore_video_validate_completed_quality", acceleration)\n',1)
-          path.write_text(text)
-          PY
           python3 tools/apply-final-video-quality.py
-          python3 - <<'PY'
-          from pathlib import Path
-          path=Path('lib/video-acceleration.sh')
-          text=path.read_text()
-          old='''hardcore_video_encode_full() {
-    local attempt=0
-    hardcore_video_accel_prepare "$video_encoder"
-    while (( attempt < 3 )); do
-        attempt=$((attempt + 1))
-        rm -f -- "$temporary"
-        if hardcore_video_encode_attempt; then return 0; fi
-        rm -f -- "$temporary"
-        # At most one full retry for each of AUTO's two hardware encoders.
-        # Never reuse GPU-filter calibration after changing preprocessing.
-        (( attempt < 3 )) && hardcore_video_accel_force_cpu "$video_encoder" || return 1
-        calibrate_and_choose_video_codec || return 1
-        run_video_preflight || return 1
-    done
-    return 1
-}
-'''
-          new='''hardcore_video_encode_full() {
-    local preprocessing_attempt=0 quality_retry=0
-    hardcore_video_accel_prepare "$video_encoder"
-    while (( preprocessing_attempt < 3 )); do
-        preprocessing_attempt=$((preprocessing_attempt + 1))
-        quality_retry=0
-        while true; do
-            rm -f -- "$temporary"
-            if hardcore_video_encode_attempt; then
-                if hardcore_video_validate_completed_quality "$temporary"; then
-                    return 0
-                fi
-                rm -f -- "$temporary"
-                if [[ ${VIDEO_FINAL_QUALITY_RETRYABLE:-false} == true ]] &&
-                   (( quality_retry < ${video_quality_retries:-0} )) &&
-                   hardcore_video_raise_quality; then
-                    quality_retry=$((quality_retry + 1))
-                    printf 'Completed-output quality retry %s/%s uses a strictly higher encoder quality.\\n' \
-                        "$quality_retry" "$video_quality_retries"
-                    continue
-                fi
-                # A measured quality rejection is distinct from an encode/decode
-                # failure: preserve the original rather than changing preprocessing
-                # or weakening the configured VMAF target.
-                return 3
-            fi
-            break
-        done
-        rm -f -- "$temporary"
-        # Structural/preprocessing failures retain the existing bounded CPU
-        # preprocessing fallback. Hardware encoding remains mandatory.
-        (( preprocessing_attempt < 3 )) && hardcore_video_accel_force_cpu "$video_encoder" || return 1
-        calibrate_and_choose_video_codec || return 1
-        run_video_preflight || return 1
-    done
-    return 1
-}
-'''
-          if old not in text:
-              if 'hardcore_video_validate_completed_quality "$temporary"' not in text:
-                  raise SystemExit('video encode integration anchor missing')
-          else:
-              text=text.replace(old,new,1)
-          path.write_text(text)
-          PY
+          python3 tools/finalize-video-quality.py
           bash -n lib/hardcore-archive-core.sh
           bash -n lib/video-acceleration.sh
           bash -n lib/video-quality-final.sh
           python3 -m py_compile lib/hardcore-archive-video-quality.py
-          python3 - <<'PY'
-          import importlib.util, sys
-          spec=importlib.util.spec_from_file_location('q','lib/hardcore-archive-video-quality.py')
-          q=importlib.util.module_from_spec(spec); sys.modules[spec.name]=q; spec.loader.exec_module(q)
-          print('sample-counts:', len(q.plan_uniform_windows(60)), len(q.plan_uniform_windows(3600)), len(q.plan_uniform_windows(86400)))
-          PY
           python3 tests/video-final-quality.py
           python3 tests/video-quality-performance.py
           python3 tests/video-acceleration.py
@@ -129,14 +38,7 @@ jobs:
           set -euo pipefail
           git config user.name 'Hardcore Archive automation'
           git config user.email 'actions@users.noreply.github.com'
-          git add \
-            lib/hardcore-archive-core.sh \
-            lib/video-acceleration.sh \
-            config README.md \
-            tests/video-final-quality.py \
-            tests/module-layout.sh \
-            tests/frontend-policy.sh \
-            .github/workflows/runtime-tests.yml
+          git add lib/hardcore-archive-core.sh lib/video-acceleration.sh config README.md tests/video-final-quality.py tests/module-layout.sh tests/frontend-policy.sh .github/workflows/runtime-tests.yml
           git diff --cached --quiet && { echo 'No implementation changes to commit.'; exit 0; }
           git commit -m 'Validate completed video output quality'
           git push origin HEAD:main
