@@ -2,7 +2,7 @@
 """Plan and evaluate completed-video VMAF acceptance checks.
 
 This helper deliberately separates cheap encoder calibration from acceptance of the
-actual completed output.  Sampled mode is bounded and reproducible; full mode
+actual completed output. Sampled mode is bounded and reproducible; full mode
 scores the complete timeline and is intentionally more expensive.
 """
 from __future__ import annotations
@@ -14,8 +14,7 @@ import math
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Sequence
 
 POLICY_VERSION = "completed-video-quality-v1"
 
@@ -100,7 +99,12 @@ def plan_uniform_windows(
         return windows
 
     uniform_cap = max(1, max_samples - complexity_slots)
-    desired = max(min_samples, math.ceil(duration / interval_seconds) + 2)
+    # Coverage growth is explicit: keep the minimum for the first interval,
+    # then add one uniformly distributed window for every additional interval
+    # of source duration until the bounded cap is reached. This makes duration
+    # monotonic and auditable (60 s -> 5; 1 h -> 14 with shipped defaults).
+    intervals = max(1, math.ceil(duration / interval_seconds))
+    desired = min_samples + max(0, intervals - 1)
     count = min(uniform_cap, desired)
     length = min(sample_seconds, duration)
     windows = []
