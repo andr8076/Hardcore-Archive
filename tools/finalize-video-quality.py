@@ -91,3 +91,13 @@ elif 'acceleration = (ROOT / "lib/video-acceleration.sh").read_text()' not in te
     raise SystemExit("static integration assertion anchor missing")
 test = test.replace('"completed-video-quality-v1"', '"video-acceptance-v1-duration-scaled"')
 test_path.write_text(test)
+
+performance_path = ROOT / "tests/video-quality-performance.py"
+performance = performance_path.read_text()
+performance = performance.replace(
+    '"calibration-v4-source-display-resolution-bicubic-sar-nearest-vmaf-model"',
+    '"calibration-v5-source-display-final-acceptance-policy"')
+performance = performance.replace(
+    '\'"video-preprocessing-v3-source-display-vmaf"\'',
+    '\'"video-acceptance-v1-duration-scaled"\'')
+performance_path.write_text(performance)
