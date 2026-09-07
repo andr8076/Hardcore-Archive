@@ -1,6 +1,6 @@
 name: One-shot completed video quality validation
 
-# Rerun after narrowing final acceptance identity to completed outputs.
+# Rerun after making completed-output resume identity self-contained.
 on:
   push:
     branches: [main]
