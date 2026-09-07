@@ -69,8 +69,8 @@ elif 'hardcore_video_validate_completed_quality "$temporary"' not in accel:
     raise SystemExit("video encode integration anchor missing")
 accel_path.write_text(accel)
 
-# Correct the static test to verify the module boundary instead of requiring the
-# validator function body to appear in the large core file.
+# Correct static test expectations to verify the modular integration and current
+# cache-policy identity rather than obsolete implementation labels.
 test_path = ROOT / "tests/video-final-quality.py"
 test = test_path.read_text()
 loader_old = "quality = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(quality)\n"
@@ -89,4 +89,5 @@ if assert_old in test:
     test = test.replace(assert_old, assert_new, 1)
 elif 'acceleration = (ROOT / "lib/video-acceleration.sh").read_text()' not in test:
     raise SystemExit("static integration assertion anchor missing")
+test = test.replace('"completed-video-quality-v1"', '"video-acceptance-v1-duration-scaled"')
 test_path.write_text(test)
