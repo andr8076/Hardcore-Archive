@@ -1,6 +1,6 @@
 name: One-shot completed video quality validation
 
-# Rerun after completed-output cache-identity assertion fix.
+# Rerun after final cache-identity test update.
 on:
   push:
     branches: [main]
@@ -39,7 +39,7 @@ jobs:
           set -euo pipefail
           git config user.name 'Hardcore Archive automation'
           git config user.email 'actions@users.noreply.github.com'
-          git add lib/hardcore-archive-core.sh lib/video-acceleration.sh config README.md tests/video-final-quality.py tests/module-layout.sh tests/frontend-policy.sh .github/workflows/runtime-tests.yml
+          git add lib/hardcore-archive-core.sh lib/video-acceleration.sh config README.md tests/video-final-quality.py tests/video-quality-performance.py tests/module-layout.sh tests/frontend-policy.sh .github/workflows/runtime-tests.yml
           git diff --cached --quiet && { echo 'No implementation changes to commit.'; exit 0; }
           git commit -m 'Validate completed video output quality'
           git push origin HEAD:main
