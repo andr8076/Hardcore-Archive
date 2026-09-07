@@ -1,5 +1,6 @@
 name: One-shot completed video quality validation
 
+# Rerun after completed-output cache-identity assertion fix.
 on:
   push:
     branches: [main]
