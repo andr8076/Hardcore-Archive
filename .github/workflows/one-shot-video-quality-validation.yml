@@ -19,6 +19,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path=Path('tests/video-final-quality.py')
+          text=path.read_text()
+          old='quality = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(quality)\n'
+          new='quality = importlib.util.module_from_spec(spec)\nimport sys\nsys.modules[spec.name] = quality\nspec.loader.exec_module(quality)\n'
+          if old not in text:
+              raise SystemExit('test-loader patch anchor missing')
+          path.write_text(text.replace(old,new,1))
+          PY
           python3 tools/apply-final-video-quality.py
           bash -n lib/hardcore-archive-core.sh
           bash -n lib/video-acceleration.sh
@@ -40,6 +50,7 @@ jobs:
             lib/hardcore-archive-core.sh \
             lib/video-acceleration.sh \
             config README.md \
+            tests/video-final-quality.py \
             tests/module-layout.sh \
             tests/frontend-policy.sh \
             .github/workflows/runtime-tests.yml
