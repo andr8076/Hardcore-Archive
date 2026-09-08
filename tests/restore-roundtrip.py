@@ -11,10 +11,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-CORE = (ROOT / "lib/hardcore-archive-core.sh").read_text()
-FUNCTIONS = "apply_sparse_manifest() {" + CORE.split(
-    "apply_sparse_manifest() {", 1
-)[1].split("\n# Resolve configuration", 1)[0]
+RESTORE_MODULE = ROOT / "lib/restore.sh"
 SEVEN_ZIP = next((p for name in ("7zz", "7z", "7za") if (p := shutil.which(name))), None)
 
 FAKE_ARCHIVER = r'''#!/usr/bin/env python3
@@ -74,7 +71,7 @@ class RestoreTests(unittest.TestCase):
         self.outside.write_text("do not touch\n")
 
     def run_restore(self, real=False, frontend=False, **env):
-        script = "set -Eeuo pipefail\n" + FUNCTIONS + r'''
+        script = r'''set -Eeuo pipefail
 MIB=1048576
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 human_bytes() { printf '%s bytes' "$1"; }
@@ -82,6 +79,7 @@ df() {
     printf 'Filesystem blocks used available capacity mounted\n'
     printf 'device 999999999999 0 %s 0%% /\n' "${TEST_FREE:-999999999999}"
 }
+source "$RESTORE_MODULE"
 POSITIONAL=("$TEST_ARCHIVE" "$TEST_DESTINATION")
 restore_existing_archive
 '''
@@ -95,7 +93,8 @@ restore_existing_archive
             command, text=True, capture_output=True, timeout=30,
             env=dict(os.environ, TEST_ROOT=str(self.root), TEST_ARCHIVE=str(self.archive),
                      TEST_DESTINATION=str(self.destination), SEVEN_ZIP=SEVEN_ZIP if real else str(self.fake),
-                     METADATA_HELPER=str(ROOT / "lib/hardcore-archive-metadata.py"), **env),
+                     METADATA_HELPER=str(ROOT / "lib/hardcore-archive-metadata.py"),
+                     RESTORE_MODULE=str(RESTORE_MODULE), **env),
         )
         self.assertEqual(self.outside.read_text(), "do not touch\n")
         self.assertEqual(self.file.read_bytes(), self.content)
