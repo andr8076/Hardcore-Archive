@@ -42,7 +42,7 @@ hardcore_video_measure_completed_segment() {
 
 hardcore_video_validate_completed_quality() {
     local candidate=$1 plan manifest result started elapsed rc=0 index=0
-    local kind start length coverage mean minimum_window low_value low_percentile longest reasons status windows frames
+    local kind start length coverage_seconds coverage_percent mean minimum_window low_value low_percentile longest reasons status windows frames
 
     VIDEO_FINAL_QUALITY_RESULT=''
     VIDEO_FINAL_QUALITY_REASON=''
@@ -118,7 +118,7 @@ hardcore_video_validate_completed_quality() {
         return 1
     fi
 
-    IFS=$'\t' read -r status windows frames coverage mean minimum_window low_percentile low_value longest reasons < <(
+    IFS=$'\t' read -r status windows frames coverage_seconds coverage_percent mean minimum_window low_percentile low_value longest reasons < <(
         python3 - "$result" <<'PYFINALQUALITY'
 import json,sys
 try:
@@ -126,20 +126,25 @@ try:
     reasons='; '.join(str(x) for x in d.get('reasons', [])) or d.get('error','')
     print('\t'.join([
         str(d.get('status','error')), str(d.get('windows','?')), str(d.get('frames','?')),
-        f"{float(d.get('coverage_percent',0)):.2f}", f"{float(d.get('mean_vmaf',0)):.3f}",
-        f"{float(d.get('minimum_window_mean',0)):.3f}", str(d.get('low_percentile','?')),
-        f"{float(d.get('low_percentile_vmaf',0)):.3f}",
+        f"{float(d.get('coverage_seconds',0)):.3f}", f"{float(d.get('coverage_percent',0)):.2f}",
+        f"{float(d.get('mean_vmaf',0)):.3f}", f"{float(d.get('minimum_window_mean',0)):.3f}",
+        str(d.get('low_percentile','?')), f"{float(d.get('low_percentile_vmaf',0)):.3f}",
         f"{float(d.get('longest_sustained_seconds',0)):.3f}", reasons,
     ]))
 except Exception as exc:
-    print('error\t?\t?\t0\t0\t0\t?\t0\t0\tmalformed-result:'+str(exc))
+    print('error\t?\t?\t0\t0\t0\t0\t?\t0\t0\tmalformed-result:'+str(exc))
 PYFINALQUALITY
     )
 
-    printf 'Coverage: %s window(s), %s frame score(s), %s%% of timeline; validation time %ss.\n' \
-        "$windows" "$frames" "$coverage" "$elapsed"
+    printf 'Coverage: %s window(s), %s frame score(s), %ss/%ss (%s%% of timeline); validation time %ss.\n' \
+        "$windows" "$frames" "$coverage_seconds" "$duration" "$coverage_percent" "$elapsed"
     printf 'Scores: mean %s; worst window mean %s; p%s %s; longest sustained-low run %ss.\n' \
         "$mean" "$minimum_window" "$low_percentile" "$low_value" "$longest"
+    if [[ $video_quality_validation == sampled ]]; then
+        printf 'Assurance scope: sampled only; unsampled parts of the timeline were not VMAF-scored.\n'
+    else
+        printf 'Assurance scope: full timeline VMAF-scored; this is metric coverage, not an absolute perceptual guarantee.\n'
+    fi
 
     if (( rc == 0 )) && [[ $status == pass ]]; then
         printf 'Completed-output VMAF acceptance passed at the configured target %s.\n' "$quality_vmaf_threshold"
