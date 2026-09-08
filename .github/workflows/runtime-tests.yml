@@ -26,6 +26,10 @@ jobs:
             BASH_BIN=bash
           fi
           "$BASH_BIN" tests/module-layout.sh
+          # This production-module regression invokes the host kernel's real
+          # no-replace rename operation on both Linux and macOS.
+          PATH="$(dirname "$(command -v "$BASH_BIN")"):$PATH" \
+            python3 tests/restore-destination-race.py
           "$BASH_BIN" tests/resource-pool.sh
           "$BASH_BIN" tests/nested-parallel.sh
           "$BASH_BIN" tests/bundled-runtime.sh
