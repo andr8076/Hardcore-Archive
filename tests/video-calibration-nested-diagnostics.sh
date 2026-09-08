@@ -4,19 +4,22 @@ IFS=$'\n\t'
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 CORE="$ROOT/lib/hardcore-archive-core.sh"
+VIDEO_HELPER="$ROOT/lib/hardcore-archive-video-helper.sh"
 [[ -f $CORE ]] || { printf 'Missing static core: %s\n' "$CORE" >&2; exit 1; }
+[[ -f $VIDEO_HELPER ]] || { printf 'Missing static video helper: %s\n' "$VIDEO_HELPER" >&2; exit 1; }
 bash -n "$CORE"
+bash -n "$VIDEO_HELPER"
 
 assert_has() {
     local text=$1
-    grep -Fq -- "$text" "$CORE" || {
+    grep -Fq -- "$text" "$CORE" || grep -Fq -- "$text" "$VIDEO_HELPER" || {
         printf 'Missing static engine policy text: %s\n' "$text" >&2
         exit 1
     }
 }
 assert_lacks() {
     local text=$1
-    ! grep -Fq -- "$text" "$CORE" || {
+    ! grep -Fq -- "$text" "$CORE" && ! grep -Fq -- "$text" "$VIDEO_HELPER" || {
         printf 'Forbidden stale static engine text remains: %s\n' "$text" >&2
         exit 1
     }

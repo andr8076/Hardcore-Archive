@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+VIDEO_HELPER="$ROOT/lib/hardcore-archive-video-helper.sh"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/hardcore-media-policy.XXXXXX")
 cleanup() { rm -rf -- "$TMP"; }
 trap cleanup EXIT
@@ -57,6 +58,6 @@ grep -Fq "Videos selected for omission cannot be combined with --remove-source" 
 grep -Fq -- 'primary_indexes[$stream_index]=1' "$ROOT/lib/video-acceleration.sh"
 grep -Fq -- 'video_maps+=(-map "0:$stream_index")' "$ROOT/lib/video-acceleration.sh"
 grep -Fq -- '"${video_maps[@]}" -map '\''0:a?'\'' -map '\''0:s?'\'' -map '\''0:d?'\'' -map '\''0:t?'\''' "$ROOT/lib/video-acceleration.sh"
-grep -Fq 'validate "$input" "$temporary"' "$ROOT/lib/hardcore-archive-core.sh"
+grep -Fq 'validate "$input" "$temporary"' "$VIDEO_HELPER"
 
 printf 'Special-media policy tests passed.\n'

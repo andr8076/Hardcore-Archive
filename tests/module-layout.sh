@@ -17,6 +17,7 @@ bash -n "$ROOT/hardcore-archive-runner.sh"
 bash -n "$ROOT/hardcore-archive-runner-policy.sh"
 bash -n "$ROOT/lib/hardcore-archive-core.sh"
 bash -n "$ROOT/lib/hardcore-archive-image-helper.sh"
+bash -n "$ROOT/lib/hardcore-archive-video-helper.sh"
 python3 -m py_compile "$ROOT/lib/hardcore-archive-media.py"
 python3 -m py_compile "$ROOT/lib/hardcore-archive-compressibility.py"
 python3 -m py_compile "$ROOT/lib/hardcore-archive-image-calibrate.py"
@@ -62,3 +63,9 @@ grep -Fq -- '--threads-per-worker "$IMAGE_THREADS_PER_WORKER"' "$ROOT/lib/hardco
 grep -Fq 'hardcore_reporting_start' "$ROOT/lib/reporting.sh"
 
 printf 'Modular layout tests passed.\n'
+
+# Video helper implementation is static, checked in, and staged through its module.
+grep -F 'hardcore_video_stage_helper()' "$ROOT/lib/video.sh" >/dev/null
+grep -F 'source "$(dirname -- "${BASH_SOURCE[0]}")/video.sh"' "$ROOT/lib/hardcore-archive-core.sh" >/dev/null
+! grep -F '__HARDCORE_ARCHIVE_VIDEO_HELPER__' "$ROOT/lib/hardcore-archive-core.sh" >/dev/null
+! grep -F 'write_embedded_video_helper' "$ROOT/lib/hardcore-archive-core.sh" >/dev/null

@@ -8,34 +8,26 @@ cleanup() { rm -rf -- "$TMP"; }
 trap cleanup EXIT
 
 POLICY="$ROOT/hardcore-archive-runner-policy.sh"
-POLICY_PATCHER="$ROOT/lib/hardcore-archive-policy-updates.py"
 CORE="$ROOT/lib/hardcore-archive-core.sh"
-COPY_PATCHER="$ROOT/lib/hardcore-archive-copy-lane.py"
-MEDIA_PATCHER="$ROOT/lib/hardcore-archive-media-fixes.py"
-CONTAINER_PATCHER="$ROOT/lib/hardcore-archive-container-lane.py"
 HELPER="$ROOT/lib/hardcore-archive-container-repack.py"
 
-for file in "$POLICY" "$POLICY_PATCHER" "$CORE" "$COPY_PATCHER" "$MEDIA_PATCHER" "$CONTAINER_PATCHER" "$HELPER"; do
-    [[ -f $file ]] || { printf 'Missing test input: %s\n' "$file" >&2; exit 1; }
+for file in "$POLICY" "$CORE" "$HELPER"; do
+    [[ -f $file ]] || { printf 'Missing container production dependency: %s\n' "$file" >&2; exit 1; }
 done
+bash -n "$POLICY"
+bash -n "$CORE"
+python3 -m py_compile "$HELPER"
 
-python3 "$POLICY_PATCHER" "$POLICY" "$TMP/policy.sh"
-bash -n "$TMP/policy.sh"
-python3 "$POLICY_PATCHER" "$TMP/policy.sh" "$TMP/policy-twice.sh"
-cmp -s "$TMP/policy.sh" "$TMP/policy-twice.sh" || { printf 'Policy patch is not idempotent.\n' >&2; exit 1; }
-grep -Fq 'VIDEO_ENABLED=$(resolve_bool_state "$VIDEO_STATE" "$VIDEO_CONFIG" true)' "$TMP/policy.sh"
-grep -Fq 'IMAGE_ENABLED=$(resolve_bool_state "$IMAGE_STATE" "$IMAGE_CONFIG" true)' "$TMP/policy.sh"
-grep -Fq 'NESTED_ENABLED=$(resolve_bool_state "$NESTED_STATE" "$NESTED_CONFIG" true)' "$TMP/policy.sh"
-grep -Fq 'CONTAINER_ENABLED=$(resolve_bool_state "$CONTAINER_STATE" "$CONTAINER_CONFIG" true)' "$TMP/policy.sh"
-grep -Fq -- '--container-repack' "$TMP/policy.sh"
-grep -Fq -- '--no-container-repack' "$TMP/policy.sh"
+# The default-on CLI/config policy is checked in directly; do not reconstruct a
+# patched frontend just to assert the live production settings.
+grep -Fq 'VIDEO_ENABLED=$(resolve_bool_state "$VIDEO_STATE" "$VIDEO_CONFIG" true)' "$POLICY"
+grep -Fq 'IMAGE_ENABLED=$(resolve_bool_state "$IMAGE_STATE" "$IMAGE_CONFIG" true)' "$POLICY"
+grep -Fq 'NESTED_ENABLED=$(resolve_bool_state "$NESTED_STATE" "$NESTED_CONFIG" true)' "$POLICY"
+grep -Fq 'CONTAINER_ENABLED=$(resolve_bool_state "$CONTAINER_STATE" "$CONTAINER_CONFIG" true)' "$POLICY"
+grep -Fq -- '--container-repack' "$POLICY"
+grep -Fq -- '--no-container-repack' "$POLICY"
 
-python3 "$COPY_PATCHER" "$CORE" "$TMP/core-copy.sh"
-python3 "$MEDIA_PATCHER" "$TMP/core-copy.sh" "$TMP/core-media.sh"
-python3 "$CONTAINER_PATCHER" "$TMP/core-media.sh" "$TMP/core-final.sh"
-bash -n "$TMP/core-final.sh"
-python3 "$CONTAINER_PATCHER" "$TMP/core-final.sh" "$TMP/core-twice.sh"
-cmp -s "$TMP/core-final.sh" "$TMP/core-twice.sh" || { printf 'Container engine patch is not idempotent.\n' >&2; exit 1; }
+# Container orchestration is already part of the checked-in static engine.
 for expected in \
     '# HARDCORE_CONTAINER_REPACK_PATCH_V1' \
     'is_format_preserving_container_path() {' \
@@ -43,7 +35,7 @@ for expected in \
     '.hardcore-archive-container-manifest.txt' \
     'candidate bytes'
 do
-    grep -Fq -- "$expected" "$TMP/core-final.sh" || { printf 'Patched core missing: %s\n' "$expected" >&2; exit 1; }
+    grep -Fq -- "$expected" "$CORE" || { printf 'Static core missing container policy: %s\n' "$expected" >&2; exit 1; }
 done
 
 mkdir -p "$TMP/source" "$TMP/stage"

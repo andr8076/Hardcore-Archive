@@ -3,35 +3,24 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/hardcore-hw-video-test.XXXXXX")
-cleanup() { rm -rf -- "$TMP"; }
-trap cleanup EXIT
-
-python3 "$ROOT/lib/hardcore-archive-copy-lane.py" \
-    "$ROOT/lib/hardcore-archive-core.sh" "$TMP/copy.sh"
-python3 "$ROOT/lib/hardcore-archive-media-fixes.py" \
-    "$TMP/copy.sh" "$TMP/media.sh"
-python3 "$ROOT/lib/hardcore-archive-hardware-video.py" \
-    "$TMP/media.sh" "$TMP/hardware.sh"
-python3 "$ROOT/lib/hardcore-archive-hardware-video.py" \
-    "$TMP/hardware.sh" "$TMP/hardware-twice.sh"
-
-bash -n "$TMP/hardware.sh"
-cmp -s "$TMP/hardware.sh" "$TMP/hardware-twice.sh" || {
-    printf 'Hardware-video patch is not idempotent.\n' >&2
-    exit 1
-}
+CORE="$ROOT/lib/hardcore-archive-core.sh"
+VIDEO_HELPER="$ROOT/lib/hardcore-archive-video-helper.sh"
+VIDEO_ACCEL="$ROOT/lib/video-acceleration.sh"
+for source_file in "$CORE" "$VIDEO_HELPER" "$VIDEO_ACCEL"; do
+    [[ -f $source_file ]] || { printf 'Missing static production source: %s\n' "$source_file" >&2; exit 1; }
+    bash -n "$source_file"
+done
 
 assert_has() {
     local text=$1
-    grep -Fq -- "$text" "$TMP/hardware.sh" || {
-        printf 'Missing patched engine text: %s\n' "$text" >&2
+    grep -Fq -- "$text" "$CORE" || grep -Fq -- "$text" "$VIDEO_HELPER" || grep -Fq -- "$text" "$VIDEO_ACCEL" || {
+        printf 'Missing static engine text: %s\n' "$text" >&2
         exit 1
     }
 }
 assert_lacks() {
     local text=$1
-    ! grep -Fq -- "$text" "$TMP/hardware.sh" || {
+    ! grep -Fq -- "$text" "$CORE" && ! grep -Fq -- "$text" "$VIDEO_HELPER" && ! grep -Fq -- "$text" "$VIDEO_ACCEL" || {
         printf 'Forbidden CPU fallback remains: %s\n' "$text" >&2
         exit 1
     }
@@ -41,7 +30,7 @@ assert_has '# HARDCORE_HARDWARE_ONLY_VIDEO_V1'
 assert_has 'video_encoder_is_hardware "$VIDEO_ENCODER"'
 assert_has 'inherited+=(--video-encoder "$VIDEO_ENCODER")'
 assert_has 'hardcore_video_encode_full'
-grep -Fq "printf 'FFmpeg command:'" "$ROOT/lib/video-acceleration.sh"
+grep -Fq "printf 'FFmpeg command:'" "$VIDEO_ACCEL"
 assert_has 'VIDEO_LOG=$(component_log_path video.log)'
 assert_has "Hardware video encoder locked: %s"
 assert_lacks 'VIDEO_ENCODER=libsvtav1'

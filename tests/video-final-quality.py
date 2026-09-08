@@ -454,11 +454,11 @@ class StaticIntegrationTests(unittest.TestCase):
                 self.assertIn(setting, block, f"{setting} missing from resume/cache identity")
 
     def test_calibration_remains_separate_and_inexpensive(self):
-        core_path = ROOT / "lib/hardcore-archive-core.sh"
-        if not core_path.exists():
+        helper_path = ROOT / "lib/hardcore-archive-video-helper.sh"
+        if not helper_path.exists():
             self.skipTest("full repository checkout unavailable")
-        core = core_path.read_text()
-        match = re.search(r"evaluate_hardware_quality\(\) \{(.*?)\n\}", core, re.S)
+        helper = helper_path.read_text()
+        match = re.search(r"evaluate_hardware_quality\(\) \{(.*?)\n\}", helper, re.S)
         self.assertIsNotNone(match)
         body = match.group(1)
         self.assertIn("local sample_length=3", body)

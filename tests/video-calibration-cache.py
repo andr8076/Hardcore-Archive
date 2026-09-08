@@ -10,7 +10,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = (ROOT / "lib/hardcore-archive-core.sh").read_text()
-FUNCTIONS = CORE.split("\nHARDCORE_AUTO_CODEC_MODE=", 1)[1].split(
+VIDEO_HELPER = (ROOT / "lib/hardcore-archive-video-helper.sh").read_text()
+FUNCTIONS = VIDEO_HELPER.split("\nHARDCORE_AUTO_CODEC_MODE=", 1)[1].split(
     "\ncalibrate_and_choose_video_codec\n", 1
 )[0]
 FUNCTIONS = (f'source {shlex.quote(str(ROOT / "lib/calibration-identity.sh"))}\n'
@@ -122,12 +123,9 @@ class CalibrationTests(unittest.TestCase):
         self.cache = self.root / "cache"
         self.functions = self.root / "functions.sh"
         self.functions.write_text(FUNCTIONS)
-        # Also parse the emitted helper: bash -n on the core alone does not
-        # check the shell program inside its quoted heredoc.
-        helper = CORE.split("<<'__HARDCORE_ARCHIVE_VIDEO_HELPER__'\n", 1)[1].split(
-            "\n__HARDCORE_ARCHIVE_VIDEO_HELPER__", 1
-        )[0]
-        subprocess.run(["bash", "-n"], input=helper, text=True, check=True)
+        # Syntax-check the same checked-in helper that production stages.
+        subprocess.run(["bash", "-n", str(ROOT / "lib/hardcore-archive-video-helper.sh")],
+                       text=True, check=True)
 
     def run_calibration(self, body=None, **changes):
         for name in ("encodes", "measures"):
