@@ -27,8 +27,9 @@ Missing frames, premature stream termination, malformed records, failed probes, 
 
 Video timestamps are discrete and container time bases can round seek/frame boundaries. The policy therefore uses small, explicit tolerances:
 
-- **50 ms frame-boundary tolerance** for requested window starts, ordinary window ends, and frame-selection rounding.
+- **50 ms timeline-boundary tolerance** when deciding whether decoded display intervals establish the requested window start, an ordinary window end, or an internal continuity boundary.
 - **100 ms stream-endpoint tolerance** only when the requested window reaches the declared source timeline endpoint.
+- The expected VMAF frame population itself is counted from candidate frame timestamps in the requested half-open interval `[start, end)`, using only a **1 microsecond comparison epsilon** for floating-point representation. The wider 50 ms timeline tolerance is deliberately not used to count frames outside the requested window.
 - **At most one frame VMAF-count tolerance** for a boundary-frame difference between independent `ffprobe` evidence and FFmpeg/libvmaf framesync, and only when the candidate window contains at least 30 frames. Sparse/low-frame-rate windows require an exact frame-count match.
 
 These tolerances allow normal timestamp rounding without turning missing seconds into accepted coverage. Reported confirmed coverage is calculated from the actual intersected display intervals; the tolerance is used for acceptance decisions, not added to the reported coverage number.

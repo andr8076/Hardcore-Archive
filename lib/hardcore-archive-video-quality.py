@@ -20,13 +20,14 @@ import json
 import math
 import subprocess
 import sys
-from functools import lru_cache
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Callable, Sequence
 
 POLICY_VERSION = "completed-video-quality-v2-evidence-coverage"
 FRAME_BOUNDARY_TOLERANCE_SECONDS = 0.050
 STREAM_ENDPOINT_TOLERANCE_SECONDS = 0.100
+FRAME_SELECTION_EPSILON_SECONDS = 0.000001
 VMAF_FRAME_COUNT_TOLERANCE = 1
 VMAF_FRAME_COUNT_TOLERANCE_MIN_FRAMES = 30
 INITIAL_PROBE_SEEK_BACK_SECONDS = 2.0
@@ -444,9 +445,13 @@ def analyze_timeline_evidence(
     selected: list[FrameObservation] = []
     selected_durations: list[float] = []
     for frame_index, frame in enumerate(observations):
-        if not (
-            frame.pts + FRAME_BOUNDARY_TOLERANCE_SECONDS >= window.start
-            and frame.pts < window.end + FRAME_BOUNDARY_TOLERANCE_SECONDS
+        # Coverage evidence may look slightly outside the requested boundaries so
+        # it can prove display continuity. Frame-population matching must not use
+        # that wider tolerance: FFmpeg -ss/-t scores frames whose timestamps are
+        # in [start,end), with only a tiny floating-point comparison epsilon.
+        if (
+            frame.pts + FRAME_SELECTION_EPSILON_SECONDS < window.start
+            or frame.pts >= window.end - FRAME_SELECTION_EPSILON_SECONDS
         ):
             continue
         selected.append(frame)
@@ -687,6 +692,7 @@ def evaluate_manifest(
         "evidence_complete": not evidence_reasons,
         "boundary_tolerance_seconds": FRAME_BOUNDARY_TOLERANCE_SECONDS,
         "stream_endpoint_tolerance_seconds": STREAM_ENDPOINT_TOLERANCE_SECONDS,
+        "frame_selection_epsilon_seconds": FRAME_SELECTION_EPSILON_SECONDS,
         "vmaf_frame_count_tolerance": VMAF_FRAME_COUNT_TOLERANCE,
         "vmaf_frame_count_tolerance_min_frames": VMAF_FRAME_COUNT_TOLERANCE_MIN_FRAMES,
         "mean_vmaf": aggregate_mean,

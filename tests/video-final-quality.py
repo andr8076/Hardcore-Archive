@@ -174,6 +174,24 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(result["coverage_seconds"], 4)
         self.assertEqual(result["window_evidence"][0]["candidate_frames"], 2)
 
+    def test_probe_context_frames_outside_window_do_not_inflate_vmaf_population(self):
+        manifest = self.manifest([("uniform", 10, 4, [99.0] * 120)])
+        step = 1 / 30.0
+        observations = [quality.FrameObservation(10 - step, step)]
+        observations.extend(
+            quality.FrameObservation(10 + index * step, step)
+            for index in range(120)
+        )
+        observations.append(quality.FrameObservation(14.0, step))
+        result = self.evaluate(
+            manifest, 30,
+            provider=lambda _path, _window, _ffprobe: observations,
+        )
+        self.assertEqual(result["status"], "pass", result)
+        self.assertEqual(result["coverage_seconds"], 4)
+        self.assertEqual(result["window_evidence"][0]["candidate_frames"], 120)
+        self.assertEqual(result["window_evidence"][0]["vmaf_frames"], 120)
+
     def test_variable_frame_rate_timestamps_drive_coverage_and_sustained_time(self):
         scores = [100.0] * 7 + [80.0] * 3
         manifest = self.manifest([("full", 0, 4, scores)])
