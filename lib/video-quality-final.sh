@@ -42,7 +42,8 @@ hardcore_video_measure_completed_segment() {
 
 hardcore_video_validate_completed_quality() {
     local candidate=$1 plan manifest result started elapsed rc=0 index=0
-    local kind start length coverage_seconds coverage_percent mean minimum_window low_value low_percentile longest reasons status windows frames
+    local kind start length requested_seconds requested_percent coverage_seconds coverage_percent
+    local mean minimum_window low_value low_percentile longest reasons status windows frames evidence_complete
 
     VIDEO_FINAL_QUALITY_RESULT=''
     VIDEO_FINAL_QUALITY_REASON=''
@@ -101,6 +102,7 @@ hardcore_video_validate_completed_quality() {
 
     if result=$(python3 "$HARDCORE_ARCHIVE_VIDEO_QUALITY_HELPER" evaluate \
         --manifest "$manifest" --duration "$duration" --threshold "$quality_vmaf_threshold" \
+        --reference "$input" --candidate "$candidate" --ffprobe ffprobe \
         --low-percentile "$video_quality_low_percentile" \
         --percentile-delta "$video_quality_percentile_delta" \
         --sustained-delta "$video_quality_sustained_delta" \
@@ -118,7 +120,7 @@ hardcore_video_validate_completed_quality() {
         return 1
     fi
 
-    IFS=$'\t' read -r status windows frames coverage_seconds coverage_percent mean minimum_window low_percentile low_value longest reasons < <(
+    IFS=$'\t' read -r status windows frames requested_seconds requested_percent coverage_seconds coverage_percent evidence_complete mean minimum_window low_percentile low_value longest reasons < <(
         python3 - "$result" <<'PYFINALQUALITY'
 import json,sys
 try:
@@ -126,34 +128,42 @@ try:
     reasons='; '.join(str(x) for x in d.get('reasons', [])) or d.get('error','')
     print('\t'.join([
         str(d.get('status','error')), str(d.get('windows','?')), str(d.get('frames','?')),
+        f"{float(d.get('requested_coverage_seconds',0)):.3f}", f"{float(d.get('requested_coverage_percent',0)):.2f}",
         f"{float(d.get('coverage_seconds',0)):.3f}", f"{float(d.get('coverage_percent',0)):.2f}",
+        str(d.get('evidence_complete',False)).lower(),
         f"{float(d.get('mean_vmaf',0)):.3f}", f"{float(d.get('minimum_window_mean',0)):.3f}",
         str(d.get('low_percentile','?')), f"{float(d.get('low_percentile_vmaf',0)):.3f}",
         f"{float(d.get('longest_sustained_seconds',0)):.3f}", reasons,
     ]))
 except Exception as exc:
-    print('error\t?\t?\t0\t0\t0\t0\t?\t0\t0\tmalformed-result:'+str(exc))
+    print('error\t?\t?\t0\t0\t0\t0\tfalse\t0\t0\t?\t0\t0\tmalformed-result:'+str(exc))
 PYFINALQUALITY
     )
 
-    printf 'Coverage: %s window(s), %s frame score(s), %ss/%ss (%s%% of timeline); validation time %ss.\n' \
-        "$windows" "$frames" "$coverage_seconds" "$duration" "$coverage_percent" "$elapsed"
+    printf 'Requested coverage: %ss/%ss (%s%% of timeline).\n' \
+        "$requested_seconds" "$duration" "$requested_percent"
+    printf 'Confirmed quality coverage: %ss/%ss (%s%% of timeline), %s VMAF frame score(s); validation time %ss.\n' \
+        "$coverage_seconds" "$duration" "$coverage_percent" "$frames" "$elapsed"
     printf 'Scores: mean %s; worst window mean %s; p%s %s; longest sustained-low run %ss.\n' \
         "$mean" "$minimum_window" "$low_percentile" "$low_value" "$longest"
     if [[ $video_quality_validation == sampled ]]; then
-        printf 'Assurance scope: sampled only; unsampled parts of the timeline were not VMAF-scored.\n'
+        printf 'Assurance scope: sampled only; only windows with complete timestamp/frame evidence count as confirmed coverage.\n'
     else
-        printf 'Assurance scope: full timeline VMAF-scored; this is metric coverage, not an absolute perceptual guarantee.\n'
+        printf 'Assurance scope: full mode; the requested timeline must have complete timestamp/frame evidence before acceptance.\n'
     fi
 
-    if (( rc == 0 )) && [[ $status == pass ]]; then
+    if (( rc == 0 )) && [[ $status == pass && $evidence_complete == true ]]; then
         printf 'Completed-output VMAF acceptance passed at the configured target %s.\n' "$quality_vmaf_threshold"
         return 0
     fi
 
     VIDEO_FINAL_QUALITY_REASON=${reasons:-quality-evaluation-failed}
     [[ $status == reject && $rc -eq 3 ]] && VIDEO_FINAL_QUALITY_RETRYABLE=true
-    printf 'Completed-output VMAF acceptance REJECTED: %s\n' "$VIDEO_FINAL_QUALITY_REASON"
+    if [[ $status == error ]]; then
+        printf 'Completed-output VMAF evidence INCOMPLETE: %s\n' "$VIDEO_FINAL_QUALITY_REASON"
+    else
+        printf 'Completed-output VMAF acceptance REJECTED: %s\n' "$VIDEO_FINAL_QUALITY_REASON"
+    fi
     return 1
 }
 
