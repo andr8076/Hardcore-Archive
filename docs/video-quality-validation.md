@@ -77,6 +77,22 @@ In sampled mode, every selected window must independently establish complete evi
 
 In full mode, the sample plan requests the complete timeline, but the report only shows full confirmed coverage after decoded timestamp/duration evidence and VMAF frame evidence establish that the complete requested timeline was actually measured. Full mode remains substantially more expensive than sampled mode.
 
+## Hosted CI validation
+
+The `video-quality-integration` CI lane is intentionally stricter than the developer-facing unit suites. Each Linux and macOS hosted runner activates Hardcore Archive's checksum-verified downloaded media runtime, then verifies its `runtime-manifest.txt` against the FFmpeg and VMAF pins in `packaging/media-runtime/versions.env`. CI explicitly probes `ffmpeg`, `ffprobe`, the `libvmaf` filter, the fixture filters/encoder, and both production-selected legacy model families (`vmaf_v0.6.1` and `vmaf_4k_v0.6.1`) before real tests begin. A missing capability or a skipped required integration test fails that job.
+
+The strict fixtures are deliberately small and software-generated. FFV1 is used only to create deterministic source/candidate media; it is **not** a production encoding fallback. The real-media suite calls the production completed-output comparison and acceptance functions and covers:
+
+- faithful output acceptance;
+- visible resolution degradation rejection on the source-display canvas;
+- localized degradation in the 30% sampled window, outside the cheap 10/50/90% calibration positions;
+- incomplete candidate/measurement rejection;
+- variable-frame-rate presentation timing and sustained-low-quality rejection.
+
+Passing this hosted CI lane demonstrates the CPU-side comparison, libvmaf models, timestamp/frame-evidence logic, sampling plan, and completed-output acceptance policy on standard GitHub Linux and macOS runners. It does **not** demonstrate vendor GPU drivers, hardware decoder/scaler behavior, VAAPI/NVENC/QSV/VideoToolbox encoder execution, device selection, or GPU-specific quality/performance. Those paths remain covered by policy/mocked tests in standard CI and require hardware-backed validation to prove real device behavior. The production hardware-only encoding policy is unchanged.
+
+The ordinary `video-quality-performance.py` and `video-final-quality.py` suites retain conditional real-media skips so contributors can still run the broader test suite without downloading the managed media runtime. Strict no-skip behavior is confined to the dedicated CI integration lane.
+
 ## Remaining limitations
 
 `ffprobe` and libvmaf do not expose a shared per-score timestamp directly in the VMAF JSON used by this project. The sustained rule therefore relies on a validated one-to-one sequence mapping between libvmaf records and independently decoded candidate presentation intervals. When an edge-frame disagreement prevents an exact mapping, the validator rejects the evidence conservatively instead of inventing timing from an average FPS.

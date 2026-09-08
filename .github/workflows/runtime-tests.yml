@@ -41,6 +41,38 @@ jobs:
           export PATH="$(dirname "$(command -v "$BASH_BIN")"):$PATH"
           python3 tests/acl-platform.py
 
+  video-quality-integration:
+    # This lane is intentionally strict. The ordinary developer-facing Python
+    # suites may skip real-media cases when FFmpeg is unavailable; this job may
+    # not. It activates the checksum-verified HCA media runtime, verifies that
+    # it matches packaging/media-runtime/versions.env, probes libvmaf and both
+    # production-selected model families, then runs real production acceptance.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install managed runtime host libraries on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libva2 libva-drm2 libdrm2 libvpl2
+      - name: Install modern Bash on macOS
+        if: runner.os == 'macOS'
+        run: brew install bash
+      - name: Run strict real video quality integration
+        shell: bash
+        run: |
+          if [[ $RUNNER_OS == macOS ]]; then
+            BASH_BIN="$(brew --prefix)/bin/bash"
+          else
+            BASH_BIN=bash
+          fi
+          "$BASH_BIN" tests/video-real-ci.sh
+
   frontend-policy:
     runs-on: ubuntu-latest
     env:
