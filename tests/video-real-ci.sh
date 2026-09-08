@@ -36,6 +36,17 @@ printf 'Activated runtime: %s\n' "$HARDCORE_ARCHIVE_VIDEO_RUNTIME_ID"
 printf 'FFmpeg path: %s\n' "$HARDCORE_ARCHIVE_FFMPEG"
 printf 'FFprobe path: %s\n' "$HARDCORE_ARCHIVE_FFPROBE"
 
+if [[ $(uname -s) == Linux ]] && command -v ldd >/dev/null 2>&1; then
+    missing=$( {
+        ldd "$HARDCORE_ARCHIVE_FFMPEG" 2>/dev/null
+        ldd "$HARDCORE_ARCHIVE_FFPROBE" 2>/dev/null
+    } | awk '/not found/ {print}' | sort -u )
+    if [[ -n $missing ]]; then
+        printf 'FAIL: managed runtime has unresolved host shared libraries:\n%s\n' "$missing" >&2
+        exit 10
+    fi
+fi
+
 # The release bootstrap verifies the immutable asset's SHA-256. Also require the
 # activated payload to match the source pins in this checkout so a stale rolling
 # release cannot silently satisfy CI after versions.env changes.
