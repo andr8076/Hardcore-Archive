@@ -67,6 +67,18 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertTrue(all(window in first for window in uniform))
 
+    def test_full_mode_plan_covers_the_complete_timeline(self):
+        process = subprocess.run([
+            sys.executable, str(HELPER_PATH), "plan",
+            "--input", str(ROOT / "unused-full-mode-input.mkv"),
+            "--duration", "123.5", "--mode", "full",
+        ], capture_output=True, text=True)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        fields = process.stdout.strip().split("\t")
+        self.assertEqual(fields[0], "full")
+        self.assertAlmostEqual(float(fields[1]), 0.0, places=6)
+        self.assertAlmostEqual(float(fields[2]), 123.5, places=6)
+
 
 class EvaluationTests(unittest.TestCase):
     def setUp(self):
@@ -156,6 +168,17 @@ class EvaluationTests(unittest.TestCase):
         with self.assertRaises((ValueError, KeyError)):
             quality.evaluate_manifest(str(manifest), 60, 92)
 
+    def test_nonfinite_measurements_never_pass(self):
+        log = self.root / "nonfinite.json"
+        log.write_text(json.dumps({
+            "pooled_metrics": {"vmaf": {"mean": math.nan}},
+            "frames": [{"metrics": {"vmaf": 99.0}}],
+        }))
+        manifest = self.root / "nonfinite.tsv"
+        manifest.write_text(f"uniform\t1\t4\t{log}\n")
+        with self.assertRaises(ValueError):
+            quality.evaluate_manifest(str(manifest), 60, 92)
+
     def test_higher_quality_retry_is_bounded_and_directional(self):
         self.assertEqual(quality.higher_quality("av1_nvenc", 28, 2), 26)
         self.assertEqual(quality.higher_quality("hevc_vaapi", 3, 2), 1)
@@ -175,8 +198,31 @@ class StaticIntegrationTests(unittest.TestCase):
         self.assertIn("VIDEO_QUALITY_LOW_PERCENTILE", core)
         self.assertIn("VIDEO_QUALITY_SUSTAINED_SECONDS", core)
         self.assertIn("VIDEO_QUALITY_RETRIES", core)
-        self.assertIn("video-acceptance-v1-duration-scaled", core)
         self.assertNotIn("video-preprocessing-v3-source-display-vmaf\"", core)
+
+    def test_every_validation_setting_participates_in_resume_identities(self):
+        core = (ROOT / "lib/hardcore-archive-core.sh").read_text()
+        identity_blocks = re.findall(
+            r'"video-acceptance-v1-duration-scaled".*?sha256sum', core, re.S
+        )
+        self.assertGreaterEqual(len(identity_blocks), 2)
+        settings = (
+            "VIDEO_QUALITY_VALIDATION",
+            "VIDEO_QUALITY_SAMPLE_SECONDS",
+            "VIDEO_QUALITY_INTERVAL_SECONDS",
+            "VIDEO_QUALITY_MIN_SAMPLES",
+            "VIDEO_QUALITY_MAX_SAMPLES",
+            "VIDEO_QUALITY_COMPLEXITY_SAMPLES",
+            "VIDEO_QUALITY_LOW_PERCENTILE",
+            "VIDEO_QUALITY_PERCENTILE_DELTA",
+            "VIDEO_QUALITY_SUSTAINED_DELTA",
+            "VIDEO_QUALITY_SUSTAINED_SECONDS",
+            "VIDEO_QUALITY_RETRIES",
+            "VIDEO_QUALITY_RETRY_STEP",
+        )
+        for block in identity_blocks[:2]:
+            for setting in settings:
+                self.assertIn(setting, block, f"{setting} missing from resume/cache identity")
 
     def test_calibration_remains_separate_and_inexpensive(self):
         core = (ROOT / "lib/hardcore-archive-core.sh").read_text()
@@ -186,6 +232,19 @@ class StaticIntegrationTests(unittest.TestCase):
         self.assertIn("local sample_length=3", body)
         self.assertIn("local -a positions=(0.10 0.50 0.90)", body)
         self.assertNotIn("hardcore_video_validate_completed_quality", body)
+
+    def test_runtime_reporting_states_validation_scope(self):
+        final = (ROOT / "lib/video-quality-final.sh").read_text()
+        self.assertIn("coverage_seconds", final)
+        self.assertIn("unsampled parts of the timeline were not VMAF-scored", final)
+        self.assertIn("full timeline VMAF-scored", final)
+        self.assertIn("not an absolute perceptual guarantee", final)
+
+    def test_documentation_distinguishes_sampled_assurance_from_full_validation(self):
+        readme = (ROOT / "README.md").read_text()
+        self.assertIn("Sampled validation is sampled assurance, not a whole-video guarantee.", readme)
+        self.assertIn("--video-quality-validation full", readme)
+        self.assertIn("Full mode is much slower", readme)
 
 
 class RealMediaTests(unittest.TestCase):
