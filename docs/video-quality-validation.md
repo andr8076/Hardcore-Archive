@@ -50,7 +50,7 @@ For sustained-quality timing, VMAF sequence record `i` is associated with candid
 3. Every selected candidate frame has a valid display interval from its next presentation timestamp or explicit duration metadata.
 4. The candidate presentation intervals remain ordered and the surrounding coverage evidence is valid.
 
-If any of these conditions is missing, Hardcore Archive does not substitute a global average frame rate or `window_length / frame_count`. The measurement fails closed and the original is preserved through the existing acceptance path.
+If any of these conditions is missing, there is **no average frame rate** substituted for the missing timing. Hardcore Archive does not use a global average FPS or `window_length / frame_count`; the measurement fails closed and the original is preserved through the existing acceptance path.
 
 ## Sustained low quality on VFR footage
 
