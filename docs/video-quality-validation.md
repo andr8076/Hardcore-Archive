@@ -20,8 +20,9 @@ Each completed-output window requires all of the following:
 - A contiguous VMAF `frameNum` sequence.
 - A VMAF pooled mean consistent with the per-frame VMAF values.
 - A VMAF frame count consistent with the completed-output frames selected for the requested interval.
+- An exact score-to-presentation mapping before the sustained-low-quality rule may use that window.
 
-Missing frames, premature stream termination, malformed records, failed probes, inconsistent frame counts, or contradictory coverage evidence produce an evidence error. Evidence errors are not quality failures and therefore do not lower the VMAF target or trigger threshold relaxation. The existing pipeline preserves the original when evidence cannot authorize the completed output.
+Missing frames, premature stream termination, malformed records, failed probes, inconsistent frame counts, missing frame-display timing, or contradictory coverage evidence produce an evidence error. Evidence errors are not quality failures and therefore do not lower the VMAF target or trigger threshold relaxation. The existing pipeline preserves the original when evidence cannot authorize the completed output.
 
 ## Boundary tolerances
 
@@ -30,17 +31,45 @@ Video timestamps are discrete and container time bases can round seek/frame boun
 - **50 ms timeline-boundary tolerance** when deciding whether decoded display intervals establish the requested window start, an ordinary window end, or an internal continuity boundary.
 - **100 ms stream-endpoint tolerance** only when the requested window reaches the declared source timeline endpoint.
 - The expected VMAF frame population itself is counted from candidate frame timestamps in the requested half-open interval `[start, end)`, using only a **1 microsecond comparison epsilon** for floating-point representation. The wider 50 ms timeline tolerance is deliberately not used to count frames outside the requested window.
-- **At most one frame VMAF-count tolerance** for a boundary-frame difference between independent `ffprobe` evidence and FFmpeg/libvmaf framesync, and only when the candidate window contains at least 30 frames. Sparse/low-frame-rate windows require an exact frame-count match.
+- The coverage check may still tolerate at most one boundary-frame count difference for windows containing at least 30 candidate frames, but the sustained-low-quality rule does **not** guess a timing alignment from that difference. If VMAF and candidate frame populations do not match exactly, sustained timing evidence is unavailable and the window cannot authorize the output.
 
 These tolerances allow normal timestamp rounding without turning missing seconds into accepted coverage. Reported confirmed coverage is calculated from the actual intersected display intervals; the tolerance is used for acceptance decisions, not added to the reported coverage number.
 
-Frame display duration is derived from the next decoded timestamp when available, otherwise from FFmpeg's per-frame duration metadata. The probe starts shortly before each requested window and can retry once up to 60 seconds farther back when sparse or genuinely low-frame-rate material needs an earlier display frame to establish coverage. This is bounded and does not change quality thresholds.
+Frame display duration is derived from the next decoded presentation timestamp when available, otherwise from FFmpeg's per-frame duration metadata. The probe starts shortly before each requested window and can retry once up to 60 seconds farther back when sparse or genuinely low-frame-rate material needs an earlier display frame to establish coverage. This is bounded and does not change quality thresholds.
+
+## VMAF score timing alignment
+
+The VMAF JSON used by this project does not provide a trustworthy presentation timestamp for each score. `frameNum` is treated only as a sequence index; it is never interpreted as a timestamp.
+
+The production comparison graph feeds every completed-output frame to libvmaf (`n_subsample=1`) after converting both inputs to a common AVTB and resetting each sampled window to a zero-based local timeline. It does not insert an FPS conversion. Separately, `ffprobe` reads the completed file's presentation timestamps. The video stream's `start_time` is subtracted so those observations are expressed on the same source-relative timeline used by the sample plan.
+
+For sustained-quality timing, VMAF sequence record `i` is associated with candidate presentation interval `i` only when all of the following hold:
+
+1. The VMAF sequence is contiguous from zero.
+2. The number of VMAF records exactly equals the number of candidate frames selected in `[start, end)`.
+3. Every selected candidate frame has a valid display interval from its next presentation timestamp or explicit duration metadata.
+4. The candidate presentation intervals remain ordered and the surrounding coverage evidence is valid.
+
+If any of these conditions is missing, Hardcore Archive does not substitute a global average frame rate or `window_length / frame_count`. The measurement fails closed and the original is preserved through the existing acceptance path.
+
+## Sustained low quality on VFR footage
+
+The configured VMAF threshold and sustained-low-quality settings are unchanged. A frame is locally low when its VMAF score is below `target - VIDEO_QUALITY_SUSTAINED_DELTA`; rejection still occurs when that degradation is sustained for at least `VIDEO_QUALITY_SUSTAINED_SECONDS`.
+
+What changed is the clock used to measure that run. Each low VMAF score contributes its actual candidate frame display interval, not an average frame duration. This handles cases where a few frames remain on screen for a long time as well as bursts containing many rapidly displayed frames.
+
+Sustained timing is evaluated across all confirmed sampled windows on the source-relative presentation timeline:
+
+- Low-quality intervals that meet at an exactly shared sampled-window boundary join into one continuous run.
+- An unsampled gap always breaks continuity; it is never filled by an average rate or boundary tolerance.
+- Overlapping sampled windows are unioned as timeline intervals, so the same degraded time is not double-counted.
+- An isolated low-scoring frame contributes only its actual display duration.
+
+This means ten degraded frames can correctly represent two seconds on a VFR timeline even inside a 300-frame, ten-second measurement, while a much larger number of degraded frames can remain below the sustained rejection duration if they are displayed rapidly.
 
 ## Variable and low frame rates
 
-Coverage does not assume 24, 30, 60, or any other fixed frame rate. It uses decoded timestamps and frame durations. Variable-frame-rate material can therefore have irregular frame spacing while still proving complete window coverage. Genuine low-frame-rate material is also supported when its timestamp/duration evidence shows how long each decoded frame is displayed.
-
-The sustained-low-quality duration uses actual candidate frame display durations when the VMAF and candidate frame populations match exactly. If the only difference is an allowed single boundary frame, it falls back to the confirmed-window duration divided across scored frames; this is conservative boundary handling rather than a fixed-FPS assumption.
+Coverage and sustained-quality timing do not assume 24, 30, 60, or any other fixed frame rate. Both use decoded presentation timestamps and frame display durations. Variable-frame-rate material can therefore have irregular frame spacing while still proving complete window coverage. Genuine low-frame-rate material is also supported when its timestamp/duration evidence shows how long each decoded frame is displayed.
 
 ## Sampled vs full mode
 
@@ -50,6 +79,6 @@ In full mode, the sample plan requests the complete timeline, but the report onl
 
 ## Remaining limitations
 
-`ffprobe` and libvmaf do not expose a shared per-score timestamp directly in the VMAF JSON used by this project. The evaluator therefore cross-checks libvmaf's contiguous frame sequence and count against independently decoded candidate-frame evidence. A one-frame boundary difference is tolerated only for windows with at least 30 candidate frames because seeking and time-base rounding can select one adjacent edge frame differently. Sparse windows require an exact count; larger differences always invalidate the window.
+`ffprobe` and libvmaf do not expose a shared per-score timestamp directly in the VMAF JSON used by this project. The sustained rule therefore relies on a validated one-to-one sequence mapping between libvmaf records and independently decoded candidate presentation intervals. When an edge-frame disagreement prevents an exact mapping, the validator rejects the evidence conservatively instead of inventing timing from an average FPS.
 
-Very sparse media whose preceding display frame is more than 60 seconds before a sampled window and lacks usable frame-duration metadata may fail evidence validation conservatively. In that case the original is preserved rather than assuming coverage that cannot be demonstrated.
+Very sparse media whose preceding display frame is more than 60 seconds before a sampled window and lacks usable frame-duration metadata may fail evidence validation conservatively. In that case the original is preserved rather than assuming coverage or sustained-quality timing that cannot be demonstrated.
