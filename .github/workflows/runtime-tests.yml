@@ -59,7 +59,7 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libva2 libdrm2 libvpl2
+          sudo apt-get install -y --no-install-recommends libva2 libva-drm2 libdrm2 libvpl2
       - name: Install modern Bash on macOS
         if: runner.os == 'macOS'
         run: brew install bash
