@@ -4,17 +4,20 @@
 #
 # Initialization order / contract:
 #   * This file is safe to source before the core has initialized runtime state;
-#     it defines functions only.
+#     it defines functions and resolves only its own checked-in helper path.
 #   * dependency_preflight_restore is invoked after CLI parsing has selected
 #     restore mode. It uses the core dependency collector, platform sleep
 #     helpers, PLATFORM_ID, ALLOW_SLEEP, SLEEP_PROTECTION_ACTIVE and SEVEN_ZIP.
 #   * restore_existing_archive is invoked only after that preflight succeeds. It
 #     requires POSITIONAL, SEVEN_ZIP, METADATA_HELPER, MIB, die and human_bytes.
+#   * The final destination commit uses the checked-in atomic helper beside this
+#     module: renameat2(RENAME_NOREPLACE) on Linux and
+#     renamex_np(RENAME_EXCL) on macOS. There is no non-atomic fallback.
 #
 # Return / cleanup contract:
 #   * Successful restore returns 0 after a verified atomic destination commit.
-#   * Fatal validation/extraction/metadata failures retain the historical die()
-#     path and therefore exit non-zero before committing the destination.
+#   * Fatal validation/extraction/metadata/commit failures retain the historical
+#     die() path and therefore exit non-zero without replacing a destination.
 #   * Restore owns only RESTORE_TEMP and RESTORE_LOCK_* resources. Its EXIT and
 #     signal traps remove an uncommitted temporary tree, release the restore
 #     lock, and preserve the historical 129/130/143 signal statuses.
@@ -26,6 +29,8 @@
 # producer and restorer from disagreeing about reserved archive paths.
 [[ ${HARDCORE_RESTORE_SH_LOADED:-0} == 1 ]] && return 0
 HARDCORE_RESTORE_SH_LOADED=1
+HARDCORE_RESTORE_MODULE_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+HARDCORE_RESTORE_ATOMIC_COMMIT_HELPER=${HARDCORE_ARCHIVE_RESTORE_ATOMIC_COMMIT_HELPER:-"$HARDCORE_RESTORE_MODULE_DIR/hardcore-archive-atomic-commit.py"}
 
 hardcore_restore_command_selected() {
     local arg
@@ -52,16 +57,16 @@ dependency_preflight_restore() {
     dependency_resolve_7zip
     dependency_require_command awk 'Parses embedded verification and metadata manifests.'
     dependency_require_command grep 'Locates and validates embedded manifests.'
-    dependency_require_command find 'Validates the extracted tree and performs atomic restore layout handling.'
+    dependency_require_command find 'Enumerates the verified top-level restore layout without trusting archive names.'
     dependency_require_command stat 'Reads archive and restored-file properties.'
-    dependency_require_command realpath 'Canonicalizes archive and restore paths safely.'
-    dependency_require_command mktemp 'Creates the isolated temporary restore destination.'
+    dependency_require_command realpath 'Canonicalizes archive paths and restore parent paths safely.'
+    dependency_require_command mktemp 'Creates isolated temporary restore staging directories.'
+    dependency_require_command python3 'Performs safe listing checks, metadata work, sparse restoration, and atomic no-replace commit.'
     dependency_require_command sha256sum 'Verifies restored file contents against the embedded hash manifest.'
-    dependency_require_command mv 'Atomically moves the verified restored tree into place.'
+    dependency_require_command mv 'Builds the final restore layout only inside private staging.'
     dependency_require_command rm 'Removes only temporary restore data after completion or failure.'
-    dependency_require_command mkdir 'Creates the restore destination and its parent directories.'
-    dependency_require_command wc 'Counts top-level restored objects.'
-    dependency_require_command head 'Reads the single restored top-level path when applicable.'
+    dependency_require_command rmdir 'Reuses a verified single-directory tree as the prepared commit root.'
+    dependency_require_command mkdir 'Creates the restore destination parent and staging directories.'
     dependency_require_command flock 'Protects the restore workflow from conflicting archive operations.'
 
     if [[ -f $archive_input ]]; then
@@ -176,6 +181,36 @@ cleanup_restore() {
     return "$exit_status"
 }
 
+restore_prepare_commit_tree() {
+    local root=$1 ready entry
+    local -a entries=()
+
+    while IFS= read -r -d '' entry; do
+        entries+=("$entry")
+    done < <(find "$root" -mindepth 1 -maxdepth 1 -print0)
+
+    ready=$(mktemp -d "$root/.hardcore-restore-ready.XXXXXX") || return 1
+    if (( ${#entries[@]} == 1 )) && [[ -d ${entries[0]} ]]; then
+        rmdir "$ready" || return 1
+        mv -- "${entries[0]}" "$ready" || return 1
+    else
+        for entry in "${entries[@]}"; do
+            mv -- "$entry" "$ready/" || return 1
+        done
+    fi
+    printf '%s\n' "$ready"
+}
+
+restore_atomic_commit_prepared() {
+    local prepared=$1 destination=$2
+    [[ -f $HARDCORE_RESTORE_ATOMIC_COMMIT_HELPER ]] || {
+        printf 'Required atomic restore commit helper is missing: %s\n' \
+            "$HARDCORE_RESTORE_ATOMIC_COMMIT_HELPER" >&2
+        return 1
+    }
+    python3 "$HARDCORE_RESTORE_ATOMIC_COMMIT_HELPER" "$prepared" "$destination"
+}
+
 hardcore_archive_internal_root_name() {
     case $1 in
         .hardcore-archive-metadata|\
@@ -205,20 +240,29 @@ remove_hardcore_archive_internal_entries() {
 }
 
 restore_existing_archive() {
-    local archive_input=${POSITIONAL[0]} destination_input=${POSITIONAL[1]:-} archive stem destination parent temp hashfile top_count top_name
+    local archive_input=${POSITIONAL[0]} destination_input=${POSITIONAL[1]:-} archive stem destination destination_request parent temp hashfile ready
     local listed_size free required lockfile
     [[ -f $archive_input ]] || die "Archive does not exist: $archive_input"
     archive=$(realpath -e -- "$archive_input")
     stem=$(basename -- "$archive")
     stem=${stem%.7z}
     if [[ -n $destination_input ]]; then
-        destination=$(realpath -m -- "$destination_input")
+        destination_request=$destination_input
     else
-        destination=$(realpath -m -- "$(dirname -- "$archive")/$stem")
+        destination_request="$(dirname -- "$archive")/$stem"
     fi
-    [[ ! -e $destination ]] || die "Restore destination already exists: $destination"
-    parent=$(dirname -- "$destination")
+
+    # Resolve existing parent components, but deliberately do not dereference the
+    # final destination name. A dangling symlink is still an existing destination
+    # entry and must be rejected rather than followed to its missing target.
+    parent=$(realpath -m -- "$(dirname -- "$destination_request")")
+    destination="$parent/$(basename -- "$destination_request")"
+    if [[ -e $destination || -L $destination ]]; then
+        die "Restore destination already exists: $destination"
+    fi
     mkdir -p -- "$parent"
+    [[ -f $HARDCORE_RESTORE_ATOMIC_COMMIT_HELPER ]] || \
+        die "Trusted atomic restore commit helper is missing: $HARDCORE_RESTORE_ATOMIC_COMMIT_HELPER"
 
     RESTORE_TEMP=""
     RESTORE_LOCK_FILE=""
@@ -268,7 +312,7 @@ print(size)
     required=$((listed_size + listed_size / 20 + 256 * MIB))
     (( free >= required )) || die "Insufficient restore space: need approximately $(human_bytes "$required"), but only $(human_bytes "$free") is free."
 
-    temp=$(mktemp -d -p "$parent" ".${stem}.restore.XXXXXX")
+    temp=$(mktemp -d "$parent/.${stem}.restore.XXXXXX")
     RESTORE_TEMP=$temp
     RESTORE_COMMITTED=false
     printf 'Extracting into temporary destination...\n'
@@ -301,19 +345,21 @@ print(size)
     # blanket prefix filter would silently discard legitimate user content such
     # as a top-level directory named .hardcore-archive-photos.
     remove_hardcore_archive_internal_entries "$temp"
-    top_count=$(find "$temp" -mindepth 1 -maxdepth 1 -printf '.' | wc -c)
-    if (( top_count == 1 )); then
-        top_name=$(find "$temp" -mindepth 1 -maxdepth 1 -printf '%f' | head -n1)
-        if [[ -d $temp/$top_name ]]; then
-            mv -- "$temp/$top_name" "$destination"
-        else
-            mkdir -- "$destination"
-            mv -- "$temp/$top_name" "$destination/"
-        fi
-    else
-        mkdir -- "$destination"
-        find "$temp" -mindepth 1 -maxdepth 1 -exec mv -t "$destination" -- {} +
-    fi
+
+    # Build the complete user-visible destination tree before publishing any of
+    # it. For a single directory, reuse that directory itself so its restored
+    # root metadata is preserved. Single-file, empty, and multi-entry archives
+    # are wrapped in a staging directory, matching the historical layout.
+    ready=$(restore_prepare_commit_tree "$temp") || \
+        die "Could not prepare the verified restore layout for atomic commit."
+
+    # This is the only operation that publishes the destination name. It must be
+    # one kernel/filesystem operation that fails if *any* entry (file, directory,
+    # symlink, including dangling symlinks) occupies the destination at that
+    # instant. Never replace this with an existence check followed by ordinary mv.
+    restore_atomic_commit_prepared "$ready" "$destination" || \
+        die "Verified restore could not be committed without replacing an existing destination."
+
     sync "$destination" 2>/dev/null || true
     RESTORE_COMMITTED=true
     rm -rf --one-file-system -- "$temp"
