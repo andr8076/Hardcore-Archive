@@ -45,6 +45,28 @@ def cfr_provider(rate: float = 30.0):
     return provide
 
 
+def vfr_300_first_ten_span_two_seconds() -> list[quality.FrameObservation]:
+    observations = [quality.FrameObservation(index * 0.2) for index in range(10)]
+    fast_step = 8.0 / 290.0
+    observations.extend(
+        quality.FrameObservation(2.0 + index * fast_step)
+        for index in range(290)
+    )
+    observations[-1] = quality.FrameObservation(observations[-1].pts, fast_step)
+    return observations
+
+
+def vfr_300_first_hundred_span_half_second() -> list[quality.FrameObservation]:
+    observations = [quality.FrameObservation(index * 0.005) for index in range(100)]
+    slow_step = 9.5 / 200.0
+    observations.extend(
+        quality.FrameObservation(0.5 + index * slow_step)
+        for index in range(200)
+    )
+    observations[-1] = quality.FrameObservation(observations[-1].pts, slow_step)
+    return observations
+
+
 class PlanningTests(unittest.TestCase):
     def test_default_five_windows_cover_positions_missing_from_old_policy(self):
         windows = quality.plan_uniform_windows(60.0)
@@ -127,6 +149,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(result["status"], "pass", result)
         self.assertEqual(result["requested_coverage_seconds"], 20)
         self.assertEqual(result["coverage_seconds"], 20)
+        self.assertEqual(result["timed_frames"], 600)
 
     def test_one_frame_hour_measurement_cannot_authorize_or_claim_coverage(self):
         manifest = self.manifest([("full", 0, 3600, [99.0])])
@@ -173,6 +196,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(result["status"], "pass", result)
         self.assertEqual(result["coverage_seconds"], 4)
         self.assertEqual(result["window_evidence"][0]["candidate_frames"], 2)
+        self.assertEqual(result["window_evidence"][0]["timed_vmaf_frames"], 2)
 
     def test_probe_context_frames_outside_window_do_not_inflate_vmaf_population(self):
         manifest = self.manifest([("uniform", 10, 4, [99.0] * 120)])
@@ -191,6 +215,99 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(result["coverage_seconds"], 4)
         self.assertEqual(result["window_evidence"][0]["candidate_frames"], 120)
         self.assertEqual(result["window_evidence"][0]["vmaf_frames"], 120)
+
+    def test_vfr_300_frames_first_ten_bad_frames_span_two_seconds(self):
+        scores = [80.0] * 10 + [100.0] * 290
+        manifest = self.manifest([("full", 0, 10, scores)])
+        observations = vfr_300_first_ten_span_two_seconds()
+        result = self.evaluate(
+            manifest, 10,
+            provider=lambda _path, _window, _ffprobe: observations,
+        )
+        self.assertGreater(result["mean_vmaf"], 92)
+        self.assertAlmostEqual(result["longest_sustained_seconds"], 2.0, places=6)
+        self.assertEqual(result["status"], "reject", result)
+        self.assertTrue(any("sustained-low-quality" in reason for reason in result["reasons"]))
+
+    def test_many_rapid_bad_frames_under_duration_do_not_reject(self):
+        scores = [80.0] * 100 + [100.0] * 200
+        manifest = self.manifest([("full", 0, 10, scores)])
+        observations = vfr_300_first_hundred_span_half_second()
+        result = self.evaluate(
+            manifest, 10,
+            provider=lambda _path, _window, _ffprobe: observations,
+            percentile_delta=20,
+        )
+        self.assertGreater(result["mean_vmaf"], 92)
+        self.assertAlmostEqual(result["longest_sustained_seconds"], 0.5, places=6)
+        self.assertEqual(result["status"], "pass", result)
+
+    def test_constant_frame_rate_sustained_duration_is_preserved(self):
+        scores = [80.0] * 30 + [100.0] * 270
+        manifest = self.manifest([("full", 0, 10, scores)])
+        result = self.evaluate(manifest, 10, provider=cfr_provider(30.0))
+        self.assertAlmostEqual(result["longest_sustained_seconds"], 1.0, places=6)
+        self.assertEqual(result["status"], "reject", result)
+        self.assertTrue(any("sustained-low-quality" in reason for reason in result["reasons"]))
+
+    def test_degradation_continues_across_adjacent_sample_boundary(self):
+        first = [100.0] * 132 + [80.0] * 18
+        second = [80.0] * 18 + [100.0] * 132
+        manifest = self.manifest([
+            ("uniform", 0, 5, first),
+            ("uniform", 5, 5, second),
+        ])
+        result = self.evaluate(
+            manifest, 10, provider=cfr_provider(30.0), percentile_delta=20
+        )
+        self.assertAlmostEqual(result["longest_sustained_seconds"], 1.2, places=6)
+        self.assertEqual(result["status"], "reject", result)
+
+    def test_unsampled_gap_breaks_sustained_continuity(self):
+        first = [100.0] * 132 + [80.0] * 18
+        second = [80.0] * 18 + [100.0] * 132
+        manifest = self.manifest([
+            ("uniform", 0, 5, first),
+            ("uniform", 6, 5, second),
+        ])
+        result = self.evaluate(
+            manifest, 11, provider=cfr_provider(30.0), percentile_delta=20
+        )
+        self.assertAlmostEqual(result["longest_sustained_seconds"], 0.6, places=6)
+        self.assertEqual(result["status"], "pass", result)
+
+    def test_overlapping_samples_do_not_double_count_low_quality_time(self):
+        first = [100.0] * 12 + [80.0] * 6 + [100.0] * 2
+        second = [100.0] * 2 + [80.0] * 6 + [100.0] * 12
+        manifest = self.manifest([
+            ("uniform", 0, 2, first),
+            ("complexity", 1, 2, second),
+        ])
+        result = self.evaluate(
+            manifest, 3, provider=cfr_provider(10.0), percentile_delta=20
+        )
+        self.assertAlmostEqual(result["longest_sustained_seconds"], 0.6, places=6)
+        self.assertEqual(result["status"], "pass", result)
+
+    def test_boundary_frame_count_tolerance_cannot_invent_timing_mapping(self):
+        manifest = self.manifest([("uniform", 10, 4, [99.0] * 119)])
+        result = self.evaluate(manifest, 30, provider=cfr_provider(30.0))
+        self.assertEqual(result["status"], "error", result)
+        self.assertEqual(result["coverage_seconds"], 0)
+        self.assertTrue(any("exact VMAF/timeline mapping unavailable" in reason
+                            for reason in result["reasons"]))
+
+    def test_missing_frame_display_duration_fails_closed(self):
+        scores = [99.0] * 300
+        manifest = self.manifest([("full", 0, 10, scores)])
+        observations = [quality.FrameObservation(index / 30.0) for index in range(300)]
+        result = self.evaluate(
+            manifest, 10,
+            provider=lambda _path, _window, _ffprobe: observations,
+        )
+        self.assertEqual(result["status"], "error", result)
+        self.assertEqual(result["coverage_seconds"], 0)
+        self.assertTrue(any("missing display timing" in reason for reason in result["reasons"]))
 
     def test_variable_frame_rate_timestamps_drive_coverage_and_sustained_time(self):
         scores = [100.0] * 7 + [80.0] * 3
@@ -364,16 +481,18 @@ class StaticIntegrationTests(unittest.TestCase):
         self.assertIn("--video-quality-validation full", readme)
         self.assertIn("Full mode is much slower", readme)
 
-    def test_coverage_policy_is_documented(self):
+    def test_coverage_policy_documents_score_timing_alignment(self):
         documentation = ROOT / "docs/video-quality-validation.md"
         if not documentation.exists():
             self.skipTest("coverage documentation not present in local fixture")
         text = documentation.read_text()
         self.assertIn("50 ms", text)
         self.assertIn("100 ms", text)
-        self.assertIn("one frame", text.lower())
-        self.assertIn("requested coverage", text.lower())
-        self.assertIn("confirmed coverage", text.lower())
+        self.assertIn("sequence index", text.lower())
+        self.assertIn("presentation interval", text.lower())
+        self.assertIn("no average frame rate", text.lower())
+        self.assertIn("unsampled gap", text.lower())
+        self.assertIn("overlapping", text.lower())
 
 
 class RealMediaTests(unittest.TestCase):
@@ -401,6 +520,54 @@ class RealMediaTests(unittest.TestCase):
                 if observations[i].pts >= 0.2 and observations[i + 1].pts <= 2.2
             ]
             self.assertGreater(len(set(deltas)), 1, deltas)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"),
+                         "FFmpeg/ffprobe unavailable")
+    def test_real_vfr_media_drives_sustained_score_timing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            media = root / "timed-vfr.mkv"
+            process = subprocess.run([
+                "ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-y",
+                "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=10:duration=2",
+                "-vf", "settb=AVTB,setpts='if(lt(N,4),N/(2.5*TB),(1.6+(N-4)*0.15)/TB)'",
+                "-fps_mode", "vfr", "-c:v", "ffv1", str(media),
+            ], capture_output=True, text=True, timeout=30)
+            self.assertEqual(process.returncode, 0, process.stderr)
+
+            duration_process = subprocess.run([
+                "ffprobe", "-v", "error", "-select_streams", "V:0",
+                "-show_entries", "stream=duration", "-of", "default=nw=1:nk=1", str(media),
+            ], capture_output=True, text=True)
+            duration_text = duration_process.stdout.strip()
+            duration = float(duration_text) if duration_text not in ("", "N/A") else 4.0
+            duration = max(3.9, min(4.1, duration))
+            window = quality.Window("full", 0.0, duration)
+            observations = quality.probe_frame_timeline(str(media), window)
+            evidence = quality.analyze_timeline_evidence(
+                observations, window, stream_endpoint=True
+            )
+            self.assertTrue(evidence["complete"], evidence)
+            frame_count = int(evidence["frame_count"])
+            self.assertGreaterEqual(frame_count, 10)
+            low_count = min(4, frame_count)
+            scores = [80.0] * low_count + [100.0] * (frame_count - low_count)
+            log = root / "vmaf.json"
+            write_log(log, scores)
+            manifest = root / "manifest.tsv"
+            manifest.write_text(f"full\t0\t{duration}\t{log}\n")
+            result = quality.evaluate_manifest(
+                str(manifest), duration, 92,
+                reference_path=str(media), candidate_path=str(media),
+                percentile_delta=20,
+            )
+            intervals = evidence["frame_intervals"]
+            expected_low = sum(intervals[i][1] - intervals[i][0] for i in range(low_count))
+            self.assertAlmostEqual(
+                result["longest_sustained_seconds"], expected_low, places=3
+            )
+            self.assertGreater(result["longest_sustained_seconds"], 1.0)
+            self.assertEqual(result["status"], "reject", result)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"),
                          "FFmpeg/ffprobe unavailable")
