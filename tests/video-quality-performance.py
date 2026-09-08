@@ -12,7 +12,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = (ROOT / "lib/hardcore-archive-core.sh").read_text()
-FUNCTIONS = "MEASURED_QUALITY_KIND=''\n" + CORE.split(
+VIDEO_HELPER = (ROOT / "lib/hardcore-archive-video-helper.sh").read_text()
+FUNCTIONS = "MEASURED_QUALITY_KIND=''\n" + VIDEO_HELPER.split(
     "MEASURED_QUALITY_KIND=''\n", 1
 )[1].split("\nHARDCORE_AUTO_CODEC_MODE=", 1)[0]
 
@@ -150,11 +151,11 @@ quality_vmaf_filter_graph 1920 1080 "$TEST_ROOT/a.json" 4 vmaf_v0.6.1
         self.assertIn("if(gt(a,1920/1080),-2,1080)", graph)
 
     def test_quality_cache_policy_versions_invalidate_old_scores_and_outputs(self):
-        self.assertIn("calibration-v4-source-display-resolution-bicubic-sar-nearest-vmaf-model", CORE)
-        self.assertNotIn("calibration-v3-nominal-fps-nearest-timestamps-center-validation", CORE)
+        self.assertIn("calibration-v4-source-display-resolution-bicubic-sar-nearest-vmaf-model", VIDEO_HELPER)
+        self.assertNotIn("calibration-v3-nominal-fps-nearest-timestamps-center-validation", VIDEO_HELPER)
         self.assertIn('"video-acceptance-v1-duration-scaled"', CORE)
-        self.assertNotIn('"video-preprocessing-v2-selection"', CORE)
-        self.assertIn("QUALITY_VMAF_POLICY_VERSION='source-display-v1'", CORE)
+        self.assertNotIn('"video-preprocessing-v2-selection"', CORE + VIDEO_HELPER)
+        self.assertIn("QUALITY_VMAF_POLICY_VERSION='source-display-v1'", VIDEO_HELPER)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"),
                          "FFmpeg/ffprobe are unavailable")

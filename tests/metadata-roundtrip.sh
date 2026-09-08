@@ -5,6 +5,7 @@ IFS=$'\n\t'
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 HELPER="$ROOT/lib/hardcore-archive-metadata.py"
 CORE="$ROOT/lib/hardcore-archive-core.sh"
+RESTORE_MODULE="$ROOT/lib/restore.sh"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/hardcore-metadata-test.XXXXXX")
 cleanup() { rm -rf -- "$TMP"; }
 trap cleanup EXIT
@@ -160,10 +161,11 @@ if PATH="$FAKEBIN:$PATH" python3 "$HELPER" --root "$RESTORE" --metadata-dir "$ME
 fi
 grep -Fq 'unsafe or unsupported ACL entry' "$TMP/unsupported.out"
 
-if [[ -n $CORE ]]; then
-    grep -Fq 'getfacl -R -p -n' "$CORE"
-    grep -Fq 'restore fails closed rather than silently dropping access controls' "$CORE"
-fi
+# Keep static assertions attached to the production owner of each policy: ACL
+# capture remains in the create engine, while restore fail-closed routing moved
+# into the restore module.
+grep -Fq 'getfacl -R -p -n' "$CORE"
+grep -Fq 'restore fails closed rather than silently dropping access controls' "$RESTORE_MODULE"
 
 # Exercise real access + default ACL round trips where the host supports them.
 if command -v getfacl >/dev/null 2>&1 && command -v setfacl >/dev/null 2>&1 && id nobody >/dev/null 2>&1; then

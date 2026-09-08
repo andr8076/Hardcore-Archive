@@ -4,6 +4,7 @@ IFS=$'\n\t'
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P || pwd -P)
 CORE=${CORE:-$ROOT/lib/hardcore-archive-core.sh}
+VIDEO_HELPER=${VIDEO_HELPER:-$ROOT/lib/hardcore-archive-video-helper.sh}
 DOCTOR_CHECKS=${DOCTOR_CHECKS:-$ROOT/lib/hardcore-archive-doctor-checks.sh}
 DOCTOR_VIDEO_FIX=${DOCTOR_VIDEO_FIX:-$ROOT/lib/hardcore-archive-doctor-video-fix.sh}
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/hardcore-video-quality-test.XXXXXX")
@@ -16,13 +17,17 @@ trap cleanup EXIT
 # Syntax-check and inspect the exact checked-in engine users execute.
 if [[ ${SKIP_CORE_PATCH_TEST:-0} != 1 ]]; then
     [[ -f $CORE ]] || { printf 'Missing core: %s\n' "$CORE" >&2; exit 1; }
+    [[ -f $VIDEO_HELPER ]] || { printf 'Missing video helper: %s\n' "$VIDEO_HELPER" >&2; exit 1; }
     bash -n "$CORE"
+    bash -n "$VIDEO_HELPER"
 
-    python3 - "$CORE" <<'PY'
+    python3 - "$CORE" "$VIDEO_HELPER" <<'PY'
 import pathlib, sys
-text = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
-assert '# HARDCORE_COPY_LANE_PATCH_V1' in text
-assert '# HARDCORE_MEDIA_NESTED_FIX_V1' in text
+core = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+video = pathlib.Path(sys.argv[2]).read_text(encoding='utf-8')
+text = core + '\n' + video
+assert '# HARDCORE_COPY_LANE_PATCH_V1' in core
+assert '# HARDCORE_MEDIA_NESTED_FIX_V1' in video
 assert "json.load(handle)['pooled_metrics']['vmaf']['mean']" in text
 assert 'grep -Eo \'"mean"[[:space:]]*:[[:space:]]*[0-9]+' not in text
 assert 'encoder_args=("-rc_mode" "CQP" "-global_quality:v" "$quality")' in text

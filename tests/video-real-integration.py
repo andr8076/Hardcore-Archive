@@ -24,8 +24,8 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-CORE = (ROOT / "lib/hardcore-archive-core.sh").read_text()
-QUALITY_FUNCTIONS = "MEASURED_QUALITY_KIND=''\n" + CORE.split(
+VIDEO_HELPER = (ROOT / "lib/hardcore-archive-video-helper.sh").read_text()
+QUALITY_FUNCTIONS = "MEASURED_QUALITY_KIND=''\n" + VIDEO_HELPER.split(
     "MEASURED_QUALITY_KIND=''\n", 1
 )[1].split("\nHARDCORE_AUTO_CODEC_MODE=", 1)[0]
 STRICT = os.environ.get("HARDCORE_ARCHIVE_STRICT_REAL_VIDEO_CI") == "1"

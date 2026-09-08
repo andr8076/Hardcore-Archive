@@ -9,6 +9,7 @@ hardcore_planner_init_runtime_paths() {
     HARDCORE_ROOT=$(hardcore_root_dir)
     HARDCORE_POLICY_RUNNER="$HARDCORE_ROOT/hardcore-archive-runner-policy.sh"
     HARDCORE_CORE_SOURCE="$HARDCORE_ROOT/lib/hardcore-archive-core.sh"
+    HARDCORE_RESTORE_MODULE="$HARDCORE_ROOT/lib/restore.sh"
     HARDCORE_CONTAINER_HELPER="$HARDCORE_ROOT/lib/hardcore-archive-container-repack.py"
     HARDCORE_METADATA_HELPER="$HARDCORE_ROOT/lib/hardcore-archive-metadata.py"
     HARDCORE_MEDIA_HELPER="$HARDCORE_ROOT/lib/hardcore-archive-media.py"
@@ -16,7 +17,7 @@ hardcore_planner_init_runtime_paths() {
 
     local required
     for required in \
-        "$HARDCORE_POLICY_RUNNER" "$HARDCORE_CORE_SOURCE" \
+        "$HARDCORE_POLICY_RUNNER" "$HARDCORE_CORE_SOURCE" "$HARDCORE_RESTORE_MODULE" \
         "$HARDCORE_ROOT/lib/calibration-identity.sh" "$HARDCORE_ROOT/lib/timing.sh" \
         "$HARDCORE_ROOT/lib/video-acceleration.sh" "$HARDCORE_MEDIA_POLICY" \
         "$HARDCORE_CONTAINER_HELPER" "$HARDCORE_METADATA_HELPER" "$HARDCORE_MEDIA_HELPER"
