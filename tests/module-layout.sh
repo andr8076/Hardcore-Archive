@@ -24,6 +24,7 @@ python3 -m py_compile "$ROOT/lib/hardcore-archive-image-calibrate.py"
 python3 -m py_compile "$ROOT/lib/hardcore-archive-resource-run.py"
 python3 -m py_compile "$ROOT/lib/hardcore-archive-zopfli-adaptive.py"
 python3 -m py_compile "$ROOT/lib/hardcore-archive-video-quality.py"
+python3 -m py_compile "$ROOT/lib/hardcore-archive-atomic-commit.py"
 bash -n "$ROOT/packaging/media-runtime/build.sh"
 bash -n "$ROOT/packaging/media-runtime/smoke-test.sh"
 bash -n "$ROOT/tests/bundled-runtime.sh"
@@ -61,6 +62,14 @@ grep -Fq -- '--threads-per-worker "$IMAGE_THREADS_PER_WORKER"' "$ROOT/lib/hardco
     "$ROOT/lib/archive.sh" "$ROOT/lib/video.sh" "$ROOT/lib/nested.sh" \
     "$ROOT/lib/visual.sh" "$ROOT/lib/containers.sh" "$ROOT/lib/scheduler.sh"
 grep -Fq 'hardcore_reporting_start' "$ROOT/lib/reporting.sh"
+
+# Restore owns preparation and delegates only the final kernel/filesystem commit
+# to the checked-in no-replace helper; ordinary mv is staging-only.
+grep -Fq 'restore_prepare_commit_tree()' "$ROOT/lib/restore.sh"
+grep -Fq 'restore_atomic_commit_prepared()' "$ROOT/lib/restore.sh"
+grep -Fq 'hardcore-archive-atomic-commit.py' "$ROOT/lib/restore.sh"
+grep -Fq 'renameat2' "$ROOT/lib/hardcore-archive-atomic-commit.py"
+grep -Fq 'renamex_np' "$ROOT/lib/hardcore-archive-atomic-commit.py"
 
 printf 'Modular layout tests passed.\n'
 
