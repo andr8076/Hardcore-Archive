@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable, Sequence
 
-POLICY_VERSION = "completed-video-quality-v2-evidence-coverage"
+POLICY_VERSION = "completed-video-quality-v3-timed-sustained"
 FRAME_BOUNDARY_TOLERANCE_SECONDS = 0.050
 STREAM_ENDPOINT_TOLERANCE_SECONDS = 0.100
 FRAME_SELECTION_EPSILON_SECONDS = 0.000001
@@ -49,6 +49,13 @@ class Window:
 class FrameObservation:
     pts: float
     duration: float | None = None
+
+
+@dataclass(frozen=True)
+class TimedScore:
+    start: float
+    end: float
+    score: float
 
 
 def _finite(value: object) -> float:
@@ -406,16 +413,27 @@ def _probe_frames_once(
     return observations
 
 
+def frame_display_interval(
+    observations: Sequence[FrameObservation], index: int
+) -> tuple[float, float] | None:
+    frame = observations[index]
+    if index + 1 < len(observations) and observations[index + 1].pts > frame.pts:
+        end = observations[index + 1].pts
+    elif frame.duration is not None and frame.duration > 0:
+        end = frame.pts + frame.duration
+    else:
+        return None
+    if not math.isfinite(end) or end <= frame.pts:
+        return None
+    return frame.pts, end
+
+
 def frame_spans(observations: Sequence[FrameObservation]) -> list[tuple[float, float]]:
     spans: list[tuple[float, float]] = []
-    for index, frame in enumerate(observations):
-        end: float | None = None
-        if index + 1 < len(observations) and observations[index + 1].pts > frame.pts:
-            end = observations[index + 1].pts
-        elif frame.duration is not None and frame.duration > 0:
-            end = frame.pts + frame.duration
-        if end is not None and end > frame.pts:
-            spans.append((frame.pts, end))
+    for index in range(len(observations)):
+        interval = frame_display_interval(observations, index)
+        if interval is not None:
+            spans.append(interval)
     return spans
 
 
@@ -441,9 +459,10 @@ def analyze_timeline_evidence(
         start_gap = end_gap = window.length
         internal_gap = 0.0
 
-    display_spans = frame_spans(observations)
     selected: list[FrameObservation] = []
+    selected_intervals: list[tuple[float, float] | None] = []
     selected_durations: list[float] = []
+    missing_timing = 0
     for frame_index, frame in enumerate(observations):
         # Coverage evidence may look slightly outside the requested boundaries so
         # it can prove display continuity. Frame-population matching must not use
@@ -455,13 +474,23 @@ def analyze_timeline_evidence(
         ):
             continue
         selected.append(frame)
-        if frame_index < len(display_spans):
-            span_start, span_end = display_spans[frame_index]
-            selected_durations.append(
-                max(0.0, min(span_end, window.end) - max(span_start, window.start))
-            )
-        else:
+        interval = frame_display_interval(observations, frame_index)
+        if interval is None:
+            selected_intervals.append(None)
             selected_durations.append(0.0)
+            missing_timing += 1
+            continue
+        span_start, span_end = interval
+        clipped_start = max(span_start, window.start)
+        clipped_end = min(span_end, window.end)
+        if clipped_end <= clipped_start:
+            selected_intervals.append(None)
+            selected_durations.append(0.0)
+            missing_timing += 1
+            continue
+        selected_intervals.append((clipped_start, clipped_end))
+        selected_durations.append(clipped_end - clipped_start)
+
     endpoint_tolerance = (
         STREAM_ENDPOINT_TOLERANCE_SECONDS if stream_endpoint
         else FRAME_BOUNDARY_TOLERANCE_SECONDS
@@ -475,10 +504,13 @@ def analyze_timeline_evidence(
         reasons.append(f"end-gap {end_gap:.6f}s > {endpoint_tolerance:.3f}s")
     if not selected:
         reasons.append("no candidate frames in requested interval")
+    if missing_timing:
+        reasons.append(f"missing display timing for {missing_timing} selected frame(s)")
     return {
         "coverage_seconds": coverage,
         "intervals": merged,
         "frame_count": len(selected),
+        "frame_intervals": selected_intervals,
         "frame_durations": selected_durations,
         "observed_frames": len(observations),
         "start_gap": start_gap,
@@ -502,6 +534,63 @@ def probe_frame_timeline(
     # or very-low-frame-rate material. Retry once farther back; this is bounded
     # and does not change the acceptance threshold.
     return _probe_frames_once(path, window, FALLBACK_PROBE_SEEK_BACK_SECONDS, ffprobe)
+
+
+def map_vmaf_scores_to_timeline(
+    scores: Sequence[float], frame_numbers: Sequence[int], candidate_evidence: dict[str, object]
+) -> list[TimedScore]:
+    """Map libvmaf sequence records to candidate presentation intervals.
+
+    libvmaf frameNum is a sequence index, not a timestamp. The production graph
+    does not convert FPS or subsample frames, and it feeds the completed candidate
+    as the distorted stream after PTS normalization. Therefore sequence index i
+    can be associated with candidate interval i only when the independently
+    probed candidate frame population matches exactly and every interval has
+    trustworthy timing evidence.
+    """
+    intervals = candidate_evidence.get("frame_intervals")
+    if not isinstance(intervals, list):
+        raise ValueError("candidate frame timing evidence missing")
+    if len(scores) != len(intervals):
+        raise ValueError(
+            f"exact VMAF/timeline mapping unavailable: {len(scores)} VMAF record(s) "
+            f"for {len(intervals)} candidate frame interval(s)"
+        )
+    if list(frame_numbers) != list(range(len(scores))):
+        raise ValueError("VMAF frame numbers are not a contiguous sequence")
+
+    mapped: list[TimedScore] = []
+    previous_start = -math.inf
+    for index, (score, interval) in enumerate(zip(scores, intervals)):
+        if interval is None or not isinstance(interval, tuple) or len(interval) != 2:
+            raise ValueError(f"candidate timing missing for VMAF sequence index {index}")
+        start = _finite(interval[0])
+        end = _finite(interval[1])
+        if end <= start:
+            raise ValueError(f"invalid candidate display interval for VMAF sequence index {index}")
+        if start + FRAME_SELECTION_EPSILON_SECONDS < previous_start:
+            raise ValueError("candidate display intervals are not presentation-ordered")
+        mapped.append(TimedScore(start=start, end=end, score=_finite(score)))
+        previous_start = start
+    return mapped
+
+
+def longest_sustained_low_quality(
+    timed_scores: Sequence[TimedScore], sustained_floor: float
+) -> float:
+    """Measure low-quality time on the sampled presentation timeline.
+
+    Unioning the actual low-score display intervals merges degradation across
+    truly adjacent sample-window boundaries, leaves unsampled gaps disconnected,
+    and prevents overlapping sample windows from double-counting the same time.
+    """
+    low_intervals = [
+        (item.start, item.end)
+        for item in timed_scores
+        if item.score < sustained_floor and item.end > item.start
+    ]
+    merged = union_intervals(low_intervals)
+    return max((end - start for start, end in merged), default=0.0)
 
 
 def _evidence_error(prefix: str, reasons: Sequence[str]) -> str:
@@ -541,16 +630,16 @@ def evaluate_manifest(
     provider = evidence_provider or probe_frame_timeline
     all_frames: list[float] = []
     window_means: list[float] = []
-    longest_sustained = 0.0
     sustained_floor = threshold - sustained_delta
     evidence_reasons: list[str] = []
     confirmed_intervals: list[tuple[float, float]] = []
+    timed_scores: list[TimedScore] = []
     window_evidence: list[dict[str, object]] = []
 
     for index, (window, log_path) in enumerate(rows, 1):
         if window.end > duration + STREAM_ENDPOINT_TOLERANCE_SECONDS:
             raise ValueError(f"measurement window {index} exceeds source duration")
-        pooled, frames, _frame_numbers = read_vmaf_log(log_path)
+        pooled, frames, frame_numbers = read_vmaf_log(log_path)
         window_means.append(pooled)
         all_frames.extend(frames)
 
@@ -589,6 +678,15 @@ def evaluate_manifest(
                 f"VMAF scored {scored_frames} frame(s), candidate evidence has {expected_frames} "
                 f"frame(s) in the window (allowed difference {allowed_frame_difference})"
             )
+
+        mapped_scores: list[TimedScore] = []
+        try:
+            mapped_scores = map_vmaf_scores_to_timeline(
+                frames, frame_numbers, candidate_evidence
+            )
+        except (TypeError, ValueError) as exc:
+            current_reasons.append(f"VMAF timing alignment failed: {exc}")
+
         # Even with valid endpoints, a large uncovered overlap would indicate
         # contradictory evidence. Do not convert planned duration into coverage.
         missing_overlap = max(0.0, window.length - timeline_overlap)
@@ -610,6 +708,7 @@ def evaluate_manifest(
         else:
             confirmed = timeline_overlap
             confirmed_intervals.extend(overlap)
+            timed_scores.extend(mapped_scores)
 
         window_evidence.append({
             "index": index,
@@ -621,33 +720,16 @@ def evaluate_manifest(
             "reference_frames": int(reference_evidence["frame_count"]),
             "candidate_frames": expected_frames,
             "vmaf_frames": scored_frames,
+            "timed_vmaf_frames": len(mapped_scores) if not current_reasons else 0,
+            "timing_alignment": "sequence-index-to-candidate-pts" if not current_reasons else "unavailable",
             "complete": not current_reasons,
             "reasons": current_reasons,
         })
 
-        # Preserve the existing sustained-low rule while avoiding any fixed-FPS
-        # assumption. Exact VMAF/candidate frame populations use actual candidate
-        # frame display durations; the allowed boundary mismatch falls back to
-        # the evidence-confirmed window duration spread across scored frames.
-        candidate_durations = [float(value) for value in candidate_evidence["frame_durations"]]
-        if len(candidate_durations) == len(frames) and sum(candidate_durations) > 0:
-            score_durations = candidate_durations
-        else:
-            seconds_per_score = confirmed / len(frames) if frames else 0.0
-            score_durations = [seconds_per_score] * len(frames)
-        run_seconds = 0.0
-        best_seconds = 0.0
-        for value, score_duration in zip(frames, score_durations):
-            if value < sustained_floor:
-                run_seconds += max(0.0, score_duration)
-                best_seconds = max(best_seconds, run_seconds)
-            else:
-                run_seconds = 0.0
-        longest_sustained = max(longest_sustained, best_seconds)
-
     if not all_frames or not window_means:
         raise ValueError("empty VMAF measurements")
 
+    longest_sustained = longest_sustained_low_quality(timed_scores, sustained_floor)
     aggregate_mean = sum(all_frames) / len(all_frames)
     low_value = percentile(all_frames, low_percentile)
     minimum_window = min(window_means)
@@ -685,6 +767,8 @@ def evaluate_manifest(
         "status": status,
         "windows": len(windows),
         "frames": len(all_frames),
+        "timed_frames": len(timed_scores),
+        "timing_alignment": "vmaf-sequence-to-candidate-presentation-interval",
         "requested_coverage_seconds": requested_coverage_seconds,
         "requested_coverage_percent": requested_coverage_seconds * 100.0 / duration,
         "coverage_seconds": confirmed_coverage_seconds,
