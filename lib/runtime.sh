@@ -86,6 +86,29 @@ hardcore_runtime_activate_libraries() {
     esac
 }
 
+# Older macOS media bundles may contain the absolute build-machine path for
+# libvmaf. Repair those cached/downloaded bundles in place; current bundles are
+# already @rpath-relative, so this is an idempotent compatibility path.
+hardcore_runtime_repair_macos_media() {
+    local target=$1 runtime=$2 root dependency relocator
+    [[ $target == macos-* ]] || return 0
+    command -v otool >/dev/null 2>&1 || return 0
+    dependency=$(otool -L "$runtime/bin/ffmpeg" 2>/dev/null |
+        awk '$1 ~ /libvmaf.*[.]dylib/ {print $1; exit}' || true)
+    [[ -n $dependency ]] || return 0
+    case $dependency in
+        @rpath/*|@loader_path/*) return 0 ;;
+    esac
+
+    root=${HARDCORE_ARCHIVE_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)}
+    relocator="$root/packaging/media-runtime/relocate-macos.sh"
+    if [[ ! -r $relocator ]] || ! bash "$relocator" "$runtime"; then
+        HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR='Downloaded macOS media runtime could not be made relocatable.'
+        export HARDCORE_ARCHIVE_RUNTIME_BOOTSTRAP_ERROR
+        return 1
+    fi
+}
+
 # Activate the general-purpose runtime before dependency discovery. Portable
 # releases carry a manifest so a media-only runtime is not mistaken for the
 # complete tool bundle.
@@ -291,6 +314,11 @@ hardcore_runtime_bootstrap() {
         hardcore_runtime_release_install_lock "$lock_dir"
         return 1
     fi
+    if ! hardcore_runtime_repair_macos_media "$target" "$tmp/runtime"; then
+        rm -rf -- "$tmp"
+        hardcore_runtime_release_install_lock "$lock_dir"
+        return 1
+    fi
 
     candidate="$cache_root/$target/.runtime.new.$$"
     rm -rf -- "$candidate"
@@ -353,6 +381,7 @@ hardcore_runtime_prepare_video_toolchain() {
     cache_root=$(hardcore_runtime_cache_root)
     cached_dir="$cache_root/$target/runtime"
     if [[ -x $cached_dir/bin/ffmpeg && -x $cached_dir/bin/ffprobe ]]; then
+        hardcore_runtime_repair_macos_media "$target" "$cached_dir" || return 1
         hardcore_runtime_activate_dir "$cached_dir/bin" downloaded "$cached_dir/runtime-manifest.txt"
         return $?
     fi
