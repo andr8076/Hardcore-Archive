@@ -10,6 +10,11 @@ IFS=$'\n\t'
 
 HARDCORE_ARCHIVE_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 export HARDCORE_ARCHIVE_ROOT
+# Activate a packaged portable toolchain before loading modules or performing
+# dependency discovery.
+# shellcheck source=/dev/null
+source "$HARDCORE_ARCHIVE_ROOT/lib/runtime.sh"
+hardcore_runtime_prepare_toolchain
 # shellcheck source=/dev/null
 source "$HARDCORE_ARCHIVE_ROOT/lib/common.sh"
 # shellcheck source=/dev/null

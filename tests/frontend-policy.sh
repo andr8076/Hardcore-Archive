@@ -26,6 +26,7 @@ unset -f file
 
 bash "$ROOT/tests/module-layout.sh"
 bash "$ROOT/tests/bundled-runtime.sh"
+bash "$ROOT/tests/portable-runtime.sh"
 bash "$ROOT/tests/lazy-video-runtime.sh"
 bash "$ROOT/tests/video-content-routing.sh"
 bash "$ROOT/tests/runtime-bootstrap.sh"

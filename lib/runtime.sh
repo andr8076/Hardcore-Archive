@@ -58,25 +58,77 @@ hardcore_runtime_identity() {
     fi
 }
 
+hardcore_runtime_prepend_path() {
+    local dir=$1
+    case :$PATH: in
+        *":$dir:"*) ;;
+        *) PATH="$dir:$PATH" ;;
+    esac
+    export PATH
+}
+
+hardcore_runtime_activate_libraries() {
+    local prefix=$1
+    [[ -d $prefix/lib ]] || return 0
+    case $(uname -s 2>/dev/null || true) in
+        Darwin)
+            case :${DYLD_LIBRARY_PATH:-}: in
+                *":$prefix/lib:"*) ;;
+                *) DYLD_LIBRARY_PATH="$prefix/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" ;;
+            esac
+            export DYLD_LIBRARY_PATH
+            ;;
+        *)
+            case :${LD_LIBRARY_PATH:-}: in
+                *":$prefix/lib:"*) ;;
+                *) LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+            esac
+            export LD_LIBRARY_PATH
+            ;;
+    esac
+}
+
+# Activate the general-purpose runtime before dependency discovery. Portable
+# releases carry a manifest so a media-only runtime is not mistaken for the
+# complete tool bundle.
+hardcore_runtime_prepare_toolchain() {
+    local root target prefix manifest material hash
+    [[ ${HARDCORE_ARCHIVE_TOOL_RUNTIME_PREPARED:-0} == 1 ]] && return 0
+    HARDCORE_ARCHIVE_TOOL_RUNTIME_PREPARED=1
+    export HARDCORE_ARCHIVE_TOOL_RUNTIME_PREPARED
+
+    if [[ ${HARDCORE_ARCHIVE_USE_SYSTEM_TOOLS:-0} == 1 ]]; then
+        export HARDCORE_ARCHIVE_TOOL_RUNTIME_MODE=system
+        return 0
+    fi
+
+    root=${HARDCORE_ARCHIVE_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)}
+    target=$(hardcore_runtime_target)
+    for prefix in "$root/runtime" "$root/runtime/$target"; do
+        manifest="$prefix/tools-runtime-manifest.txt"
+        [[ -r $manifest && -x $prefix/bin/bash && -x $prefix/bin/python3 ]] || continue
+        hardcore_runtime_prepend_path "$prefix/bin"
+        hardcore_runtime_activate_libraries "$prefix"
+        if [[ -r $prefix/share/misc/magic.mgc ]]; then
+            MAGIC="$prefix/share/misc/magic.mgc"
+            export MAGIC
+        fi
+        export HARDCORE_ARCHIVE_TOOL_RUNTIME_MODE=bundled
+        material=$(cat -- "$manifest")
+        hash=$(printf '%s' "$material" | hardcore_runtime_hash_text 2>/dev/null || true)
+        export HARDCORE_ARCHIVE_TOOL_RUNTIME_ID="hca-tools-${hash:0:16}"
+        return 0
+    done
+
+    export HARDCORE_ARCHIVE_TOOL_RUNTIME_MODE=system
+}
+
 hardcore_runtime_activate_dir() {
     local dir=$1 mode=$2 manifest=${3:-}
     [[ -x $dir/ffmpeg && -x $dir/ffprobe ]] || return 1
 
-    PATH="$dir:$PATH"
-    export PATH
-
-    if [[ -d ${dir%/bin}/lib ]]; then
-        case $(uname -s 2>/dev/null || true) in
-            Darwin)
-                DYLD_LIBRARY_PATH="${dir%/bin}/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-                export DYLD_LIBRARY_PATH
-                ;;
-            *)
-                LD_LIBRARY_PATH="${dir%/bin}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-                export LD_LIBRARY_PATH
-                ;;
-        esac
-    fi
+    hardcore_runtime_prepend_path "$dir"
+    hardcore_runtime_activate_libraries "${dir%/bin}"
 
     export HARDCORE_ARCHIVE_FFMPEG="$dir/ffmpeg"
     export HARDCORE_ARCHIVE_FFPROBE="$dir/ffprobe"
@@ -286,12 +338,14 @@ hardcore_runtime_prepare_video_toolchain() {
     packaged_dir="$root/runtime/bin"
     target_dir="$root/runtime/$target/bin"
     if [[ -x $packaged_dir/ffmpeg && -x $packaged_dir/ffprobe ]]; then
-        manifest="$root/runtime/runtime-manifest.txt"
+        manifest="$root/runtime/media-runtime-manifest.txt"
+        [[ -r $manifest ]] || manifest="$root/runtime/runtime-manifest.txt"
         hardcore_runtime_activate_dir "$packaged_dir" bundled "$manifest"
         return $?
     fi
     if [[ -x $target_dir/ffmpeg && -x $target_dir/ffprobe ]]; then
-        manifest="$root/runtime/$target/runtime-manifest.txt"
+        manifest="$root/runtime/$target/media-runtime-manifest.txt"
+        [[ -r $manifest ]] || manifest="$root/runtime/$target/runtime-manifest.txt"
         hardcore_runtime_activate_dir "$target_dir" bundled "$manifest"
         return $?
     fi
