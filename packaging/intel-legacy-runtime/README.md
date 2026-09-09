@@ -81,11 +81,16 @@ deliberately passed through.
       --runtime dist/intel-legacy-runtime/runtime \
       --report intel-legacy-p530-report.txt
 
-Success requires a non-empty, five-second HEVC encode and proves through the
-dynamic-loader trace that both the private legacy dispatcher and
-libmfxhw64.so.1 were loaded, while oneVPL was not. It also checks the codec,
-duration, and complete decode; reports VMAF when available; and records
-comparison timings for libx265 and libsvtav1 when installed.
+Success requires a non-empty, five-second HEVC encode. The runtime inspector
+proves that FFmpeg resolves the private legacy libmfx dispatcher and excludes
+oneVPL; the encode log must additionally report an Intel Media SDK session using
+a hardware-accelerated implementation. The test also checks the codec, duration,
+and complete decode; reports VMAF when available; and records comparison timings
+for libx265 and libsvtav1 when installed.
+
+The acceptance encode intentionally avoids the dynamic loader's LD_DEBUG mode.
+That diagnostic mode can deadlock the discontinued Media SDK dispatcher on the
+target P530 system and is therefore not a valid capability-test environment.
 
 The tested legacy HEVC arguments explicitly disable QSV low-power mode. That
 mode is not exposed by the Skylake/P530 Media SDK implementation and must not be
