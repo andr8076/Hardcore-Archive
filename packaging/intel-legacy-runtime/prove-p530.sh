@@ -29,7 +29,7 @@ fi
     printf 'FAIL This acceptance test requires Linux x86_64.\n' >&2
     exit 2
 }
-for cmd in awk date grep ldd mktemp readelf sed; do
+for cmd in awk date grep ldd mktemp python3 readelf sed; do
     command -v "$cmd" >/dev/null 2>&1 || { printf 'FAIL Missing diagnostic command: %s\n' "$cmd" >&2; exit 2; }
 done
 
@@ -44,25 +44,33 @@ MODERN_FFPROBE=${HCA_MODERN_FFPROBE:-$(command -v ffprobe || true)}
 
 TMP=$(mktemp -d)
 trap 'rm -rf -- "$TMP"' EXIT
-REFERENCE="$TMP/reference.y4m"
+REFERENCE="$TMP/reference.nv12"
 OUTPUT="$TMP/legacy-hevc.mkv"
 TRACE="$TMP/legacy-loader.log"
 ENCODE_LOG="$TMP/legacy-encode.log"
 
 heading() { printf '\n== %s ==\n' "$1"; }
 run_bounded() {
-    if command -v timeout >/dev/null 2>&1; then timeout 45 "$@"; else "$@"; fi
+    if command -v timeout >/dev/null 2>&1; then timeout --kill-after=3 45 "$@"; else "$@"; fi
+}
+run_modern_probe_bounded() {
+    if command -v timeout >/dev/null 2>&1; then timeout --kill-after=2 12 "$@"; else "$@"; fi
 }
 legacy() { bash "$HERE/with-runtime.sh" "$RUNTIME" "$@"; }
 modern_probe() {
-    local label=$1
+    local label=$1 status
     shift
-    if run_bounded "$MODERN_FFMPEG" -hide_banner -loglevel error -f lavfi \
+    if run_modern_probe_bounded "$MODERN_FFMPEG" -hide_banner -loglevel error -f lavfi \
         -i testsrc2=size=640x360:rate=30 -frames:v 30 "$@" -an -f null - >/dev/null 2>"$TMP/modern-$label.log"; then
         printf 'PASS Modern probe %-12s real encode succeeded\n' "$label"
     else
-        printf 'FAIL Modern probe %-12s real encode failed: ' "$label"
-        sed '/^[[:space:]]*$/d' "$TMP/modern-$label.log" | tail -n 1 || true
+        status=$?
+        if [[ $status == 124 || $status == 137 ]]; then
+            printf 'FAIL Modern probe %-12s timed out\n' "$label"
+        else
+            printf 'FAIL Modern probe %-12s real encode failed: ' "$label"
+            sed '/^[[:space:]]*$/d' "$TMP/modern-$label.log" | tail -n 1 || true
+        fi
     fi
 }
 
@@ -99,22 +107,38 @@ else
 fi
 
 heading 'Reference generation'
-REFERENCE_LOG="$TMP/reference.log"
-if ! run_bounded "$MODERN_FFMPEG" -hide_banner -loglevel error -y \
-    -f lavfi -i testsrc2=size=640x360:rate=30 -t 5 \
-    -pix_fmt yuv420p -f yuv4mpegpipe "$REFERENCE" \
-    > /dev/null 2>"$REFERENCE_LOG"; then
-    printf 'FAIL Reference generation failed or exceeded 45 seconds. FFmpeg output follows:\n' >&2
-    tail -n 30 "$REFERENCE_LOG" >&2 || true
+python3 - "$REFERENCE" <<'PY'
+import sys
+
+width, height, frames = 640, 360, 150
+row = bytes(16 + (x * 180 // width) for x in range(width))
+base_luma = bytearray(row * height)
+neutral_chroma = bytes([128]) * (width * height // 2)
+
+with open(sys.argv[1], "wb") as output:
+    for frame in range(frames):
+        luma = base_luma.copy()
+        left = (frame * 3) % (width - 64)
+        top = (frame * 2) % (height - 64)
+        for y in range(top, top + 64):
+            start = y * width + left
+            luma[start:start + 64] = b"\xeb" * 64
+        output.write(luma)
+        output.write(neutral_chroma)
+PY
+EXPECTED_REFERENCE_BYTES=$(( 640 * 360 * 3 / 2 * 150 ))
+REFERENCE_BYTES=$(wc -c < "$REFERENCE")
+[[ $REFERENCE_BYTES == "$EXPECTED_REFERENCE_BYTES" ]] || {
+    printf 'FAIL Raw reference has %s bytes; expected %s.\n' "$REFERENCE_BYTES" "$EXPECTED_REFERENCE_BYTES" >&2
     exit 1
-fi
-[[ -s $REFERENCE ]] || { printf 'FAIL Reference generation produced no data.\n' >&2; exit 1; }
-printf 'PASS Deterministic 5-second 640x360 uncompressed reference generated.\n'
+}
+printf 'PASS Deterministic 5-second 640x360 raw NV12 reference generated.\n'
 
 heading 'Genuine legacy HEVC encode'
 START_NS=$(date +%s%N)
 if ! LD_DEBUG=libs run_bounded bash "$HERE/with-runtime.sh" "$RUNTIME" \
-    "$LEGACY_FFMPEG" -hide_banner -y -i "$REFERENCE" -an \
+    "$LEGACY_FFMPEG" -hide_banner -y \
+    -f rawvideo -pixel_format nv12 -video_size 640x360 -framerate 30 -i "$REFERENCE" -an \
     -c:v hevc_qsv -load_plugin hevc_hw -global_quality 28 -preset medium \
     "$OUTPUT" >"$ENCODE_LOG" 2>"$TRACE"; then
     printf 'FAIL The legacy HEVC encode failed. Last output follows:\n' >&2
@@ -150,7 +174,8 @@ printf 'PASS codec=hevc duration=%s full_decode=ok\n' "$DURATION"
 heading 'Quality and software performance comparison'
 if "$MODERN_FFMPEG" -hide_banner -filters 2>&1 | grep -Eq '(^|[[:space:]])libvmaf([[:space:]]|$)'; then
     VMAF_LOG="$TMP/vmaf.log"
-    if run_bounded "$MODERN_FFMPEG" -hide_banner -i "$OUTPUT" -i "$REFERENCE" \
+    if run_bounded "$MODERN_FFMPEG" -hide_banner -i "$OUTPUT" \
+        -f rawvideo -pixel_format nv12 -video_size 640x360 -framerate 30 -i "$REFERENCE" \
         -lavfi '[0:v][1:v]libvmaf' -f null - > /dev/null 2>"$VMAF_LOG"; then
         VMAF=$(sed -n 's/.*VMAF score: \([0-9.]*\).*/\1/p' "$VMAF_LOG" | tail -n 1)
         printf 'VMAF=%s\n' "${VMAF:-completed-score-not-parsed}"
@@ -167,7 +192,9 @@ compare_software() {
         printf 'SKIP %s unavailable\n' "$encoder"; return 0;
     }
     start=$(date +%s%N)
-    if run_bounded "$MODERN_FFMPEG" -hide_banner -y -i "$REFERENCE" -an -c:v "$encoder" -crf 28 "$out" > /dev/null 2>"$log"; then
+    if run_bounded "$MODERN_FFMPEG" -hide_banner -y \
+        -f rawvideo -pixel_format nv12 -video_size 640x360 -framerate 30 -i "$REFERENCE" \
+        -an -c:v "$encoder" -crf 28 "$out" > /dev/null 2>"$log"; then
         end=$(date +%s%N)
         elapsed=$(( (end - start) / 1000000 ))
         printf 'Software comparison encoder=%s elapsed_ms=%s bytes=%s\n' "$encoder" "$elapsed" "$(wc -c < "$out")"
