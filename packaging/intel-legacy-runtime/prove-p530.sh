@@ -53,7 +53,7 @@ heading() { printf '\n== %s ==\n' "$1"; }
 run_bounded() {
     if command -v timeout >/dev/null 2>&1; then timeout 45 "$@"; else "$@"; fi
 }
-legacy() { "$HERE/with-runtime.sh" "$RUNTIME" "$@"; }
+legacy() { bash "$HERE/with-runtime.sh" "$RUNTIME" "$@"; }
 modern_probe() {
     local label=$1
     shift
@@ -84,7 +84,7 @@ heading 'Modern FFmpeg identity'
 ldd "$MODERN_FFMPEG" | grep -E 'libmfx|libvpl|libva|libdrm' || printf 'INFO No matching dynamic media libraries shown by ldd.\n'
 
 heading 'Legacy compatibility runtime integrity'
-"$HERE/inspect.sh" "$RUNTIME"
+bash "$HERE/inspect.sh" "$RUNTIME"
 legacy "$LEGACY_FFMPEG" -hide_banner -version | head -n 1
 legacy "$LEGACY_FFMPEG" -hide_banner -buildconf
 legacy ldd "$LEGACY_FFMPEG" | grep -E 'libmfx|libvpl|libva|libdrm' || true
@@ -107,7 +107,7 @@ printf 'PASS Deterministic 5-second 1280x720 reference generated.\n'
 
 heading 'Genuine legacy HEVC encode'
 START_NS=$(date +%s%N)
-if ! LD_DEBUG=libs run_bounded "$HERE/with-runtime.sh" "$RUNTIME" \
+if ! LD_DEBUG=libs run_bounded bash "$HERE/with-runtime.sh" "$RUNTIME" \
     "$LEGACY_FFMPEG" -hide_banner -y -i "$REFERENCE" -an \
     -c:v hevc_qsv -load_plugin hevc_hw -global_quality 28 -preset medium \
     "$OUTPUT" >"$ENCODE_LOG" 2>"$TRACE"; then
@@ -137,7 +137,7 @@ awk -v d="$DURATION" 'BEGIN { exit !(d >= 4.8 && d <= 5.2) }' || {
     printf 'FAIL Output duration is outside 4.8-5.2 seconds: %s\n' "$DURATION" >&2
     exit 1
 }
-run_bounded "$HERE/with-runtime.sh" "$RUNTIME" "$LEGACY_FFMPEG" \
+run_bounded bash "$HERE/with-runtime.sh" "$RUNTIME" "$LEGACY_FFMPEG" \
     -hide_banner -loglevel error -xerror -i "$OUTPUT" -map 0:v:0 -f null -
 printf 'PASS codec=hevc duration=%s full_decode=ok\n' "$DURATION"
 
