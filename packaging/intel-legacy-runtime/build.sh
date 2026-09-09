@@ -105,8 +105,8 @@ export PKG_CONFIG_PATH="$WORK/prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFI
         --disable-libvpl \
         --extra-cflags="-I$WORK/prefix/include" \
         --extra-ldflags="-L$WORK/prefix/lib -Wl,-rpath,\$ORIGIN/../lib"
-    grep -Fq 'CONFIG_LIBMFX=yes' ffbuild/config.mak || { printf 'FFmpeg did not enable libmfx.\n' >&2; exit 3; }
-    ! grep -Fq 'CONFIG_LIBVPL=yes' ffbuild/config.mak || { printf 'FFmpeg unexpectedly enabled libvpl.\n' >&2; exit 3; }
+    grep -Fxq 'CONFIG_LIBMFX=yes' ffbuild/config.mak || { printf 'FFmpeg did not enable libmfx.\n' >&2; exit 3; }
+    ! grep -Fxq 'CONFIG_LIBVPL=yes' ffbuild/config.mak || { printf 'FFmpeg unexpectedly enabled libvpl.\n' >&2; exit 3; }
     make -j "$JOBS" ffmpeg ffprobe
 )
 
