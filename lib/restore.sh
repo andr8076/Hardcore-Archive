@@ -16,11 +16,13 @@
 #
 # Return / cleanup contract:
 #   * Successful restore returns 0 after a verified atomic destination commit.
-#   * Fatal validation/extraction/metadata/commit failures retain the historical
-#     die() path and therefore exit non-zero without replacing a destination.
-#   * Restore owns only RESTORE_TEMP and RESTORE_LOCK_* resources. Its EXIT and
-#     signal traps remove an uncommitted temporary tree, release the restore
-#     lock, and preserve the historical 129/130/143 signal statuses.
+#   * Fatal validation/extraction/metadata/enumeration/commit failures retain the
+#     historical die() path and therefore exit non-zero without replacing a
+#     destination.
+#   * Restore owns RESTORE_TEMP, RESTORE_ENUMERATION_FILE, and RESTORE_LOCK_*
+#     resources. Its EXIT and signal traps remove uncommitted temporary data,
+#     release the restore lock, and preserve the historical 129/130/143 signal
+#     statuses.
 #   * The source archive is read-only throughout this module.
 #
 # hardcore_archive_internal_root_name and remove_hardcore_archive_internal_entries
@@ -170,6 +172,9 @@ PYSPARSERESTORE
 
 cleanup_restore() {
     local exit_status=$?
+    if [[ -n ${RESTORE_ENUMERATION_FILE:-} ]]; then
+        rm -f -- "$RESTORE_ENUMERATION_FILE" 2>/dev/null || true
+    fi
     if [[ -n ${RESTORE_TEMP:-} && -d $RESTORE_TEMP && ${RESTORE_COMMITTED:-false} != true ]]; then
         rm -rf --one-file-system -- "$RESTORE_TEMP" 2>/dev/null || true
     fi
@@ -182,12 +187,34 @@ cleanup_restore() {
 }
 
 restore_prepare_commit_tree() {
-    local root=$1 ready entry
+    local root=$1 listing=$2 ready entry
     local -a entries=()
+
+    [[ -n $listing ]] || return 1
+    case $listing in
+        "$root"|"$root"/*)
+            printf 'Restore enumeration listing must remain outside staging: %s\n' "$listing" >&2
+            return 1
+            ;;
+    esac
+
+    # Capture a complete NUL-delimited snapshot first. Process substitution is
+    # deliberately avoided: find's status must authorize all later layout work.
+    # A zero-byte file plus status 0 means a legitimately empty restore; any
+    # nonzero status rejects even valid partial output before entries are moved.
+    if ! find "$root" -mindepth 1 -maxdepth 1 -print0 > "$listing"; then
+        printf 'Restore staging directory enumeration failed; refusing partial results.\n' >&2
+        return 1
+    fi
 
     while IFS= read -r -d '' entry; do
         entries+=("$entry")
-    done < <(find "$root" -mindepth 1 -maxdepth 1 -print0)
+    done < "$listing"
+
+    # The listing is restore-owned and outside root so it can never become part
+    # of the payload. Remove it before preparing the final layout; the EXIT trap
+    # remains a fallback if enumeration or cleanup fails.
+    rm -f -- "$listing" || return 1
 
     ready=$(mktemp -d "$root/.hardcore-restore-ready.XXXXXX") || return 1
     if (( ${#entries[@]} == 1 )) && [[ -d ${entries[0]} ]]; then
@@ -265,6 +292,7 @@ restore_existing_archive() {
         die "Trusted atomic restore commit helper is missing: $HARDCORE_RESTORE_ATOMIC_COMMIT_HELPER"
 
     RESTORE_TEMP=""
+    RESTORE_ENUMERATION_FILE=""
     RESTORE_LOCK_FILE=""
     RESTORE_COMMITTED=false
     trap cleanup_restore EXIT
@@ -346,12 +374,20 @@ print(size)
     # as a top-level directory named .hardcore-archive-photos.
     remove_hardcore_archive_internal_entries "$temp"
 
-    # Build the complete user-visible destination tree before publishing any of
-    # it. For a single directory, reuse that directory itself so its restored
-    # root metadata is preserved. Single-file, empty, and multi-entry archives
-    # are wrapped in a staging directory, matching the historical layout.
-    ready=$(restore_prepare_commit_tree "$temp") || \
-        die "Could not prepare the verified restore layout for atomic commit."
+    # Enumerate to a sibling file outside the staging root. That file is tracked
+    # by cleanup_restore so a failed find, signal, or later preparation error can
+    # never leak it or allow it to become part of the restored payload.
+    RESTORE_ENUMERATION_FILE=$(mktemp "$parent/.${stem}.restore.entries.XXXXXX") || \
+        die "Could not create the restore staging enumeration file."
+
+    # Build the complete user-visible destination tree only after enumeration
+    # has completed successfully. For a single directory, reuse that directory
+    # itself so its restored root metadata is preserved. Single-file, empty, and
+    # multi-entry archives are wrapped in a staging directory, matching the
+    # historical layout.
+    ready=$(restore_prepare_commit_tree "$temp" "$RESTORE_ENUMERATION_FILE") || \
+        die "Could not completely enumerate and prepare the verified restore layout for atomic commit."
+    RESTORE_ENUMERATION_FILE=""
 
     # This is the only operation that publishes the destination name. It must be
     # one kernel/filesystem operation that fails if *any* entry (file, directory,
