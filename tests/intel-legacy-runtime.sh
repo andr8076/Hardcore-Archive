@@ -64,6 +64,17 @@ expect_failure() {
 }
 
 inspect | grep -Fq 'READY Runtime integrity'
+
+# GitHub source ZIPs and some copy tools discard executable mode bits.
+TOOL_COPY="$TMP/tool-copy"
+mkdir -p "$TOOL_COPY"
+cp -- "$TOOLS/inspect.sh" "$TOOLS/with-runtime.sh" "$TOOL_COPY/"
+chmod 0644 "$TOOL_COPY/inspect.sh" "$TOOL_COPY/with-runtime.sh"
+HCA_FAKE_RUNTIME="$RUNTIME" \
+HCA_LEGACY_READELF="$FAKES/readelf" \
+HCA_LEGACY_LDD="$FAKES/ldd" \
+    bash "$TOOL_COPY/inspect.sh" "$RUNTIME" | grep -Fq 'READY Runtime integrity'
+
 expect_failure build-vpl 'built with oneVPL'
 expect_failure dynamic-vpl 'links to oneVPL'
 expect_failure linked-vpl 'oneVPL was resolved'
