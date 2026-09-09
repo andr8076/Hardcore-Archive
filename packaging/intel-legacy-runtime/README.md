@@ -19,6 +19,8 @@ The builder:
 
 - pins Intel Media SDK 23.2.2 and FFmpeg 8.1.2 to exact Git commits;
 - builds FFmpeg with --enable-libmfx and --disable-libvpl;
+- applies one auditable compatibility patch that omits extended QSV coding
+  options rejected by the Skylake HEVC implementation;
 - copies the legacy dispatcher and hardware implementation beside that FFmpeg;
 - gives the runtime a distinct manifest identity;
 - makes no package-manager or system-wide changes.
@@ -98,6 +100,11 @@ inherited from modern QSV defaults.
 
 If the script fails, the runtime is unusable. Library presence, GPU name, and
 the output of ffmpeg -encoders never count as success.
+
+Runtime format 2 is required for the P530 test. Format 1 proved isolation but
+still allowed FFmpeg's API-version heuristic to send extended HEVC options that
+the Skylake implementation rejects. Rebuild or download a new artifact when
+upgrading from format 1.
 
 ## Production gate
 
