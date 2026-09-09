@@ -46,7 +46,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf -- "$TMP"' EXIT
 REFERENCE="$TMP/reference.nv12"
 OUTPUT="$TMP/legacy-hevc.mkv"
-TRACE="$TMP/legacy-loader.log"
+TRACE_PREFIX="$TMP/legacy-loader"
 ENCODE_LOG="$TMP/legacy-encode.log"
 
 heading() { printf '\n== %s ==\n' "$1"; }
@@ -136,29 +136,39 @@ printf 'PASS Deterministic 5-second 640x360 raw NV12 reference generated.\n'
 
 heading 'Genuine legacy HEVC encode'
 START_NS=$(date +%s%N)
-if ! LD_DEBUG=libs run_bounded bash "$HERE/with-runtime.sh" "$RUNTIME" \
+if ! run_bounded bash "$HERE/with-runtime.sh" "$RUNTIME" \
+    env LD_DEBUG=libs LD_DEBUG_OUTPUT="$TRACE_PREFIX" \
     "$LEGACY_FFMPEG" -hide_banner -y \
     -f rawvideo -pixel_format nv12 -video_size 640x360 -framerate 30 -i "$REFERENCE" -an \
     -c:v hevc_qsv -load_plugin hevc_hw -low_power 0 \
     -global_quality 28 -preset medium \
-    "$OUTPUT" >"$ENCODE_LOG" 2>"$TRACE"; then
+    "$OUTPUT" >"$ENCODE_LOG" 2>&1; then
     printf 'FAIL The legacy HEVC encode failed. Last output follows:\n' >&2
-    tail -n 30 "$TRACE" >&2 || true
+    tail -n 40 "$ENCODE_LOG" >&2 || true
+    for trace_file in "$TRACE_PREFIX".*; do
+        [[ -f $trace_file ]] || continue
+        printf '%s\n' '--- loader trace tail ---' >&2
+        tail -n 15 "$trace_file" >&2 || true
+    done
     exit 1
 fi
 END_NS=$(date +%s%N)
 ELAPSED_MS=$(( (END_NS - START_NS) / 1000000 ))
 [[ -s $OUTPUT ]] || { printf 'FAIL The legacy encode produced an empty output.\n' >&2; exit 1; }
 
-MFX_DISPATCH=$(grep -E 'libmfx\.so\.1.*(trying file|calling init)' "$TRACE" | grep -F "$RUNTIME/lib/" | head -n 1 || true)
-MFX_HARDWARE=$(grep -E 'libmfxhw64\.so\.1.*(trying file|calling init)' "$TRACE" | grep -F "$RUNTIME/lib/" | head -n 1 || true)
+compgen -G "$TRACE_PREFIX.*" >/dev/null || {
+    printf 'FAIL Loader tracing did not produce a trace for the legacy FFmpeg process.\n' >&2
+    exit 1
+}
+MFX_DISPATCH=$(grep -hE 'libmfx\.so\.1.*(trying file|calling init)' "$TRACE_PREFIX".* | grep -F "$RUNTIME/lib/" | head -n 1 || true)
+MFX_HARDWARE=$(grep -hE 'libmfxhw64\.so\.1.*(trying file|calling init)' "$TRACE_PREFIX".* | grep -F "$RUNTIME/lib/" | head -n 1 || true)
 [[ -n $MFX_DISPATCH ]] || { printf 'FAIL Loader trace did not prove private libmfx.so.1 was loaded.\n' >&2; exit 1; }
 [[ -n $MFX_HARDWARE ]] || { printf 'FAIL Loader trace did not prove private libmfxhw64.so.1 was loaded.\n' >&2; exit 1; }
-! grep -Eq 'libvpl\.so|libmfx-gen\.so' "$TRACE" || { printf 'FAIL oneVPL appeared in the legacy encode loader trace.\n' >&2; exit 1; }
+! grep -hEq 'libvpl\.so|libmfx-gen\.so' "$TRACE_PREFIX".* || { printf 'FAIL oneVPL appeared in the legacy encode loader trace.\n' >&2; exit 1; }
 printf 'PASS Legacy dispatcher loaded from the isolated runtime.\n'
 printf 'PASS Legacy hardware implementation loaded from the isolated runtime.\n'
 printf 'Legacy encode elapsed_ms=%s\n' "$ELAPSED_MS"
-grep -E 'frame=.*(fps=|speed=)' "$TRACE" | tail -n 1 || true
+grep -E 'frame=.*(fps=|speed=)' "$ENCODE_LOG" | tail -n 1 || true
 
 heading 'Output verification'
 CODEC=$(legacy "$LEGACY_FFPROBE" -v error -select_streams v:0 -show_entries stream=codec_name -of default=nw=1:nk=1 "$OUTPUT")
