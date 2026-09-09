@@ -44,7 +44,7 @@ MODERN_FFPROBE=${HCA_MODERN_FFPROBE:-$(command -v ffprobe || true)}
 
 TMP=$(mktemp -d)
 trap 'rm -rf -- "$TMP"' EXIT
-REFERENCE="$TMP/reference.mkv"
+REFERENCE="$TMP/reference.y4m"
 OUTPUT="$TMP/legacy-hevc.mkv"
 TRACE="$TMP/legacy-loader.log"
 ENCODE_LOG="$TMP/legacy-encode.log"
@@ -101,15 +101,15 @@ fi
 heading 'Reference generation'
 REFERENCE_LOG="$TMP/reference.log"
 if ! run_bounded "$MODERN_FFMPEG" -hide_banner -loglevel error -y \
-    -f lavfi -i testsrc2=size=1280x720:rate=30 -t 5 \
-    -c:v ffv1 -level 3 -threads:v 1 -pix_fmt yuv420p "$REFERENCE" \
+    -f lavfi -i testsrc2=size=640x360:rate=30 -t 5 \
+    -pix_fmt yuv420p -f yuv4mpegpipe "$REFERENCE" \
     > /dev/null 2>"$REFERENCE_LOG"; then
     printf 'FAIL Reference generation failed or exceeded 45 seconds. FFmpeg output follows:\n' >&2
     tail -n 30 "$REFERENCE_LOG" >&2 || true
     exit 1
 fi
 [[ -s $REFERENCE ]] || { printf 'FAIL Reference generation produced no data.\n' >&2; exit 1; }
-printf 'PASS Deterministic 5-second 1280x720 reference generated.\n'
+printf 'PASS Deterministic 5-second 640x360 uncompressed reference generated.\n'
 
 heading 'Genuine legacy HEVC encode'
 START_NS=$(date +%s%N)
