@@ -102,6 +102,7 @@ grep -Fq -- '--disable-libvpl' "$TOOLS/build.sh"
 grep -Fq -- '--enable-libmfx' "$TOOLS/build.sh"
 grep -Fq 'libmfxhw64.so.1' "$TOOLS/prove-p530.sh"
 grep -Fq 'full_decode=ok' "$TOOLS/prove-p530.sh"
+grep -Fq -- '-f yuv4mpegpipe' "$TOOLS/prove-p530.sh"
 grep -Fq 'oneVPL appeared in the legacy encode loader trace' "$TOOLS/prove-p530.sh"
 grep -Fq 'Production AUTO integration remains a separate gated change' "$TOOLS/prove-p530.sh"
 
