@@ -173,14 +173,14 @@ jobs:
         run: |
           set -Eeuo pipefail
           tag=portable-latest
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --target "$GITHUB_SHA" \
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
               --title 'Hardcore Archive portable release' \
               --notes 'Self-contained command-line and media runtimes for Linux and macOS.' \
               --prerelease
           fi
-          gh release upload "$tag" release-assets/* --clobber
-          gh release edit "$tag" --target "$GITHUB_SHA" \
+          gh release upload "$tag" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title 'Hardcore Archive portable release' \
             --notes 'Self-contained command-line and media runtimes for Linux and macOS.' \
             --prerelease
