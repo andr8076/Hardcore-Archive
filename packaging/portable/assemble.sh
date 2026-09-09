@@ -64,6 +64,9 @@ elif [[ ! -r $APP/runtime/media-runtime-manifest.txt ]]; then
     printf 'Media runtime has no manifest.\n' >&2
     exit 3
 fi
+if [[ $TARGET == macos-* ]]; then
+    bash "$ROOT/packaging/media-runtime/relocate-macos.sh" "$APP/runtime"
+fi
 
 TOOLS_HASH=$(sha256sum "$APP/runtime/tools-runtime-manifest.txt" 2>/dev/null | awk '{print $1}' || \
     shasum -a 256 "$APP/runtime/tools-runtime-manifest.txt" | awk '{print $1}')

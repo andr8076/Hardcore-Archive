@@ -167,6 +167,7 @@ cp -- "$FFSRC/ffmpeg" "$OUT/runtime/bin/ffmpeg"
 cp -- "$FFSRC/ffprobe" "$OUT/runtime/bin/ffprobe"
 if [[ $(uname -s) == Darwin ]]; then
     cp -P -- "$WORK/prefix/lib/"libvmaf*.dylib "$OUT/runtime/lib/"
+    bash "$HERE/relocate-macos.sh" "$OUT/runtime"
     DYLD_LIBRARY_PATH="$OUT/runtime/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
     export DYLD_LIBRARY_PATH
 else
