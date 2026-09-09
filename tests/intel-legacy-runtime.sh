@@ -105,6 +105,7 @@ grep -Fq 'full_decode=ok' "$TOOLS/prove-p530.sh"
 grep -Fq 'EXPECTED_REFERENCE_BYTES=' "$TOOLS/prove-p530.sh"
 grep -Fq -- '-f rawvideo -pixel_format nv12' "$TOOLS/prove-p530.sh"
 grep -Fq -- '-load_plugin hevc_hw -low_power 0' "$TOOLS/prove-p530.sh"
+grep -Fq 'LD_DEBUG_OUTPUT="$TRACE_PREFIX"' "$TOOLS/prove-p530.sh"
 grep -Fq 'oneVPL appeared in the legacy encode loader trace' "$TOOLS/prove-p530.sh"
 grep -Fq 'Production AUTO integration remains a separate gated change' "$TOOLS/prove-p530.sh"
 
