@@ -11,7 +11,9 @@ FFPROBE="$RUNTIME/bin/ffprobe"
 [[ -r $RUNTIME/runtime-manifest.txt ]] || { printf 'Runtime manifest is missing.\n' >&2; exit 3; }
 
 case $(uname -s) in
-    Darwin) DYLD_LIBRARY_PATH="$RUNTIME/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"; export DYLD_LIBRARY_PATH ;;
+    # macOS builds carry @loader_path rpaths. Avoid globally overriding Apple
+    # libraries with unrelated same-named libraries in a combined runtime.
+    Darwin) ;;
     *) LD_LIBRARY_PATH="$RUNTIME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; export LD_LIBRARY_PATH ;;
 esac
 

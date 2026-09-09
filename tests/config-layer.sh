@@ -9,7 +9,7 @@ trap cleanup EXIT
 
 mkdir -p "$TMP/app/lib" "$TMP/home/.config/hardcore-archive"
 cp "$ROOT/hardcore-archive" "$ROOT/hardcore-archive.sh" "$ROOT/config" "$TMP/app/"
-cp "$ROOT/lib/common.sh" "$ROOT/lib/platform.sh" "$ROOT/lib/config.sh" "$ROOT/lib/visual.sh" "$TMP/app/lib/"
+cp "$ROOT/lib/common.sh" "$ROOT/lib/platform.sh" "$ROOT/lib/config.sh" "$ROOT/lib/visual.sh" "$ROOT/lib/runtime.sh" "$TMP/app/lib/"
 
 cat > "$TMP/app/hardcore-archive-runner.sh" <<'FAKE_RUNNER'
 #!/usr/bin/env bash

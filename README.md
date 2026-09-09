@@ -4,6 +4,28 @@ Hardcore Archive creates aggressively compressed, verified `.7z` archives on Lin
 
 The public entry point is `hardcore-archive`. The historical `hardcore-archive.sh` name remains as a tiny compatibility shim, so existing commands continue to work. Runtime orchestration is split across focused `lib/*.sh` modules, and the complete executable policy and archive engine are checked-in static sources. Startup does not generate or source-patch Python or shell code.
 
+## Portable run-and-go release
+
+Portable release archives include modern Bash and Python, GNU command-line
+tools, 7-Zip, JPEG/PNG optimizers, libmagic, and the pinned FFmpeg/VMAF media
+runtime. After downloading the archive for the machine's OS and CPU from the
+`portable-latest` release, unpack it and run:
+
+```bash
+./hardcore-archive.sh --doctor "/data/My folder"
+./hardcore-archive.sh "/data/My folder"
+```
+
+No application packages need to be installed on the host. The launcher starts
+the packaged Bash and the application activates `runtime/bin` before dependency
+discovery. `HARDCORE_ARCHIVE_USE_SYSTEM_TOOLS=1` is available to developers who
+want to bypass the packaged command-line runtime.
+
+The supported operating system and CPU ABI are still required. Hardware video
+transcoding also needs the machine's GPU driver and device access because those
+components belong to the operating system. The doctor probes them before work
+begins and fails clearly when they are unavailable.
+
 ## Architecture
 
 The shell application is now organized by responsibility:

@@ -12,5 +12,8 @@ IFS=$'\n\t'
 HARDCORE_ARCHIVE_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 export HARDCORE_ARCHIVE_ROOT
 # shellcheck source=/dev/null
+source "$HARDCORE_ARCHIVE_ROOT/lib/runtime.sh"
+hardcore_runtime_prepare_toolchain
+# shellcheck source=/dev/null
 source "$HARDCORE_ARCHIVE_ROOT/lib/scheduler.sh"
 hardcore_runtime_main "$@"

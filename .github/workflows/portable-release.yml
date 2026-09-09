@@ -1,0 +1,186 @@
+name: Build portable release
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portable-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x86_64
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64
+          - runner: macos-15-intel
+            target: macos-x86_64
+          - runner: macos-15
+            target: macos-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          init-shell: bash
+          generate-run-shell: false
+
+      - name: Resolve portable tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source packaging/tools-runtime/versions.env
+          prefix="$RUNNER_TEMP/hca-tools-prefix"
+          packages=(
+            "bash=$BASH_VERSION_PIN" "python=$PYTHON_VERSION"
+            coreutils findutils gawk grep sed 7zip libjpeg-turbo oxipng file
+            curl tar gzip
+          )
+          if [[ $RUNNER_OS == Linux ]]; then
+            packages+=(util-linux libdrm libva)
+            if [[ '${{ matrix.target }}' == linux-x86_64 ]]; then
+              packages+=(libvpl)
+            fi
+          fi
+          micromamba create -y -p "$prefix" -c "$TOOLS_CHANNEL" "${packages[@]}"
+          micromamba list -p "$prefix" --explicit > "$RUNNER_TEMP/explicit-spec.txt"
+
+          # conda-forge does not currently publish the Linux ACL command suite.
+          # Copy the small distro binaries and their non-libc shared libraries;
+          # the runtime's library path makes them independent of a host ACL
+          # package while retaining the supported Linux libc boundary.
+          if [[ $RUNNER_OS == Linux ]]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends acl
+            cp -L /usr/bin/getfacl /usr/bin/setfacl "$prefix/bin/"
+            ldd /usr/bin/getfacl /usr/bin/setfacl |
+              awk '/=> \/.* \(0x/ {print $3}' | sort -u |
+              while IFS= read -r library; do
+                case ${library##*/} in libc.so.*|ld-linux*|ld64.*) continue ;; esac
+                cp -L -- "$library" "$prefix/lib/"
+              done
+          fi
+
+          HCA_TOOLS_PREFIX="$prefix" \
+          HCA_TOOLS_TARGET="${{ matrix.target }}" \
+          HCA_TOOLS_EXPLICIT_SPEC="$RUNNER_TEMP/explicit-spec.txt" \
+            bash packaging/tools-runtime/build.sh
+
+      - name: Prove tools runtime relocation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          relocated="$RUNNER_TEMP/relocated-${{ matrix.target }}"
+          cp -a dist/tools-runtime/runtime "$relocated"
+          bash packaging/tools-runtime/smoke-test.sh "$relocated"
+
+      - name: Download pinned media runtime release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p media-release
+          pointer="hardcore-archive-media-runtime-${{ matrix.target }}.current"
+          gh release download media-runtime-latest --dir media-release --pattern "$pointer"
+          asset=$(head -n1 "media-release/$pointer" | tr -d '\r\n')
+          [[ $asset =~ ^hardcore-archive-media-runtime-${{ matrix.target }}-[0-9a-f]{40}\.tar\.gz$ ]]
+          gh release download media-runtime-latest --dir media-release \
+            --pattern "$asset" --pattern "$asset.sha256"
+          expected=$(awk 'NF {print $1; exit}' "media-release/$asset.sha256")
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual=$(sha256sum "media-release/$asset" | awk '{print $1}')
+          else
+            actual=$(shasum -a 256 "media-release/$asset" | awk '{print $1}')
+          fi
+          expected=$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')
+          actual=$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')
+          [[ $expected =~ ^[0-9a-f]{64}$ && $expected == "$actual" ]]
+          mkdir -p media-runtime
+          tar -xzf "media-release/$asset" -C media-runtime
+
+      - name: Assemble and test portable application
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash packaging/portable/assemble.sh \
+            --target "${{ matrix.target }}" \
+            --tools-runtime dist/tools-runtime \
+            --media-runtime media-runtime
+          archive="dist/portable/hardcore-archive-${{ matrix.target }}.tar.gz"
+          extract="$RUNNER_TEMP/portable-app"
+          mkdir -p "$extract"
+          tar -xzf "$archive" -C "$extract"
+          app="$extract/hardcore-archive-${{ matrix.target }}"
+          bash packaging/tools-runtime/smoke-test.sh "$app/runtime"
+          bash packaging/media-runtime/smoke-test.sh "$app/runtime"
+          bash packaging/portable/smoke-test.sh "$app"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portable-${{ matrix.target }}
+          path: |
+            dist/portable/hardcore-archive-${{ matrix.target }}.tar.gz
+            dist/portable/hardcore-archive-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: portable-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Validate complete portable release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          targets=(linux-x86_64 linux-arm64 macos-x86_64 macos-arm64)
+          for target in "${targets[@]}"; do
+            archive="release-assets/hardcore-archive-$target.tar.gz"
+            [[ -s $archive && -s $archive.sha256 ]]
+            expected=$(awk 'NF {print $1; exit}' "$archive.sha256")
+            actual=$(sha256sum "$archive" | awk '{print $1}')
+            [[ $expected =~ ^[0-9a-fA-F]{64}$ && ${expected,,} == "$actual" ]]
+            listing="release-assets/$target.listing"
+            tar -tzf "$archive" > "$listing"
+            grep -Fxq "hardcore-archive-$target/runtime/tools-runtime-manifest.txt" "$listing"
+            grep -Fxq "hardcore-archive-$target/runtime/media-runtime-manifest.txt" "$listing"
+          done
+
+      - name: Publish portable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tag=portable-latest
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --target "$GITHUB_SHA" \
+              --title 'Hardcore Archive portable release' \
+              --notes 'Self-contained command-line and media runtimes for Linux and macOS.' \
+              --prerelease
+          fi
+          gh release upload "$tag" release-assets/* --clobber
+          gh release edit "$tag" --target "$GITHUB_SHA" \
+            --title 'Hardcore Archive portable release' \
+            --notes 'Self-contained command-line and media runtimes for Linux and macOS.' \
+            --prerelease

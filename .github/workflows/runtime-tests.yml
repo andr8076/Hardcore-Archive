@@ -33,6 +33,7 @@ jobs:
           "$BASH_BIN" tests/resource-pool.sh
           "$BASH_BIN" tests/nested-parallel.sh
           "$BASH_BIN" tests/bundled-runtime.sh
+          "$BASH_BIN" tests/portable-runtime.sh
           "$BASH_BIN" tests/runtime-bootstrap.sh
           "$BASH_BIN" tests/ffmpeg-detection.sh
           "$BASH_BIN" tests/png-validation.sh
