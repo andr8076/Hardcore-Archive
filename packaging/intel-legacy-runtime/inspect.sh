@@ -22,7 +22,7 @@ grep -Fxq 'runtime_format=1' "$MANIFEST" || fail 'unsupported or missing legacy 
 command -v "$READELF" >/dev/null 2>&1 || fail "required inspector is unavailable: $READELF"
 command -v "$LDD" >/dev/null 2>&1 || fail "required inspector is unavailable: $LDD"
 
-BUILDCONF=$("$HERE/with-runtime.sh" "$RUNTIME" "$FFMPEG" -hide_banner -buildconf 2>&1) || fail 'compatibility FFmpeg could not start'
+BUILDCONF=$(bash "$HERE/with-runtime.sh" "$RUNTIME" "$FFMPEG" -hide_banner -buildconf 2>&1) || fail 'compatibility FFmpeg could not start'
 grep -Fq -- '--enable-libmfx' <<< "$BUILDCONF" || fail 'compatibility FFmpeg was not built with libmfx'
 ! grep -Fq -- '--enable-libvpl' <<< "$BUILDCONF" || fail 'compatibility FFmpeg was built with oneVPL'
 
@@ -30,7 +30,7 @@ DYNAMIC=$("$READELF" -d "$FFMPEG" 2>&1) || fail 'could not inspect compatibility
 grep -Eq 'Shared library: \[libmfx\.so(\.1)?\]' <<< "$DYNAMIC" || fail 'compatibility FFmpeg does not link to legacy libmfx'
 ! grep -Eq 'Shared library: \[libvpl\.so' <<< "$DYNAMIC" || fail 'compatibility FFmpeg links to oneVPL'
 
-LINKS=$("$HERE/with-runtime.sh" "$RUNTIME" "$LDD" "$FFMPEG" 2>&1) || fail 'could not resolve compatibility FFmpeg libraries'
+LINKS=$(bash "$HERE/with-runtime.sh" "$RUNTIME" "$LDD" "$FFMPEG" 2>&1) || fail 'could not resolve compatibility FFmpeg libraries'
 MFX_LINK=$(awk '/libmfx\.so/{for (i=1; i<=NF; i++) if ($i ~ /^\//) {print $i; exit}}' <<< "$LINKS")
 [[ -n $MFX_LINK ]] || fail 'legacy libmfx dependency did not resolve'
 MFX_LINK=$(readlink -f -- "$MFX_LINK")
@@ -40,7 +40,7 @@ case $MFX_LINK in "$RUNTIME"/lib/*) ;; *) fail "legacy libmfx resolved outside t
 find "$RUNTIME/lib" -maxdepth 1 \( -name 'libmfxhw64.so.1' -o -name 'libmfxhw64.so.1.*' \) -print -quit | grep -q . || \
     fail 'bundled legacy hardware implementation libmfxhw64.so.1 is missing'
 
-ENCODERS=$("$HERE/with-runtime.sh" "$RUNTIME" "$FFMPEG" -hide_banner -encoders 2>&1) || fail 'could not list compatibility FFmpeg encoders'
+ENCODERS=$(bash "$HERE/with-runtime.sh" "$RUNTIME" "$FFMPEG" -hide_banner -encoders 2>&1) || fail 'could not list compatibility FFmpeg encoders'
 grep -Eq '[[:space:]]hevc_qsv([[:space:]]|$)' <<< "$ENCODERS" || fail 'compatibility FFmpeg does not expose hevc_qsv'
 
 printf 'READY Runtime integrity: FFmpeg/libmfx resolve to the isolated Intel Media SDK compatibility runtime\n'
