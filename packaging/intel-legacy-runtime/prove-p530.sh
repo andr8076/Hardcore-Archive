@@ -139,7 +139,8 @@ START_NS=$(date +%s%N)
 if ! LD_DEBUG=libs run_bounded bash "$HERE/with-runtime.sh" "$RUNTIME" \
     "$LEGACY_FFMPEG" -hide_banner -y \
     -f rawvideo -pixel_format nv12 -video_size 640x360 -framerate 30 -i "$REFERENCE" -an \
-    -c:v hevc_qsv -load_plugin hevc_hw -global_quality 28 -preset medium \
+    -c:v hevc_qsv -load_plugin hevc_hw -low_power 0 \
+    -global_quality 28 -preset medium \
     "$OUTPUT" >"$ENCODE_LOG" 2>"$TRACE"; then
     printf 'FAIL The legacy HEVC encode failed. Last output follows:\n' >&2
     tail -n 30 "$TRACE" >&2 || true
