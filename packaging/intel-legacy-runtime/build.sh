@@ -117,7 +117,7 @@ cp -P -- "$WORK/prefix/lib/"libmfxhw64.so* "$OUT/runtime/lib/"
 cp -- "$WORK/src/MediaSDK/LICENSE" "$OUT/runtime/licenses/Intel-Media-SDK-LICENSE"
 cp -- "$WORK/src/FFmpeg/LICENSE.md" "$OUT/runtime/licenses/FFmpeg-LICENSE.md"
 
-FFMPEG_BUILD=$("$HERE/with-runtime.sh" "$OUT/runtime" "$OUT/runtime/bin/ffmpeg" -hide_banner -version 2>&1 | head -n1)
+FFMPEG_BUILD=$(bash "$HERE/with-runtime.sh" "$OUT/runtime" "$OUT/runtime/bin/ffmpeg" -hide_banner -version 2>&1 | head -n1)
 {
     printf 'runtime_format=%s\n' "$INTEL_LEGACY_RUNTIME_FORMAT"
     printf 'runtime_kind=intel-media-sdk-legacy\n'
@@ -131,6 +131,6 @@ FFMPEG_BUILD=$("$HERE/with-runtime.sh" "$OUT/runtime" "$OUT/runtime/bin/ffmpeg" 
     printf 'architecture=%s\n' "$(uname -m)"
 } > "$OUT/runtime/runtime-manifest.txt"
 
-"$HERE/inspect.sh" "$OUT/runtime"
+bash "$HERE/inspect.sh" "$OUT/runtime"
 printf 'Compatibility runtime created at %s/runtime\n' "$OUT"
 printf 'This is not proof of HEVC support. Run prove-p530.sh on the target Intel GPU.\n'
