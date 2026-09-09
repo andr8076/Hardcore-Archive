@@ -87,6 +87,10 @@ libmfxhw64.so.1 were loaded, while oneVPL was not. It also checks the codec,
 duration, and complete decode; reports VMAF when available; and records
 comparison timings for libx265 and libsvtav1 when installed.
 
+The tested legacy HEVC arguments explicitly disable QSV low-power mode. That
+mode is not exposed by the Skylake/P530 Media SDK implementation and must not be
+inherited from modern QSV defaults.
+
 If the script fails, the runtime is unusable. Library presence, GPU name, and
 the output of ffmpeg -encoders never count as success.
 
