@@ -192,6 +192,13 @@ Video transcoding is hardware-only. CPU encoders are never accepted as dependenc
 
 Automatic discovery uses real encode probes, not GPU-model rules or FFmpeg's encoder list alone. If AV1 is exposed by FFmpeg but fails on the installed hardware while HEVC works, only HEVC participates; the reverse also works. Excluded candidates and probe errors remain visible in diagnostics. No usable hardware candidate, missing VMAF, or a failed explicitly requested encoder still stops preflight rather than silently bypassing the quality or hardware-encoding requirements.
 
+An experimental, opt-in [Intel Media SDK compatibility runtime](packaging/intel-legacy-runtime/README.md)
+is available for feasibility testing on legacy Intel Gen9 hardware where modern
+oneVPL no longer exposes HEVC encoding. It is isolated from the normal runtime
+and is not currently eligible for AUTO: a successful real P530 encode report is
+required before production integration. The discontinued runtime is never
+downloaded or installed automatically.
+
 ### GPU decoding and filtering
 
 `VIDEO_ACCELERATION=auto` enables preprocessing acceleration alongside the existing hardware encoder:

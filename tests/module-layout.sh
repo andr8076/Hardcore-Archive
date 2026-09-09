@@ -28,6 +28,10 @@ python3 -m py_compile "$ROOT/lib/hardcore-archive-atomic-commit.py"
 bash -n "$ROOT/packaging/media-runtime/build.sh"
 bash -n "$ROOT/packaging/media-runtime/smoke-test.sh"
 bash -n "$ROOT/packaging/media-runtime/relocate-macos.sh"
+bash -n "$ROOT/packaging/intel-legacy-runtime/build.sh"
+bash -n "$ROOT/packaging/intel-legacy-runtime/inspect.sh"
+bash -n "$ROOT/packaging/intel-legacy-runtime/prove-p530.sh"
+bash -n "$ROOT/packaging/intel-legacy-runtime/with-runtime.sh"
 bash -n "$ROOT/packaging/tools-runtime/build.sh"
 bash -n "$ROOT/packaging/tools-runtime/smoke-test.sh"
 bash -n "$ROOT/packaging/portable/assemble.sh"
@@ -36,6 +40,7 @@ bash -n "$ROOT/tests/bundled-runtime.sh"
 bash -n "$ROOT/tests/portable-runtime.sh"
 bash -n "$ROOT/tests/runtime-bootstrap.sh"
 bash -n "$ROOT/tests/runtime-build-safety.sh"
+bash -n "$ROOT/tests/intel-legacy-runtime.sh"
 
 # Public/compatibility entrypoints stay intentionally thin.
 (( $(wc -l < "$ROOT/hardcore-archive") < 40 )) || { printf 'hardcore-archive entrypoint grew too large.\n' >&2; exit 1; }

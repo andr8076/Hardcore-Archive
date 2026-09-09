@@ -1,0 +1,35 @@
+name: Intel legacy runtime feasibility
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/intel-legacy-feasibility.yml"
+      - "packaging/intel-legacy-runtime/**"
+      - "tests/intel-legacy-runtime.sh"
+
+permissions:
+  contents: read
+
+jobs:
+  build-isolated-runtime:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build-only dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake git libdrm-dev libva-dev nasm pkg-config
+      - name: Build pinned compatibility runtime
+        run: bash packaging/intel-legacy-runtime/build.sh
+      - name: Verify runtime isolation
+        run: bash packaging/intel-legacy-runtime/inspect.sh dist/intel-legacy-runtime/runtime
+      - name: Archive temporary feasibility artifact
+        run: tar -C dist/intel-legacy-runtime -czf intel-legacy-runtime-linux-x86_64.tar.gz runtime
+      - uses: actions/upload-artifact@v4
+        with:
+          name: intel-legacy-runtime-linux-x86_64
+          path: intel-legacy-runtime-linux-x86_64.tar.gz
+          retention-days: 7

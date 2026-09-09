@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+RUNTIME=
+REPORT=
+while (( $# )); do
+    case $1 in
+        --runtime) (( $# >= 2 )) || { printf '%s requires a value\n' "$1" >&2; exit 2; }; RUNTIME=$2; shift 2 ;;
+        --report) (( $# >= 2 )) || { printf '%s requires a value\n' "$1" >&2; exit 2; }; REPORT=$2; shift 2 ;;
+        -h|--help)
+            printf 'Usage: %s --runtime DIR [--report FILE]\n' "${0##*/}"
+            exit 0
+            ;;
+        *) printf 'Unknown argument: %s\n' "$1" >&2; exit 2 ;;
+    esac
+done
+[[ -n $RUNTIME ]] || { printf -- '--runtime is required\n' >&2; exit 2; }
+RUNTIME=$(cd -- "$RUNTIME" 2>/dev/null && pwd -P) || { printf 'Runtime does not exist: %s\n' "$RUNTIME" >&2; exit 2; }
+if [[ -n $REPORT ]]; then
+    REPORT_DIR=$(dirname -- "$REPORT")
+    mkdir -p -- "$REPORT_DIR"
+    REPORT=$(cd -- "$REPORT_DIR" && pwd -P)/$(basename -- "$REPORT")
+    exec > >(tee "$REPORT") 2>&1
+fi
+
+[[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || {
+    printf 'FAIL This acceptance test requires Linux x86_64.\n' >&2
+    exit 2
+}
+for cmd in awk date grep ldd mktemp readelf sed; do
+    command -v "$cmd" >/dev/null 2>&1 || { printf 'FAIL Missing diagnostic command: %s\n' "$cmd" >&2; exit 2; }
+done
+
+LEGACY_FFMPEG="$RUNTIME/bin/ffmpeg"
+LEGACY_FFPROBE="$RUNTIME/bin/ffprobe"
+MODERN_FFMPEG=${HCA_MODERN_FFMPEG:-$(command -v ffmpeg || true)}
+MODERN_FFPROBE=${HCA_MODERN_FFPROBE:-$(command -v ffprobe || true)}
+[[ -x $MODERN_FFMPEG && -x $MODERN_FFPROBE ]] || {
+    printf 'FAIL A normal modern ffmpeg and ffprobe are required for comparison and reference generation.\n' >&2
+    exit 2
+}
+
+TMP=$(mktemp -d)
+trap 'rm -rf -- "$TMP"' EXIT
+REFERENCE="$TMP/reference.mkv"
+OUTPUT="$TMP/legacy-hevc.mkv"
+TRACE="$TMP/legacy-loader.log"
+ENCODE_LOG="$TMP/legacy-encode.log"
+
+heading() { printf '\n== %s ==\n' "$1"; }
+run_bounded() {
+    if command -v timeout >/dev/null 2>&1; then timeout 45 "$@"; else "$@"; fi
+}
+legacy() { "$HERE/with-runtime.sh" "$RUNTIME" "$@"; }
+modern_probe() {
+    local label=$1
+    shift
+    if run_bounded "$MODERN_FFMPEG" -hide_banner -loglevel error -f lavfi \
+        -i testsrc2=size=640x360:rate=30 -frames:v 30 "$@" -an -f null - >/dev/null 2>"$TMP/modern-$label.log"; then
+        printf 'PASS Modern probe %-12s real encode succeeded\n' "$label"
+    else
+        printf 'FAIL Modern probe %-12s real encode failed: ' "$label"
+        tail -n 1 "$TMP/modern-$label.log" || true
+    fi
+}
+
+heading 'Host GPU and driver'
+if command -v lspci >/dev/null 2>&1; then
+    lspci -nnk | grep -A3 -E 'VGA compatible controller|Display controller|3D controller' || true
+else
+    printf 'INFO lspci is unavailable.\n'
+fi
+for driver_link in /sys/class/drm/card*/device/driver; do
+    [[ -e $driver_link ]] || continue
+    printf 'DRM driver %s: %s\n' "$driver_link" "$(basename -- "$(readlink -f -- "$driver_link")")"
+done
+[[ -e /dev/dri/renderD128 ]] && ls -l /dev/dri/renderD128 || printf 'INFO /dev/dri/renderD128 is absent.\n'
+
+heading 'Modern FFmpeg identity'
+"$MODERN_FFMPEG" -hide_banner -version | head -n 1
+"$MODERN_FFMPEG" -hide_banner -buildconf
+ldd "$MODERN_FFMPEG" | grep -E 'libmfx|libvpl|libva|libdrm' || printf 'INFO No matching dynamic media libraries shown by ldd.\n'
+
+heading 'Legacy compatibility runtime integrity'
+"$HERE/inspect.sh" "$RUNTIME"
+legacy "$LEGACY_FFMPEG" -hide_banner -version | head -n 1
+legacy "$LEGACY_FFMPEG" -hide_banner -buildconf
+legacy ldd "$LEGACY_FFMPEG" | grep -E 'libmfx|libvpl|libva|libdrm' || true
+
+heading 'Modern hardware capability probes'
+modern_probe av1_qsv -vf format=nv12 -c:v av1_qsv -global_quality 30 -preset medium
+modern_probe hevc_qsv -vf format=nv12 -c:v hevc_qsv -global_quality 28 -preset medium
+if [[ -e /dev/dri/renderD128 ]]; then
+    modern_probe hevc_vaapi -vaapi_device /dev/dri/renderD128 -vf format=nv12,hwupload -c:v hevc_vaapi -qp 28
+else
+    printf 'SKIP Modern probe hevc_vaapi: no render node\n'
+fi
+
+heading 'Reference generation'
+run_bounded "$MODERN_FFMPEG" -hide_banner -loglevel error -y \
+    -f lavfi -i testsrc2=size=1280x720:rate=30 -t 5 \
+    -c:v ffv1 -level 3 -pix_fmt yuv420p "$REFERENCE"
+[[ -s $REFERENCE ]] || { printf 'FAIL Reference generation produced no data.\n' >&2; exit 1; }
+printf 'PASS Deterministic 5-second 1280x720 reference generated.\n'
+
+heading 'Genuine legacy HEVC encode'
+START_NS=$(date +%s%N)
+if ! LD_DEBUG=libs run_bounded "$HERE/with-runtime.sh" "$RUNTIME" \
+    "$LEGACY_FFMPEG" -hide_banner -y -i "$REFERENCE" -an \
+    -c:v hevc_qsv -load_plugin hevc_hw -global_quality 28 -preset medium \
+    "$OUTPUT" >"$ENCODE_LOG" 2>"$TRACE"; then
+    printf 'FAIL The legacy HEVC encode failed. Last output follows:\n' >&2
+    tail -n 30 "$TRACE" >&2 || true
+    exit 1
+fi
+END_NS=$(date +%s%N)
+ELAPSED_MS=$(( (END_NS - START_NS) / 1000000 ))
+[[ -s $OUTPUT ]] || { printf 'FAIL The legacy encode produced an empty output.\n' >&2; exit 1; }
+
+MFX_DISPATCH=$(grep -E 'libmfx\.so\.1.*(trying file|calling init)' "$TRACE" | grep -F \"$RUNTIME/lib/\" | head -n 1 || true)
+MFX_HARDWARE=$(grep -E 'libmfxhw64\.so\.1.*(trying file|calling init)' "$TRACE" | grep -F \"$RUNTIME/lib/\" | head -n 1 || true)
+[[ -n $MFX_DISPATCH ]] || { printf 'FAIL Loader trace did not prove private libmfx.so.1 was loaded.\n' >&2; exit 1; }
+[[ -n $MFX_HARDWARE ]] || { printf 'FAIL Loader trace did not prove private libmfxhw64.so.1 was loaded.\n' >&2; exit 1; }
+! grep -Eq 'libvpl\.so|libmfx-gen\.so' "$TRACE" || { printf 'FAIL oneVPL appeared in the legacy encode loader trace.\n' >&2; exit 1; }
+printf 'PASS Legacy dispatcher loaded from the isolated runtime.\n'
+printf 'PASS Legacy hardware implementation loaded from the isolated runtime.\n'
+printf 'Legacy encode elapsed_ms=%s\n' "$ELAPSED_MS"
+grep -E 'frame=.*(fps=|speed=)' "$TRACE" | tail -n 1 || true
+
+heading 'Output verification'
+CODEC=$(legacy "$LEGACY_FFPROBE" -v error -select_streams v:0 -show_entries stream=codec_name -of default=nw=1:nk=1 "$OUTPUT")
+[[ $CODEC == hevc ]] || { printf 'FAIL Expected HEVC output, got: %s\n' "$CODEC" >&2; exit 1; }
+DURATION=$(legacy "$LEGACY_FFPROBE" -v error -show_entries format=duration -of default=nw=1:nk=1 "$OUTPUT")
+awk -v d="$DURATION" 'BEGIN { exit !(d >= 4.8 && d <= 5.2) }' || {
+    printf 'FAIL Output duration is outside 4.8-5.2 seconds: %s\n' "$DURATION" >&2
+    exit 1
+}
+run_bounded "$HERE/with-runtime.sh" "$RUNTIME" "$LEGACY_FFMPEG" \
+    -hide_banner -loglevel error -xerror -i "$OUTPUT" -map 0:v:0 -f null -
+printf 'PASS codec=hevc duration=%s full_decode=ok\n' "$DURATION"
+
+heading 'Quality and software performance comparison'
+if "$MODERN_FFMPEG" -hide_banner -filters 2>&1 | grep -Eq '(^|[[:space:]])libvmaf([[:space:]]|$)'; then
+    VMAF_LOG="$TMP/vmaf.log"
+    if run_bounded "$MODERN_FFMPEG" -hide_banner -i "$OUTPUT" -i "$REFERENCE" \
+        -lavfi '[0:v][1:v]libvmaf' -f null - > /dev/null 2>"$VMAF_LOG"; then
+        VMAF=$(sed -n 's/.*VMAF score: \([0-9.]*\).*/\1/p' "$VMAF_LOG" | tail -n 1)
+        printf 'VMAF=%s\n' "${VMAF:-completed-score-not-parsed}"
+    else
+        printf 'INFO VMAF was available but comparison failed; this does not waive production quality validation.\n'
+    fi
+else
+    printf 'INFO Modern FFmpeg has no libvmaf filter; VMAF was not measured.\n'
+fi
+
+compare_software() {
+    local encoder=$1 log="$TMP/$1.log" out="$TMP/$1.mkv" start end elapsed
+    "$MODERN_FFMPEG" -hide_banner -encoders 2>&1 | grep -Eq "[[:space:]]$encoder([[:space:]]|$)" || {
+        printf 'SKIP %s unavailable\n' "$encoder"; return 0;
+    }
+    start=$(date +%s%N)
+    if run_bounded "$MODERN_FFMPEG" -hide_banner -y -i "$REFERENCE" -an -c:v "$encoder" -crf 28 "$out" > /dev/null 2>"$log"; then
+        end=$(date +%s%N)
+        elapsed=$(( (end - start) / 1000000 ))
+        printf 'Software comparison encoder=%s elapsed_ms=%s bytes=%s\n' "$encoder" "$elapsed" "$(wc -c < "$out")"
+        grep -E 'frame=.*(fps=|speed=)' "$log" | tail -n 1 || true
+    else
+        printf 'INFO Software comparison encoder=%s failed or exceeded 45 seconds.\n' "$encoder"
+    fi
+}
+compare_software libx265
+compare_software libsvtav1
+
+heading 'Acceptance result'
+printf 'PROVEN HEVC via Intel QSV (legacy Media SDK compatibility runtime)\n'
+printf 'Selected feasibility candidate: intel-msdk-legacy/hevc_qsv (hardware)\n'
+printf 'Production AUTO integration remains a separate gated change after this report is reviewed.\n'
+[[ -n $REPORT ]] && printf 'Report: %s\n' "$REPORT"

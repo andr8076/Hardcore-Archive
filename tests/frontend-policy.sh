@@ -65,5 +65,6 @@ python3 "$ROOT/tests/video-final-quality.py"
 bash "$ROOT/tests/visual-policy.sh"
 bash "$ROOT/tests/container-repack-policy.sh"
 bash "$ROOT/tests/hardware-video-diagnostics.sh"
+bash "$ROOT/tests/intel-legacy-runtime.sh"
 bash "$ROOT/tests/poweroff-policy.sh"
 printf 'All frontend policy tests passed.\n'
