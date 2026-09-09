@@ -89,6 +89,10 @@ printf 'Building isolated FFmpeg %s against legacy libmfx only\n' "$FFMPEG_VERSI
 git clone --filter=blob:none "$FFMPEG_GIT_URL" "$WORK/src/FFmpeg"
 git -C "$WORK/src/FFmpeg" checkout --detach "$FFMPEG_COMMIT"
 [[ $(git -C "$WORK/src/FFmpeg" rev-parse HEAD) == "$FFMPEG_COMMIT" ]] || { printf 'FFmpeg pin mismatch.\n' >&2; exit 3; }
+git -C "$WORK/src/FFmpeg" apply --check "$HERE/ffmpeg-hevc-legacy-no-extopts.patch"
+git -C "$WORK/src/FFmpeg" apply "$HERE/ffmpeg-hevc-legacy-no-extopts.patch"
+grep -Fq 'Hardcore Archive legacy Intel compatibility runtime' \
+    "$WORK/src/FFmpeg/libavcodec/qsvenc.c" || { printf 'Legacy HEVC compatibility patch was not applied.\n' >&2; exit 3; }
 export PKG_CONFIG_PATH="$WORK/prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 (
     cd "$WORK/src/FFmpeg"
@@ -126,6 +130,7 @@ FFMPEG_BUILD=$(bash "$HERE/with-runtime.sh" "$OUT/runtime" "$OUT/runtime/bin/ffm
     printf 'media_sdk_commit=%s\n' "$INTEL_MEDIA_SDK_COMMIT"
     printf 'ffmpeg_version=%s\n' "$FFMPEG_VERSION"
     printf 'ffmpeg_commit=%s\n' "$FFMPEG_COMMIT"
+    printf 'ffmpeg_legacy_hevc_extopts=disabled\n'
     printf 'ffmpeg_build=%s\n' "$FFMPEG_BUILD"
     printf 'platform=%s\n' "$(uname -s)"
     printf 'architecture=%s\n' "$(uname -m)"
