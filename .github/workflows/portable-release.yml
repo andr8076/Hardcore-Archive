@@ -48,7 +48,10 @@ jobs:
             curl tar gzip
           )
           if [[ $RUNNER_OS == Linux ]]; then
-            packages+=(util-linux libdrm libva libvpl)
+            packages+=(util-linux libdrm libva)
+            if [[ '${{ matrix.target }}' == linux-x86_64 ]]; then
+              packages+=(libvpl)
+            fi
           fi
           micromamba create -y -p "$prefix" -c "$TOOLS_CHANNEL" "${packages[@]}"
           micromamba list -p "$prefix" --explicit > "$RUNNER_TEMP/explicit-spec.txt"
@@ -59,7 +62,11 @@ jobs:
           # package while retaining the supported Linux libc boundary.
           if [[ $RUNNER_OS == Linux ]]; then
             sudo apt-get update
-            sudo apt-get install -y --no-install-recommends acl
+            apt_packages=(acl)
+            if [[ '${{ matrix.target }}' == linux-arm64 ]]; then
+              apt_packages+=(libvpl2)
+            fi
+            sudo apt-get install -y --no-install-recommends "${apt_packages[@]}"
             cp -L /usr/bin/getfacl /usr/bin/setfacl "$prefix/bin/"
             ldd /usr/bin/getfacl /usr/bin/setfacl |
               awk '/=> \/.* \(0x/ {print $3}' | sort -u |
@@ -67,6 +74,12 @@ jobs:
                 case ${library##*/} in libc.so.*|ld-linux*|ld64.*) continue ;; esac
                 cp -L -- "$library" "$prefix/lib/"
               done
+            if [[ '${{ matrix.target }}' == linux-arm64 ]]; then
+              dpkg -L libvpl2 | while IFS= read -r library; do
+                [[ -f $library && ${library##*/} == libvpl.so.* ]] || continue
+                cp -L -- "$library" "$prefix/lib/"
+              done
+            fi
           fi
 
           HCA_TOOLS_PREFIX="$prefix" \

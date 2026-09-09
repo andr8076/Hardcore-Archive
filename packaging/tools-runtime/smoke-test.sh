@@ -14,7 +14,7 @@ env -i PATH=/usr/bin:/bin "$RUNTIME/bin/bash" --version >/dev/null
 PATH="$RUNTIME/bin:/usr/bin:/bin"
 export PATH
 case $(uname -s) in
-    Darwin) DYLD_LIBRARY_PATH="$RUNTIME/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"; export DYLD_LIBRARY_PATH ;;
+    Darwin) ;;
     *) LD_LIBRARY_PATH="$RUNTIME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; export LD_LIBRARY_PATH ;;
 esac
 if [[ -r $RUNTIME/share/misc/magic.mgc ]]; then MAGIC="$RUNTIME/share/misc/magic.mgc"; export MAGIC; fi

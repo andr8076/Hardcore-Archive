@@ -72,11 +72,9 @@ hardcore_runtime_activate_libraries() {
     [[ -d $prefix/lib ]] || return 0
     case $(uname -s 2>/dev/null || true) in
         Darwin)
-            case :${DYLD_LIBRARY_PATH:-}: in
-                *":$prefix/lib:"*) ;;
-                *) DYLD_LIBRARY_PATH="$prefix/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" ;;
-            esac
-            export DYLD_LIBRARY_PATH
+            # Packaged macOS binaries use @loader_path/@rpath. A global
+            # DYLD_LIBRARY_PATH would also override Apple libraries with
+            # similarly named conda libraries (notably libiconv).
             ;;
         *)
             case :${LD_LIBRARY_PATH:-}: in
