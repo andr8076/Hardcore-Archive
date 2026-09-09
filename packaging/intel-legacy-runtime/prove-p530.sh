@@ -62,7 +62,7 @@ modern_probe() {
         printf 'PASS Modern probe %-12s real encode succeeded\n' "$label"
     else
         printf 'FAIL Modern probe %-12s real encode failed: ' "$label"
-        tail -n 1 "$TMP/modern-$label.log" || true
+        sed '/^[[:space:]]*$/d' "$TMP/modern-$label.log" | tail -n 1 || true
     fi
 }
 
@@ -99,9 +99,15 @@ else
 fi
 
 heading 'Reference generation'
-run_bounded "$MODERN_FFMPEG" -hide_banner -loglevel error -y \
+REFERENCE_LOG="$TMP/reference.log"
+if ! run_bounded "$MODERN_FFMPEG" -hide_banner -loglevel error -y \
     -f lavfi -i testsrc2=size=1280x720:rate=30 -t 5 \
-    -c:v ffv1 -level 3 -pix_fmt yuv420p "$REFERENCE"
+    -c:v ffv1 -level 3 -threads:v 1 -pix_fmt yuv420p "$REFERENCE" \
+    > /dev/null 2>"$REFERENCE_LOG"; then
+    printf 'FAIL Reference generation failed or exceeded 45 seconds. FFmpeg output follows:\n' >&2
+    tail -n 30 "$REFERENCE_LOG" >&2 || true
+    exit 1
+fi
 [[ -s $REFERENCE ]] || { printf 'FAIL Reference generation produced no data.\n' >&2; exit 1; }
 printf 'PASS Deterministic 5-second 1280x720 reference generated.\n'
 
@@ -119,8 +125,8 @@ END_NS=$(date +%s%N)
 ELAPSED_MS=$(( (END_NS - START_NS) / 1000000 ))
 [[ -s $OUTPUT ]] || { printf 'FAIL The legacy encode produced an empty output.\n' >&2; exit 1; }
 
-MFX_DISPATCH=$(grep -E 'libmfx\.so\.1.*(trying file|calling init)' "$TRACE" | grep -F \"$RUNTIME/lib/\" | head -n 1 || true)
-MFX_HARDWARE=$(grep -E 'libmfxhw64\.so\.1.*(trying file|calling init)' "$TRACE" | grep -F \"$RUNTIME/lib/\" | head -n 1 || true)
+MFX_DISPATCH=$(grep -E 'libmfx\.so\.1.*(trying file|calling init)' "$TRACE" | grep -F "$RUNTIME/lib/" | head -n 1 || true)
+MFX_HARDWARE=$(grep -E 'libmfxhw64\.so\.1.*(trying file|calling init)' "$TRACE" | grep -F "$RUNTIME/lib/" | head -n 1 || true)
 [[ -n $MFX_DISPATCH ]] || { printf 'FAIL Loader trace did not prove private libmfx.so.1 was loaded.\n' >&2; exit 1; }
 [[ -n $MFX_HARDWARE ]] || { printf 'FAIL Loader trace did not prove private libmfxhw64.so.1 was loaded.\n' >&2; exit 1; }
 ! grep -Eq 'libvpl\.so|libmfx-gen\.so' "$TRACE" || { printf 'FAIL oneVPL appeared in the legacy encode loader trace.\n' >&2; exit 1; }
