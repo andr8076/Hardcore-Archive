@@ -18,7 +18,8 @@ fail() { printf 'UNUSABLE %s\n' "$*" >&2; exit 1; }
 [[ -x $FFMPEG ]] || fail "missing executable: $FFMPEG"
 [[ -f $MANIFEST ]] || fail "missing runtime manifest: $MANIFEST"
 grep -Fxq 'runtime_kind=intel-media-sdk-legacy' "$MANIFEST" || fail 'manifest does not identify the legacy Intel Media SDK runtime'
-grep -Fxq 'runtime_format=1' "$MANIFEST" || fail 'unsupported or missing legacy runtime format'
+grep -Fxq 'runtime_format=2' "$MANIFEST" || fail 'unsupported or missing legacy runtime format'
+grep -Fxq 'ffmpeg_legacy_hevc_extopts=disabled' "$MANIFEST" || fail 'legacy HEVC FFmpeg compatibility patch identity is missing'
 command -v "$READELF" >/dev/null 2>&1 || fail "required inspector is unavailable: $READELF"
 command -v "$LDD" >/dev/null 2>&1 || fail "required inspector is unavailable: $LDD"
 
