@@ -57,7 +57,8 @@ chmod +x "$FIXTURE/hardcore-archive.sh" "$FIXTURE/hardcore-archive" "$FIXTURE/ru
 LAUNCH_OUTPUT=$(env -i PATH=/usr/bin:/bin HCA_LAUNCH_LOG="$TMP/launch.log" \
     "$FIXTURE/hardcore-archive.sh" test-value)
 [[ $LAUNCH_OUTPUT == 'portable-started:test-value' ]]
-[[ $(cat "$TMP/launch.log") == "$FIXTURE/hardcore-archive" ]] || {
+PHYSICAL_FIXTURE=$(cd -- "$FIXTURE" && pwd -P)
+[[ $(cat "$TMP/launch.log") == "$PHYSICAL_FIXTURE/hardcore-archive" ]] || {
     printf 'Portable launcher did not select its bundled Bash.\n' >&2
     exit 1
 }
