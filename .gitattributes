@@ -1,0 +1,8 @@
+# Keep executable scripts and sourced configuration usable on Unix, even when
+# checked out on Windows with core.autocrlf=true.
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.env text eol=lf
+/hardcore-archive text eol=lf
+/config text eol=lf
