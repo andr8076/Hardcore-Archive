@@ -64,14 +64,15 @@ PHYSICAL_FIXTURE=$(cd -- "$FIXTURE" && pwd -P)
 }
 
 python3 "$ROOT/packaging/tools-runtime/shims/flock.py" --version >/dev/null
+TRUE_BIN=$(type -P true)
 exec 9>"$TMP/lock"
 python3 "$ROOT/packaging/tools-runtime/shims/flock.py" -n 9
-if python3 "$ROOT/packaging/tools-runtime/shims/flock.py" -n "$TMP/lock" /bin/true; then
+if python3 "$ROOT/packaging/tools-runtime/shims/flock.py" -n "$TMP/lock" "$TRUE_BIN"; then
     printf 'Portable flock did not preserve an inherited descriptor lock.\n' >&2
     exit 1
 fi
 python3 "$ROOT/packaging/tools-runtime/shims/flock.py" -u 9
-python3 "$ROOT/packaging/tools-runtime/shims/flock.py" -n "$TMP/lock" /bin/true
+python3 "$ROOT/packaging/tools-runtime/shims/flock.py" -n "$TMP/lock" "$TRUE_BIN"
 python3 "$ROOT/packaging/tools-runtime/shims/setsid.py" --version >/dev/null
 
 printf 'Portable runtime activation and launcher tests passed.\n'
