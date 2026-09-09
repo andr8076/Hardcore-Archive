@@ -11,9 +11,10 @@ FAKES="$TMP/fakes"
 mkdir -p "$RUNTIME/bin" "$RUNTIME/lib" "$FAKES"
 
 printf '%s\n' \
-    'runtime_format=1' \
+    'runtime_format=2' \
     'runtime_kind=intel-media-sdk-legacy' \
     'lifecycle=discontinued-unmaintained-compatibility-only' \
+    'ffmpeg_legacy_hevc_extopts=disabled' \
     > "$RUNTIME/runtime-manifest.txt"
 : > "$RUNTIME/lib/libmfx.so.1"
 : > "$RUNTIME/lib/libmfxhw64.so.1"
@@ -100,6 +101,8 @@ grep -Fq 'INTEL_MEDIA_RUNTIME=MSDK' "$TOOLS/with-runtime.sh"
 ! grep -Rq 'LIBVA_DRIVER_NAME=' "$TOOLS"
 grep -Fq -- '--disable-libvpl' "$TOOLS/build.sh"
 grep -Fq -- '--enable-libmfx' "$TOOLS/build.sh"
+grep -Fq 'ffmpeg-hevc-legacy-no-extopts.patch' "$TOOLS/build.sh"
+grep -Fq 'avctx->codec_id != AV_CODEC_ID_HEVC' "$TOOLS/ffmpeg-hevc-legacy-no-extopts.patch"
 grep -Fq 'libmfxhw64.so.1' "$TOOLS/inspect.sh"
 grep -Fq 'full_decode=ok' "$TOOLS/prove-p530.sh"
 grep -Fq 'EXPECTED_REFERENCE_BYTES=' "$TOOLS/prove-p530.sh"
