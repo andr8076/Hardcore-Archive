@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Regression coverage for restore destination commit races and layouts.
+"""Regression coverage for restore destination commit races, staging, and layouts.
 
 The fake archiver creates a competing destination from inside extraction, which
 is deterministically after restore_existing_archive's initial destination check
-and before its final commit. The production lib/restore.sh module is sourced
-unchanged by the harness.
+and before its final commit. The shell harness can also make the production
+staging enumeration return no output or valid partial output and then fail.
+The production lib/restore.sh module is sourced unchanged by the harness.
 """
 import os
 from pathlib import Path
 import shutil
-import stat
 import subprocess
 import tempfile
 import unittest
@@ -74,7 +74,8 @@ class RestoreDestinationRaceTests(unittest.TestCase):
         self.payload = self.root / "payload"
         self.payload.mkdir()
         self.archive = self.root / "archive.7z"
-        self.archive.touch()
+        self.archive_bytes = b"archive fixture remains intact\n"
+        self.archive.write_bytes(self.archive_bytes)
         self.destination = self.root / "restored"
         self.fake = self.root / "fake-7z"
         self.fake.write_text(FAKE_ARCHIVER)
@@ -119,6 +120,24 @@ if mode == '-e' and not os.path.exists(resolved):
 print(resolved)
 PYREALPATH
 }
+find() {
+    case ${TEST_ENUMERATION_MODE:-} in
+        fail-empty)
+            # Production staging enumeration currently has this exact shape.
+            if [[ $# == 6 && $2 == -mindepth && $3 == 1 && $4 == -maxdepth && $5 == 1 && $6 == -print0 ]]; then
+                return 73
+            fi
+            ;;
+        fail-partial)
+            if [[ $# == 6 && $2 == -mindepth && $3 == 1 && $4 == -maxdepth && $5 == 1 && $6 == -print0 ]]; then
+                # Emit one valid extracted entry, then report enumeration failure.
+                printf '%s\0' "$1/first.txt"
+                return 73
+            fi
+            ;;
+    esac
+    command find "$@"
+}
 rm() {
     local -a args=()
     local arg
@@ -149,6 +168,7 @@ restore_existing_archive
             timeout=30,
             env=env,
         )
+        self.assertEqual(self.archive.read_bytes(), self.archive_bytes)
         self.assertFalse(list(self.root.glob(".*.restore.*")), result.stdout + result.stderr)
         self.assertFalse(Path(str(self.destination) + ".restore.lock").exists(), result.stdout + result.stderr)
         return result
@@ -174,6 +194,24 @@ restore_existing_archive
         self.assertEqual(self.calls(), ["t", "l", "x"])
         self.assertNotIn("Restore completed successfully", result.stdout)
         return result
+
+    def assert_enumeration_failure(self, mode):
+        result = self.run_restore(TEST_ENUMERATION_MODE=mode)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.calls(), ["t", "l", "x"])
+        self.assertNotIn("Restore completed successfully", result.stdout)
+        self.assertFalse(self.destination.exists())
+        self.assertFalse(self.destination.is_symlink())
+        self.assertEqual(self.archive.read_bytes(), self.archive_bytes)
+        return result
+
+    def test_enumeration_no_entries_then_failure_is_not_committed(self):
+        self.make_multiple_entries()
+        self.assert_enumeration_failure("fail-empty")
+
+    def test_enumeration_partial_entries_then_failure_is_not_committed(self):
+        self.make_multiple_entries()
+        self.assert_enumeration_failure("fail-partial")
 
     def test_late_directory_destination_is_preserved(self):
         self.assert_race_refused("directory")
@@ -208,6 +246,12 @@ restore_existing_archive
         self.assertEqual(self.calls(), [])
         self.assertTrue(self.destination.is_symlink())
         self.assertEqual(os.readlink(self.destination), str(target))
+
+    def test_empty_archive_layout_is_preserved(self):
+        result = self.run_restore()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.destination.is_dir())
+        self.assertEqual(list(self.destination.iterdir()), [])
 
     def test_single_directory_layout_is_preserved(self):
         self.make_single_directory()
