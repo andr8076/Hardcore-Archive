@@ -5,12 +5,14 @@ IFS=$'\n\t'
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 RUNTIME=
 REPORT=
+VA_DRIVER_DIR=
 while (( $# )); do
     case $1 in
         --runtime) (( $# >= 2 )) || { printf '%s requires a value\n' "$1" >&2; exit 2; }; RUNTIME=$2; shift 2 ;;
         --report) (( $# >= 2 )) || { printf '%s requires a value\n' "$1" >&2; exit 2; }; REPORT=$2; shift 2 ;;
+        --va-driver-dir) (( $# >= 2 )) || { printf '%s requires a value\n' "$1" >&2; exit 2; }; VA_DRIVER_DIR=$2; shift 2 ;;
         -h|--help)
-            printf 'Usage: %s --runtime DIR [--report FILE]\n' "${0##*/}"
+            printf 'Usage: %s --runtime DIR [--va-driver-dir DIR] [--report FILE]\n' "${0##*/}"
             exit 0
             ;;
         *) printf 'Unknown argument: %s\n' "$1" >&2; exit 2 ;;
@@ -18,6 +20,18 @@ while (( $# )); do
 done
 [[ -n $RUNTIME ]] || { printf -- '--runtime is required\n' >&2; exit 2; }
 RUNTIME=$(cd -- "$RUNTIME" 2>/dev/null && pwd -P) || { printf 'Runtime does not exist: %s\n' "$RUNTIME" >&2; exit 2; }
+LEGACY_DRIVER_ENV=()
+if [[ -n $VA_DRIVER_DIR ]]; then
+    VA_DRIVER_DIR=$(cd -- "$VA_DRIVER_DIR" 2>/dev/null && pwd -P) || {
+        printf 'VA-API driver directory does not exist: %s\n' "$VA_DRIVER_DIR" >&2
+        exit 2
+    }
+    [[ -r $VA_DRIVER_DIR/iHD_drv_video.so ]] || {
+        printf 'VA-API driver directory has no readable iHD_drv_video.so: %s\n' "$VA_DRIVER_DIR" >&2
+        exit 2
+    }
+    LEGACY_DRIVER_ENV=("LIBVA_DRIVERS_PATH=$VA_DRIVER_DIR" 'LIBVA_DRIVER_NAME=iHD')
+fi
 if [[ -n $REPORT ]]; then
     REPORT_DIR=$(dirname -- "$REPORT")
     mkdir -p -- "$REPORT_DIR"
@@ -88,6 +102,12 @@ done
 [[ -e /dev/dri/renderD128 ]] && ls -l /dev/dri/renderD128 || printf 'INFO /dev/dri/renderD128 is absent.\n'
 
 heading 'Intel VA-API driver capability'
+if [[ -n $VA_DRIVER_DIR ]]; then
+    printf 'INFO Test-scoped VA-API driver: %s/iHD_drv_video.so\n' "$VA_DRIVER_DIR"
+    printf 'INFO LIBVA_DRIVERS_PATH and LIBVA_DRIVER_NAME apply only to diagnostic and legacy encode child processes.\n'
+else
+    printf 'INFO Test-scoped VA-API driver: none; inspecting the system default.\n'
+fi
 if command -v dpkg-query >/dev/null 2>&1; then
     for package in intel-media-va-driver intel-media-va-driver-non-free i965-va-driver; do
         if package_record=$(dpkg-query -W -f='${db:Status-Abbrev}\t${Version}' "$package" 2>/dev/null); then
@@ -103,7 +123,8 @@ else
 fi
 if command -v vainfo >/dev/null 2>&1 && [[ -e /dev/dri/renderD128 ]]; then
     set +e
-    run_modern_probe_bounded vainfo --display drm --device /dev/dri/renderD128 >"$VAINFO_LOG" 2>&1
+    run_modern_probe_bounded env "${LEGACY_DRIVER_ENV[@]}" \
+        vainfo --display drm --device /dev/dri/renderD128 >"$VAINFO_LOG" 2>&1
     VAINFO_STATUS=$?
     set -e
     if (( VAINFO_STATUS == 0 )); then
@@ -173,6 +194,7 @@ set +e
 run_bounded env \
     INTEL_MEDIA_RUNTIME=MSDK \
     LD_LIBRARY_PATH="$RUNTIME/lib" \
+    "${LEGACY_DRIVER_ENV[@]}" \
     "$LEGACY_FFMPEG" -nostdin -hide_banner -loglevel verbose -y \
     -f rawvideo -pixel_format nv12 -video_size 640x360 -framerate 30 -i "$REFERENCE" -an \
     -frames:v 150 \
