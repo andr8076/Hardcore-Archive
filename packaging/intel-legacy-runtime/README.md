@@ -1,12 +1,12 @@
 # Optional Intel Media SDK compatibility runtime
 
-This directory contains a **feasibility-gated**, isolated path for Intel Gen9
+This directory contains a **capability-gated**, isolated path for Intel Gen9
 systems (notably Skylake/P530) whose HEVC encoder was exposed by the discontinued
 Intel Media SDK but is not exposed by current oneVPL/VAAPI.
 
-It is not the normal Hardcore Archive media runtime and it is not selected by
-AUTO yet. Production integration is intentionally blocked until the acceptance
-test proves a real HEVC encode on the target hardware.
+It is not the normal Hardcore Archive media runtime. Modern working hardware is
+always preferred. The compatibility candidate becomes eligible for AUTO only
+after its own bounded HEVC encode, codec check, and full-decode check succeed.
 
 ## Why this is separate
 
@@ -25,9 +25,10 @@ The builder:
 - gives the runtime a distinct manifest identity;
 - makes no package-manager or system-wide changes.
 
-The wrapper sets INTEL_MEDIA_RUNTIME=MSDK and replaces the library search path
-with the private lib directory only for its child process. It never sets
-LIBVA_DRIVER_NAME.
+The production wrapper sets `INTEL_MEDIA_RUNTIME=MSDK`, the private library
+path, and the isolated full-feature iHD driver only for each compatibility
+FFmpeg child process. It does not alter the parent environment or global libva
+configuration.
 
 ## Build
 
@@ -45,12 +46,21 @@ The output is:
       bin/ffprobe
       lib/libmfx.so.1
       lib/libmfxhw64.so.1
+      lib/dri/iHD_drv_video.so  # externally supplied; see below
       licenses/
       runtime-manifest.txt
 
 Large binaries are intentionally not committed or downloaded automatically.
 Redistribution should not be enabled until licensing, security, supported Linux
 versions, and the target-machine evidence have been reviewed.
+
+The full-feature `iHD_drv_video.so` is also required on Skylake. The free-kernel
+Ubuntu/Debian driver can expose HEVC decode without HEVC encode. Hardcore
+Archive does not download, install, or redistribute the non-free driver. Supply
+it from a package obtained through the machine owner's normal distribution
+channels, then either copy it to `runtime/lib/dri/iHD_drv_video.so` or identify
+its extracted directory with `HARDCORE_ARCHIVE_INTEL_LEGACY_VA_DRIVER_DIR`.
+Do not replace the system driver.
 
 The manually triggered GitHub workflow builds the same pins in an ephemeral
 Ubuntu 22.04 runner and retains the result as a short-lived workflow artifact.
@@ -81,7 +91,11 @@ deliberately passed through.
 
     bash packaging/intel-legacy-runtime/prove-p530.sh \
       --runtime dist/intel-legacy-runtime/runtime \
+      --va-driver-dir /path/to/extracted/usr/lib/x86_64-linux-gnu/dri \
       --report intel-legacy-p530-report.txt
+
+Omit `--va-driver-dir` when the full-feature driver has already been placed at
+`runtime/lib/dri/iHD_drv_video.so`.
 
 Success requires a non-empty, five-second HEVC encode. The runtime inspector
 proves that FFmpeg resolves the private legacy libmfx dispatcher and excludes
@@ -106,13 +120,39 @@ still allowed FFmpeg's API-version heuristic to send extended HEVC options that
 the Skylake implementation rejects. Rebuild or download a new artifact when
 upgrading from format 1.
 
-## Production gate
+## Proven P530 result
 
-Only after a successful P530 report should a follow-up change add the candidate
-to the existing capability-proof architecture. That change must carry a
-structured identity (legacy FFmpeg path, runtime ID, encoder, hardware class,
-and scoped environment) through calibration, worker subprocesses, nested
-archives, quality validation, and final verification.
+On the target Intel HD Graphics P530, the isolated FFmpeg 8.1.2 / Media SDK
+23.2.2 runtime completed 150 HEVC frames and modern FFmpeg verified a five-second
+duration and full decode. The successful run required the Ubuntu 24.1.0
+full-feature iHD driver supplied from `intel-media-va-driver-non-free`; the
+same-version free-kernel driver advertised HEVC decoding only. The synthetic
+encode ran at approximately 9x real time. VMAF and CPU comparisons were not
+available in that host FFmpeg build, so this number is a capability/performance
+diagnostic rather than a quality comparison.
 
-The intended AUTO order is modern proven hardware, then proven legacy Intel
-hardware, then no automatic encoder. Software encoders remain manual-only.
+## Production use
+
+Place the compatibility runtime in either of these locations:
+
+    runtime/intel-legacy/
+    runtime/linux-x86_64/intel-legacy/
+
+Alternatively, point to it explicitly:
+
+    export HARDCORE_ARCHIVE_INTEL_LEGACY_RUNTIME=/absolute/path/to/runtime
+    export HARDCORE_ARCHIVE_INTEL_LEGACY_VA_DRIVER_DIR=/absolute/path/to/extracted/driver/dri
+    bash hardcore-archive.sh --doctor "/data/My folder"
+
+If the driver is copied into the runtime's `lib/dri` directory, only the first
+environment variable is needed for a nonstandard runtime location. These
+variables identify resources; the loader variables derived from them are set
+only on legacy FFmpeg child processes.
+
+AUTO order is modern proven hardware, then proven legacy Intel HEVC hardware,
+then no automatic encoder. CPU encoders remain manual-only. Every application
+start probes the candidate with a real HEVC encode. A missing, changed, broken,
+wrongly linked, empty-output, wrong-codec, or undecodable runtime fails closed.
+Calibration, production encoding, worker and nested-archive subprocesses retain
+the runtime identity; VMAF and final decode checks continue using the modern
+media toolchain.
