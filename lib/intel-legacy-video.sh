@@ -153,6 +153,7 @@ hardcore_intel_legacy_install_driver() {
     version=$(dpkg-deb -f "$package" Version 2>/dev/null || printf unknown)
     hash=$(hardcore_intel_legacy_hash_file "$staged/iHD_drv_video.so" 2>/dev/null || true)
     copyright=$(find "$extracted/usr/share/doc" -type f -name copyright -print -quit)
+    mkdir -p -- "$runtime/licenses"
     [[ -z $copyright ]] || cp -- "$copyright" "$runtime/licenses/Intel-media-driver-package-copyright"
     printf 'package=intel-media-va-driver-non-free\nversion=%s\nsha256=%s\nacquisition=private-apt-extraction\n' "$version" "$hash" > "$staged/driver-manifest.txt"
     if ! mv -- "$staged" "$runtime/lib/dri"; then rm -rf -- "$tmp" "$staged"; return 1; fi

@@ -3,7 +3,7 @@ name: Intel legacy runtime feasibility
 on:
   workflow_dispatch:
   push:
-    branches: [main, intel-legacy-feasibility]
+    branches: [main]
     paths:
       - ".github/workflows/intel-legacy-feasibility.yml"
       - "lib/intel-legacy-video.sh"

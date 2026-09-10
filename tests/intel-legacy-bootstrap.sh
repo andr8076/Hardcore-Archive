@@ -81,6 +81,17 @@ grep -Fqx 'version=1.2.3' "$CACHED/lib/dri/driver-manifest.txt"
 hardcore_intel_legacy_discover
 [[ $(grep -Fxc "$ASSET" "$TMP/downloads.log") == 1 ]]
 
+# A mismatched release checksum fails closed and leaves no executable cache.
+cp -a -- "$RELEASE" "$TMP/bad-release"
+printf '%064d  %s\n' 0 "$ASSET" > "$TMP/bad-release/$ASSET.sha256"
+(
+  RELEASE="$TMP/bad-release"
+  export XDG_CACHE_HOME="$TMP/bad-cache"
+  if hardcore_intel_legacy_bootstrap_runtime; then exit 1; fi
+  [[ $HARDCORE_INTEL_LEGACY_ERROR == *'checksum did not match'* ]]
+  [[ ! -x "$TMP/bad-cache/hardcore-archive/intel-legacy-runtime/$TARGET/runtime/bin/ffmpeg" ]]
+)
+
 # Disabling automatic setup leaves an empty cache untouched.
 (
   export XDG_CACHE_HOME="$TMP/disabled-cache" HARDCORE_ARCHIVE_INTEL_LEGACY_AUTO_SETUP=0
