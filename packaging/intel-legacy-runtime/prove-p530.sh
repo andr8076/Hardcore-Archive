@@ -90,8 +90,12 @@ done
 heading 'Intel VA-API driver capability'
 if command -v dpkg-query >/dev/null 2>&1; then
     for package in intel-media-va-driver intel-media-va-driver-non-free i965-va-driver; do
-        if version=$(dpkg-query -W -f='${Version}' "$package" 2>/dev/null); then
-            printf 'Installed package: %s %s\n' "$package" "$version"
+        if package_record=$(dpkg-query -W -f='${db:Status-Abbrev}\t${Version}' "$package" 2>/dev/null); then
+            package_status=${package_record%%$'\t'*}
+            package_version=${package_record#*$'\t'}
+            if [[ $package_status == ii* && -n $package_version ]]; then
+                printf 'Installed package: %s %s\n' "$package" "$package_version"
+            fi
         fi
     done
 else
