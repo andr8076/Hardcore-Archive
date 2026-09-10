@@ -110,6 +110,12 @@ grep -Fq -- '-f rawvideo -pixel_format nv12' "$TOOLS/prove-p530.sh"
 grep -Fq -- '-load_plugin hevc_hw -low_power 0' "$TOOLS/prove-p530.sh"
 grep -Fq 'ENCODE_STATUS=${PIPESTATUS[0]}' "$TOOLS/prove-p530.sh"
 grep -Fq 'LD_LIBRARY_PATH="$RUNTIME/lib"' "$TOOLS/prove-p530.sh"
+LEGACY_PROBE_LINE=$(grep -n "heading 'Genuine legacy HEVC encode'" "$TOOLS/prove-p530.sh" | cut -d: -f1)
+MODERN_PROBE_LINE=$(grep -n "heading 'Modern hardware capability probes'" "$TOOLS/prove-p530.sh" | cut -d: -f1)
+(( LEGACY_PROBE_LINE < MODERN_PROBE_LINE )) || {
+    printf 'Legacy proof must run before potentially wedging modern hardware probes.\n' >&2
+    exit 1
+}
 grep -Fq 'Use Intel(R) Media SDK to create MFX session' "$TOOLS/prove-p530.sh"
 grep -Fq 'hardware accelerated implementation' "$TOOLS/prove-p530.sh"
 ! grep -Fq 'LD_DEBUG=' "$TOOLS/prove-p530.sh"
