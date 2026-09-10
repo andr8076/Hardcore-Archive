@@ -297,14 +297,19 @@ class EvaluationTests(unittest.TestCase):
         self.assertTrue(any("exact VMAF/timeline mapping unavailable" in reason
                             for reason in result["reasons"]))
 
-    def test_fractional_seek_maps_frame_overlapping_window_start(self):
+    def test_fractional_windows_snap_backward_to_candidate_frame_start(self):
         step = 1001 / 24000
         window = quality.Window("uniform", 0.002, 4.0)
         observations = [
             quality.FrameObservation(index * step, step)
             for index in range(98)
         ]
-        manifest = self.manifest([("uniform", window.start, window.length, [99.0] * 96)])
+        snapped = quality.snap_windows_to_frame_starts(
+            [window], "candidate.mkv", 10,
+            evidence_provider=lambda _path, _window, _ffprobe: observations,
+        )
+        self.assertEqual(snapped, [quality.Window("uniform", 0.0, 4.0)])
+        manifest = self.manifest([("uniform", 0.0, 4.0, [99.0] * 96)])
         result = self.evaluate(
             manifest, 10,
             provider=lambda _path, _window, _ffprobe: observations,
