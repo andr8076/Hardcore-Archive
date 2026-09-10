@@ -59,7 +59,7 @@ legacy() { bash "$HERE/with-runtime.sh" "$RUNTIME" "$@"; }
 modern_probe() {
     local label=$1 status
     shift
-    if run_modern_probe_bounded "$MODERN_FFMPEG" -hide_banner -loglevel error -f lavfi \
+    if run_modern_probe_bounded "$MODERN_FFMPEG" -nostdin -hide_banner -loglevel error -f lavfi \
         -i testsrc2=size=640x360:rate=30 -frames:v 30 "$@" -an -f null - >/dev/null 2>"$TMP/modern-$label.log"; then
         printf 'PASS Modern probe %-12s real encode succeeded\n' "$label"
     else
@@ -96,15 +96,6 @@ legacy "$LEGACY_FFMPEG" -hide_banner -version | head -n 1
 legacy "$LEGACY_FFMPEG" -hide_banner -buildconf
 legacy ldd "$LEGACY_FFMPEG" | grep -E 'libmfx|libvpl|libva|libdrm' || true
 
-heading 'Modern hardware capability probes'
-modern_probe av1_qsv -vf format=nv12 -c:v av1_qsv -global_quality 30 -preset medium
-modern_probe hevc_qsv -vf format=nv12 -c:v hevc_qsv -global_quality 28 -preset medium
-if [[ -e /dev/dri/renderD128 ]]; then
-    modern_probe hevc_vaapi -vaapi_device /dev/dri/renderD128 -vf format=nv12,hwupload -c:v hevc_vaapi -qp 28
-else
-    printf 'SKIP Modern probe hevc_vaapi: no render node\n'
-fi
-
 heading 'Reference generation'
 python3 - "$REFERENCE" <<'PY'
 import sys
@@ -139,7 +130,7 @@ set +e
 run_bounded env \
     INTEL_MEDIA_RUNTIME=MSDK \
     LD_LIBRARY_PATH="$RUNTIME/lib" \
-    "$LEGACY_FFMPEG" -hide_banner -loglevel verbose -y \
+    "$LEGACY_FFMPEG" -nostdin -hide_banner -loglevel verbose -y \
     -f rawvideo -pixel_format nv12 -video_size 640x360 -framerate 30 -i "$REFERENCE" -an \
     -frames:v 150 \
     -c:v hevc_qsv -load_plugin hevc_hw -low_power 0 \
@@ -222,6 +213,18 @@ compare_software() {
 }
 compare_software libx265
 compare_software libsvtav1
+
+# Probe the known-broken modern paths only after the legacy encode has been
+# completely verified. On legacy i915/media-driver combinations, killing a
+# hung modern probe can leave the next hardware process unable to initialise.
+heading 'Modern hardware capability probes'
+modern_probe av1_qsv -vf format=nv12 -c:v av1_qsv -global_quality 30 -preset medium
+modern_probe hevc_qsv -vf format=nv12 -c:v hevc_qsv -global_quality 28 -preset medium
+if [[ -e /dev/dri/renderD128 ]]; then
+    modern_probe hevc_vaapi -vaapi_device /dev/dri/renderD128 -vf format=nv12,hwupload -c:v hevc_vaapi -qp 28
+else
+    printf 'SKIP Modern probe hevc_vaapi: no render node\n'
+fi
 
 heading 'Acceptance result'
 printf 'PROVEN HEVC via Intel QSV (legacy Media SDK compatibility runtime)\n'
