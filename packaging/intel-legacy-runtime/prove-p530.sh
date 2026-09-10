@@ -21,6 +21,9 @@ done
 [[ -n $RUNTIME ]] || { printf -- '--runtime is required\n' >&2; exit 2; }
 RUNTIME=$(cd -- "$RUNTIME" 2>/dev/null && pwd -P) || { printf 'Runtime does not exist: %s\n' "$RUNTIME" >&2; exit 2; }
 LEGACY_DRIVER_ENV=()
+if [[ -z $VA_DRIVER_DIR && -r $RUNTIME/lib/dri/iHD_drv_video.so ]]; then
+    VA_DRIVER_DIR=$RUNTIME/lib/dri
+fi
 if [[ -n $VA_DRIVER_DIR ]]; then
     VA_DRIVER_DIR=$(cd -- "$VA_DRIVER_DIR" 2>/dev/null && pwd -P) || {
         printf 'VA-API driver directory does not exist: %s\n' "$VA_DRIVER_DIR" >&2
@@ -279,7 +282,8 @@ fi
 printf 'PASS codec=hevc duration=%s full_decode=ok\n' "$DURATION"
 
 heading 'Quality and software performance comparison'
-if "$MODERN_FFMPEG" -hide_banner -filters 2>&1 | grep -Eq '(^|[[:space:]])libvmaf([[:space:]]|$)'; then
+if "$MODERN_FFMPEG" -hide_banner -filters 2>&1 |
+   awk 'NF >= 2 && $2 == "libvmaf" {found=1} END {exit(found ? 0 : 1)}'; then
     VMAF_LOG="$TMP/vmaf.log"
     if run_bounded "$MODERN_FFMPEG" -hide_banner -i "$OUTPUT" \
         -f rawvideo -pixel_format nv12 -video_size 640x360 -framerate 30 -i "$REFERENCE" \
@@ -295,7 +299,8 @@ fi
 
 compare_software() {
     local encoder=$1 log="$TMP/$1.log" out="$TMP/$1.mkv" start end elapsed
-    "$MODERN_FFMPEG" -hide_banner -encoders 2>&1 | grep -Eq "[[:space:]]$encoder([[:space:]]|$)" || {
+    "$MODERN_FFMPEG" -hide_banner -encoders 2>&1 |
+        awk -v wanted="$encoder" 'NF >= 2 && $2 == wanted {found=1} END {exit(found ? 0 : 1)}' || {
         printf 'SKIP %s unavailable\n' "$encoder"; return 0;
     }
     start=$(date +%s%N)
@@ -328,5 +333,5 @@ fi
 heading 'Acceptance result'
 printf 'PROVEN HEVC via Intel QSV (legacy Media SDK compatibility runtime)\n'
 printf 'Selected feasibility candidate: intel-msdk-legacy/hevc_qsv (hardware)\n'
-printf 'Production AUTO integration remains a separate gated change after this report is reviewed.\n'
+printf 'Production AUTO eligibility: enabled only while this isolated runtime and driver pass the application real-encode probe.\n'
 [[ -n $REPORT ]] && printf 'Report: %s\n' "$REPORT"
