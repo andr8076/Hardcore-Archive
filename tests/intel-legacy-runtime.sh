@@ -110,6 +110,9 @@ grep -Fq -- '-f rawvideo -pixel_format nv12' "$TOOLS/prove-p530.sh"
 grep -Fq -- '-load_plugin hevc_hw -low_power 0' "$TOOLS/prove-p530.sh"
 grep -Fq 'ENCODE_STATUS=${PIPESTATUS[0]}' "$TOOLS/prove-p530.sh"
 grep -Fq 'LD_LIBRARY_PATH="$RUNTIME/lib"' "$TOOLS/prove-p530.sh"
+grep -Fq "package in intel-media-va-driver intel-media-va-driver-non-free i965-va-driver" "$TOOLS/prove-p530.sh"
+grep -Fq 'VAEntrypointEncSlice' "$TOOLS/prove-p530.sh"
+grep -Fq 'No driver package or global LIBVA setting was changed' "$TOOLS/prove-p530.sh"
 LEGACY_PROBE_LINE=$(grep -n "heading 'Genuine legacy HEVC encode'" "$TOOLS/prove-p530.sh" | cut -d: -f1)
 MODERN_PROBE_LINE=$(grep -n "heading 'Modern hardware capability probes'" "$TOOLS/prove-p530.sh" | cut -d: -f1)
 (( LEGACY_PROBE_LINE < MODERN_PROBE_LINE )) || {
