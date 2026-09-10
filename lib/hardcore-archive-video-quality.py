@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable, Sequence
 
-POLICY_VERSION = "completed-video-quality-v3-timed-sustained"
+POLICY_VERSION = "completed-video-quality-v4-boundary-overlap"
 FRAME_BOUNDARY_TOLERANCE_SECONDS = 0.050
 STREAM_ENDPOINT_TOLERANCE_SECONDS = 0.100
 FRAME_SELECTION_EPSILON_SECONDS = 0.000001
