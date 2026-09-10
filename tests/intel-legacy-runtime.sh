@@ -30,6 +30,10 @@ case " $* " in
     *) printf 'fake ffmpeg\n' ;;
 esac
 EOF_FFMPEG
+cat > "$RUNTIME/bin/ffprobe" <<'EOF_FFPROBE'
+#!/usr/bin/env bash
+printf 'fake ffprobe\n'
+EOF_FFPROBE
 cat > "$FAKES/readelf" <<'EOF_READELF'
 #!/usr/bin/env bash
 printf ' 0x0000000000000001 (NEEDED) Shared library: [libmfx.so.1]\n'
@@ -44,7 +48,7 @@ else
 fi
 [[ ${HCA_FAKE_MODE:-} != linked-vpl ]] || printf 'libvpl.so.2 => /usr/lib/libvpl.so.2 (0x2)\n'
 EOF_LDD
-chmod +x "$RUNTIME/bin/ffmpeg" "$FAKES/readelf" "$FAKES/ldd"
+chmod +x "$RUNTIME/bin/ffmpeg" "$RUNTIME/bin/ffprobe" "$FAKES/readelf" "$FAKES/ldd"
 
 inspect() {
     HCA_FAKE_RUNTIME="$RUNTIME" \
@@ -97,6 +101,29 @@ CHILD=$("$TOOLS/with-runtime.sh" "$RUNTIME" bash -c 'printf "%s|%s" "$INTEL_MEDI
     exit 1
 }
 
+# Production discovery requires a private full-feature driver and retains a
+# content-derived runtime identity without changing the parent loader state.
+mkdir -p "$RUNTIME/lib/dri"
+printf 'test full-feature iHD driver\n' > "$RUNTIME/lib/dri/iHD_drv_video.so"
+export PATH="$FAKES:$PATH"
+export HCA_FAKE_RUNTIME="$RUNTIME"
+export HARDCORE_ARCHIVE_ROOT="$ROOT"
+export HARDCORE_ARCHIVE_INTEL_LEGACY_RUNTIME="$RUNTIME"
+unset HARDCORE_ARCHIVE_INTEL_LEGACY_VA_DRIVER_DIR
+source "$ROOT/lib/intel-legacy-video.sh"
+hardcore_intel_legacy_discover
+[[ $HARDCORE_INTEL_LEGACY_RUNTIME_RESOLVED == "$RUNTIME" ]]
+[[ $HARDCORE_INTEL_LEGACY_VA_DRIVER_RESOLVED == "$RUNTIME/lib/dri" ]]
+[[ $HARDCORE_INTEL_LEGACY_RUNTIME_ID == intel-msdk-legacy-*-ihd-* ]]
+hardcore_intel_legacy_ffmpeg_command
+printf '%s\n' "${HARDCORE_INTEL_LEGACY_COMMAND[@]}" | grep -Fqx "LD_LIBRARY_PATH=$RUNTIME/lib"
+printf '%s\n' "${HARDCORE_INTEL_LEGACY_COMMAND[@]}" | grep -Fqx "LIBVA_DRIVERS_PATH=$RUNTIME/lib/dri"
+printf '%s\n' "${HARDCORE_INTEL_LEGACY_COMMAND[@]}" | grep -Fqx 'LIBVA_DRIVER_NAME=iHD'
+[[ $INTEL_MEDIA_RUNTIME == ONEVPL && $LD_LIBRARY_PATH == /host/library/path ]] || {
+    printf 'Production discovery leaked legacy configuration into the parent shell.\n' >&2
+    exit 1
+}
+
 grep -Fq 'INTEL_MEDIA_RUNTIME=MSDK' "$TOOLS/with-runtime.sh"
 ! grep -Rq 'export LIBVA_DRIVER_NAME=' "$TOOLS"
 grep -Fq -- '--disable-libvpl' "$TOOLS/build.sh"
@@ -118,6 +145,7 @@ grep -Fq "package in intel-media-va-driver intel-media-va-driver-non-free i965-v
 grep -Fq '${db:Status-Abbrev}\t${Version}' "$TOOLS/prove-p530.sh"
 grep -Fq 'VAEntrypointEncSlice' "$TOOLS/prove-p530.sh"
 grep -Fq -- '--va-driver-dir' "$TOOLS/prove-p530.sh"
+grep -Fq 'RUNTIME/lib/dri/iHD_drv_video.so' "$TOOLS/prove-p530.sh"
 grep -Fq 'LEGACY_DRIVER_ENV=("LIBVA_DRIVERS_PATH=$VA_DRIVER_DIR"' "$TOOLS/prove-p530.sh"
 grep -Fq 'apply only to diagnostic and legacy encode child processes' "$TOOLS/prove-p530.sh"
 grep -Fq 'No driver package or global LIBVA setting was changed' "$TOOLS/prove-p530.sh"
@@ -130,6 +158,6 @@ MODERN_PROBE_LINE=$(grep -n "heading 'Modern hardware capability probes'" "$TOOL
 grep -Fq 'Use Intel(R) Media SDK to create MFX session' "$TOOLS/prove-p530.sh"
 grep -Fq 'hardware accelerated implementation' "$TOOLS/prove-p530.sh"
 ! grep -Fq 'LD_DEBUG=' "$TOOLS/prove-p530.sh"
-grep -Fq 'Production AUTO integration remains a separate gated change' "$TOOLS/prove-p530.sh"
+grep -Fq 'Production AUTO eligibility: enabled only while' "$TOOLS/prove-p530.sh"
 
 printf 'Intel legacy runtime isolation tests passed.\n'
