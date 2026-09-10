@@ -64,7 +64,7 @@ hardcore_video_validate_completed_quality() {
     : > "$manifest"
 
     if ! python3 "$HARDCORE_ARCHIVE_VIDEO_QUALITY_HELPER" plan \
-        --input "$input" --duration "$duration" --mode "$video_quality_validation" \
+        --input "$candidate" --duration "$duration" --mode "$video_quality_validation" \
         --sample-seconds "$video_quality_sample_seconds" \
         --interval-seconds "$video_quality_interval_seconds" \
         --min-samples "$video_quality_min_samples" \
