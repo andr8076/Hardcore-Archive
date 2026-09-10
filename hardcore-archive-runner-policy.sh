@@ -210,6 +210,8 @@ while (( $# > 0 )); do
             AFTER_DASH_DASH=true; FORWARDED+=("$1"); shift ;;
         -h|--help)
             usage; exit 0 ;;
+        -y)
+            FORWARDED+=("$1"); shift ;;
         --doctor)
             DOCTOR_MODE=true; shift ;;
         --inspect|--restore|--version)
