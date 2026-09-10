@@ -18,6 +18,8 @@ bash -n "$ROOT/hardcore-archive-runner-policy.sh"
 bash -n "$ROOT/lib/hardcore-archive-core.sh"
 bash -n "$ROOT/lib/hardcore-archive-image-helper.sh"
 bash -n "$ROOT/lib/hardcore-archive-video-helper.sh"
+bash -n "$ROOT/lib/intel-legacy-video.sh"
+bash -n "$ROOT/lib/hardcore-archive-doctor-intel-legacy.sh"
 python3 -m py_compile "$ROOT/lib/hardcore-archive-media.py"
 python3 -m py_compile "$ROOT/lib/hardcore-archive-compressibility.py"
 python3 -m py_compile "$ROOT/lib/hardcore-archive-image-calibrate.py"
@@ -41,6 +43,8 @@ bash -n "$ROOT/tests/portable-runtime.sh"
 bash -n "$ROOT/tests/runtime-bootstrap.sh"
 bash -n "$ROOT/tests/runtime-build-safety.sh"
 bash -n "$ROOT/tests/intel-legacy-runtime.sh"
+bash -n "$ROOT/tests/intel-legacy-selection.sh"
+bash -n "$ROOT/tests/intel-legacy-production.sh"
 
 # Public/compatibility entrypoints stay intentionally thin.
 (( $(wc -l < "$ROOT/hardcore-archive") < 40 )) || { printf 'hardcore-archive entrypoint grew too large.\n' >&2; exit 1; }
