@@ -98,7 +98,7 @@ CHILD=$("$TOOLS/with-runtime.sh" "$RUNTIME" bash -c 'printf "%s|%s" "$INTEL_MEDI
 }
 
 grep -Fq 'INTEL_MEDIA_RUNTIME=MSDK' "$TOOLS/with-runtime.sh"
-! grep -Rq 'LIBVA_DRIVER_NAME=' "$TOOLS"
+! grep -Rq 'export LIBVA_DRIVER_NAME=' "$TOOLS"
 grep -Fq -- '--disable-libvpl' "$TOOLS/build.sh"
 grep -Fq -- '--enable-libmfx' "$TOOLS/build.sh"
 grep -Fq 'ffmpeg-hevc-legacy-no-extopts.patch' "$TOOLS/build.sh"
@@ -113,6 +113,9 @@ grep -Fq 'LD_LIBRARY_PATH="$RUNTIME/lib"' "$TOOLS/prove-p530.sh"
 grep -Fq "package in intel-media-va-driver intel-media-va-driver-non-free i965-va-driver" "$TOOLS/prove-p530.sh"
 grep -Fq '${db:Status-Abbrev}\t${Version}' "$TOOLS/prove-p530.sh"
 grep -Fq 'VAEntrypointEncSlice' "$TOOLS/prove-p530.sh"
+grep -Fq -- '--va-driver-dir' "$TOOLS/prove-p530.sh"
+grep -Fq 'LEGACY_DRIVER_ENV=("LIBVA_DRIVERS_PATH=$VA_DRIVER_DIR"' "$TOOLS/prove-p530.sh"
+grep -Fq 'apply only to diagnostic and legacy encode child processes' "$TOOLS/prove-p530.sh"
 grep -Fq 'No driver package or global LIBVA setting was changed' "$TOOLS/prove-p530.sh"
 LEGACY_PROBE_LINE=$(grep -n "heading 'Genuine legacy HEVC encode'" "$TOOLS/prove-p530.sh" | cut -d: -f1)
 MODERN_PROBE_LINE=$(grep -n "heading 'Modern hardware capability probes'" "$TOOLS/prove-p530.sh" | cut -d: -f1)
