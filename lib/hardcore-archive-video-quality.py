@@ -795,7 +795,8 @@ def higher_quality(encoder: str, quality: int, step: int) -> int | None:
     if step < 1:
         raise ValueError("retry step must be positive")
     lower_is_better = {
-        "av1_vaapi", "hevc_vaapi", "av1_nvenc", "hevc_nvenc", "av1_qsv", "hevc_qsv"
+        "av1_vaapi", "hevc_vaapi", "av1_nvenc", "hevc_nvenc", "av1_qsv", "hevc_qsv",
+        "hevc_qsv_legacy"
     }
     higher_is_better = {"hevc_videotoolbox"}
     if encoder in lower_is_better:
