@@ -469,15 +469,20 @@ if [[ $VIDEO_ENABLED == true && $VIDEO_RELEVANT == true ]]; then
         export HARDCORE_ARCHIVE_AUTO_AV1_ENCODER="${HARDWARE_AV1_ENCODER:-}"
         export HARDCORE_ARCHIVE_AUTO_HEVC_ENCODER="${HARDWARE_HEVC_ENCODER:-}"
         export HARDCORE_ARCHIVE_HARDWARE_ENCODER_LOCKED="$HARDWARE_VIDEO_ENCODER"
-        printf 'Hardware video policy: AUTO; AV1=%s; HEVC=%s; primary=%s via %s; CPU fallback disabled.\n' \
+        export HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID="${HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID:-modern-default}"
+        printf 'Hardware video policy: AUTO; AV1=%s; HEVC=%s; primary=%s via %s; runtime=%s; CPU fallback disabled.\n' \
             "${HARDWARE_AV1_ENCODER:-unavailable}" "${HARDWARE_HEVC_ENCODER:-unavailable}" \
-            "${HARDWARE_VIDEO_PRIMARY_CODEC^^}" "$HARDWARE_VIDEO_ENCODER" >&2
+            "${HARDWARE_VIDEO_PRIMARY_CODEC^^}" "$HARDWARE_VIDEO_ENCODER" \
+            "$HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID" >&2
     else
         FORWARDED+=(--video-codec "$EFFECTIVE_VIDEO_CODEC" --video-encoder "$HARDWARE_VIDEO_ENCODER" --video-parallel)
         export HARDCORE_ARCHIVE_VIDEO_CODEC_AUTO=0
         export HARDCORE_ARCHIVE_AUTO_AV1_ENCODER=''
         export HARDCORE_ARCHIVE_AUTO_HEVC_ENCODER=''
-        printf 'Hardware video policy: %s via %s; CPU fallback disabled; video runs in parallel.\n' "${EFFECTIVE_VIDEO_CODEC^^}" "$HARDWARE_VIDEO_ENCODER" >&2
+        export HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID="${HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID:-modern-default}"
+        printf 'Hardware video policy: %s via %s; runtime=%s; CPU fallback disabled; video runs in parallel.\n' \
+            "${EFFECTIVE_VIDEO_CODEC^^}" "$HARDWARE_VIDEO_ENCODER" \
+            "$HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID" >&2
     fi
 fi
 
