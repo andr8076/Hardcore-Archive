@@ -52,6 +52,8 @@ class DestinationLogsTests(unittest.TestCase):
                          self.root / "source with spaces-archives/hardcore-archive-logs")
         self.assertEqual(self.directory("--batch", self.source, self.destination).parent,
                          self.destination / "hardcore-archive-logs")
+        self.assertEqual(self.directory("-y", self.source, self.destination / "short-yes").parent,
+                         self.destination / "hardcore-archive-logs")
         self.assertEqual(self.directory(self.source.name, "SSD destination/../other/out").parent,
                          self.root / "other/hardcore-archive-logs")
 
