@@ -47,6 +47,8 @@ trap 'rm -rf -- "$TMP"' EXIT
 REFERENCE="$TMP/reference.nv12"
 OUTPUT="$TMP/legacy-hevc.mkv"
 ENCODE_LOG="$TMP/legacy-encode.log"
+VAINFO_LOG="$TMP/vainfo.log"
+HEVC_VAAPI_ENCODE_CAP=unknown
 
 heading() { printf '\n== %s ==\n' "$1"; }
 run_bounded() {
@@ -84,6 +86,43 @@ for driver_link in /sys/class/drm/card*/device/driver; do
     printf 'DRM driver %s: %s\n' "$driver_link" "$(basename -- "$(readlink -f -- "$driver_link")")"
 done
 [[ -e /dev/dri/renderD128 ]] && ls -l /dev/dri/renderD128 || printf 'INFO /dev/dri/renderD128 is absent.\n'
+
+heading 'Intel VA-API driver capability'
+if command -v dpkg-query >/dev/null 2>&1; then
+    for package in intel-media-va-driver intel-media-va-driver-non-free i965-va-driver; do
+        if version=$(dpkg-query -W -f='${Version}' "$package" 2>/dev/null); then
+            printf 'Installed package: %s %s\n' "$package" "$version"
+        fi
+    done
+else
+    printf 'INFO dpkg-query is unavailable; package variant was not identified.\n'
+fi
+if command -v vainfo >/dev/null 2>&1 && [[ -e /dev/dri/renderD128 ]]; then
+    set +e
+    run_modern_probe_bounded vainfo --display drm --device /dev/dri/renderD128 >"$VAINFO_LOG" 2>&1
+    VAINFO_STATUS=$?
+    set -e
+    if (( VAINFO_STATUS == 0 )); then
+        grep -E 'vainfo: Driver version|VAProfileH264|VAProfileHEVC' "$VAINFO_LOG" || true
+        if grep -Eq 'VAProfileHEVC(Main|Main10)[[:space:]]*:[[:space:]]*VAEntrypointEncSlice([[:space:]]|$)' "$VAINFO_LOG"; then
+            HEVC_VAAPI_ENCODE_CAP=yes
+            printf 'READY VA-API advertises an HEVC encoding entry point.\n'
+        elif grep -Eq 'VAProfileHEVC(Main|Main10)' "$VAINFO_LOG"; then
+            HEVC_VAAPI_ENCODE_CAP=no
+            printf 'INFO VA-API advertises HEVC decoding but no HEVC encoding entry point.\n'
+        else
+            HEVC_VAAPI_ENCODE_CAP=no
+            printf 'INFO VA-API does not advertise an HEVC Main/Main10 profile.\n'
+        fi
+    elif (( VAINFO_STATUS == 124 || VAINFO_STATUS == 137 )); then
+        printf 'INFO vainfo timed out; VA-API entry points could not be inspected.\n'
+    else
+        printf 'INFO vainfo failed with status %s; relevant output follows.\n' "$VAINFO_STATUS"
+        tail -n 20 "$VAINFO_LOG" || true
+    fi
+else
+    printf 'INFO vainfo or /dev/dri/renderD128 is unavailable; VA-API entry points were not inspected.\n'
+fi
 
 heading 'Modern FFmpeg identity'
 "$MODERN_FFMPEG" -hide_banner -version | head -n 1
@@ -143,6 +182,12 @@ if (( ENCODE_STATUS != 0 )); then
         printf 'FAIL The legacy HEVC encode timed out (status %s).\n' "$ENCODE_STATUS" >&2
     else
         printf 'FAIL The legacy HEVC encode exited with status %s.\n' "$ENCODE_STATUS" >&2
+    fi
+    if [[ $HEVC_VAAPI_ENCODE_CAP == no ]]; then
+        printf 'INFO The legacy Media SDK reached the Intel hardware runtime, but the active VA-API driver does not expose HEVC encoding.\n' >&2
+        printf 'INFO On Skylake, Intel documents HEVC encoding for the Full Feature media-driver build; the Free Kernel build exposes HEVC decoding only.\n' >&2
+        printf 'INFO Ubuntu/Debian package names are intel-media-va-driver-non-free (Full Feature) and intel-media-va-driver (Free Kernel).\n' >&2
+        printf 'INFO No driver package or global LIBVA setting was changed by this test.\n' >&2
     fi
     exit 1
 fi
