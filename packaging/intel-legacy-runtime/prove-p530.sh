@@ -1,0 +1,337 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+RUNTIME=
+REPORT=
+VA_DRIVER_DIR=
+while (( $# )); do
+    case $1 in
+        --runtime) (( $# >= 2 )) || { printf '%s requires a value\n' "$1" >&2; exit 2; }; RUNTIME=$2; shift 2 ;;
+        --report) (( $# >= 2 )) || { printf '%s requires a value\n' "$1" >&2; exit 2; }; REPORT=$2; shift 2 ;;
+        --va-driver-dir) (( $# >= 2 )) || { printf '%s requires a value\n' "$1" >&2; exit 2; }; VA_DRIVER_DIR=$2; shift 2 ;;
+        -h|--help)
+            printf 'Usage: %s --runtime DIR [--va-driver-dir DIR] [--report FILE]\n' "${0##*/}"
+            exit 0
+            ;;
+        *) printf 'Unknown argument: %s\n' "$1" >&2; exit 2 ;;
+    esac
+done
+[[ -n $RUNTIME ]] || { printf -- '--runtime is required\n' >&2; exit 2; }
+RUNTIME=$(cd -- "$RUNTIME" 2>/dev/null && pwd -P) || { printf 'Runtime does not exist: %s\n' "$RUNTIME" >&2; exit 2; }
+LEGACY_DRIVER_ENV=()
+if [[ -z $VA_DRIVER_DIR && -r $RUNTIME/lib/dri/iHD_drv_video.so ]]; then
+    VA_DRIVER_DIR=$RUNTIME/lib/dri
+fi
+if [[ -n $VA_DRIVER_DIR ]]; then
+    VA_DRIVER_DIR=$(cd -- "$VA_DRIVER_DIR" 2>/dev/null && pwd -P) || {
+        printf 'VA-API driver directory does not exist: %s\n' "$VA_DRIVER_DIR" >&2
+        exit 2
+    }
+    [[ -r $VA_DRIVER_DIR/iHD_drv_video.so ]] || {
+        printf 'VA-API driver directory has no readable iHD_drv_video.so: %s\n' "$VA_DRIVER_DIR" >&2
+        exit 2
+    }
+    LEGACY_DRIVER_ENV=("LIBVA_DRIVERS_PATH=$VA_DRIVER_DIR" 'LIBVA_DRIVER_NAME=iHD')
+fi
+if [[ -n $REPORT ]]; then
+    REPORT_DIR=$(dirname -- "$REPORT")
+    mkdir -p -- "$REPORT_DIR"
+    REPORT=$(cd -- "$REPORT_DIR" && pwd -P)/$(basename -- "$REPORT")
+    exec > >(tee "$REPORT") 2>&1
+fi
+
+[[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || {
+    printf 'FAIL This acceptance test requires Linux x86_64.\n' >&2
+    exit 2
+}
+for cmd in awk date grep ldd mktemp python3 readelf sed tee timeout; do
+    command -v "$cmd" >/dev/null 2>&1 || { printf 'FAIL Missing diagnostic command: %s\n' "$cmd" >&2; exit 2; }
+done
+
+LEGACY_FFMPEG="$RUNTIME/bin/ffmpeg"
+LEGACY_FFPROBE="$RUNTIME/bin/ffprobe"
+MODERN_FFMPEG=${HCA_MODERN_FFMPEG:-$(command -v ffmpeg || true)}
+MODERN_FFPROBE=${HCA_MODERN_FFPROBE:-$(command -v ffprobe || true)}
+[[ -x $MODERN_FFMPEG && -x $MODERN_FFPROBE ]] || {
+    printf 'FAIL A normal modern ffmpeg and ffprobe are required for comparison and reference generation.\n' >&2
+    exit 2
+}
+
+TMP=$(mktemp -d)
+trap 'rm -rf -- "$TMP"' EXIT
+REFERENCE="$TMP/reference.nv12"
+OUTPUT="$TMP/legacy-hevc.mkv"
+ENCODE_LOG="$TMP/legacy-encode.log"
+VAINFO_LOG="$TMP/vainfo.log"
+FFPROBE_LOG="$TMP/output-ffprobe.log"
+DECODE_LOG="$TMP/output-decode.log"
+HEVC_VAAPI_ENCODE_CAP=unknown
+
+heading() { printf '\n== %s ==\n' "$1"; }
+run_bounded() {
+    if command -v timeout >/dev/null 2>&1; then timeout --kill-after=3 45 "$@"; else "$@"; fi
+}
+run_modern_probe_bounded() {
+    if command -v timeout >/dev/null 2>&1; then timeout --kill-after=2 12 "$@"; else "$@"; fi
+}
+legacy() { bash "$HERE/with-runtime.sh" "$RUNTIME" "$@"; }
+modern_probe() {
+    local label=$1 status
+    shift
+    if run_modern_probe_bounded "$MODERN_FFMPEG" -nostdin -hide_banner -loglevel error -f lavfi \
+        -i testsrc2=size=640x360:rate=30 -frames:v 30 "$@" -an -f null - >/dev/null 2>"$TMP/modern-$label.log"; then
+        printf 'PASS Modern probe %-12s real encode succeeded\n' "$label"
+    else
+        status=$?
+        if [[ $status == 124 || $status == 137 ]]; then
+            printf 'FAIL Modern probe %-12s timed out\n' "$label"
+        else
+            printf 'FAIL Modern probe %-12s real encode failed: ' "$label"
+            sed '/^[[:space:]]*$/d' "$TMP/modern-$label.log" | tail -n 1 || true
+        fi
+    fi
+}
+
+heading 'Host GPU and driver'
+if command -v lspci >/dev/null 2>&1; then
+    lspci -nnk | grep -A3 -E 'VGA compatible controller|Display controller|3D controller' || true
+else
+    printf 'INFO lspci is unavailable.\n'
+fi
+for driver_link in /sys/class/drm/card*/device/driver; do
+    [[ -e $driver_link ]] || continue
+    printf 'DRM driver %s: %s\n' "$driver_link" "$(basename -- "$(readlink -f -- "$driver_link")")"
+done
+[[ -e /dev/dri/renderD128 ]] && ls -l /dev/dri/renderD128 || printf 'INFO /dev/dri/renderD128 is absent.\n'
+
+heading 'Intel VA-API driver capability'
+if [[ -n $VA_DRIVER_DIR ]]; then
+    printf 'INFO Test-scoped VA-API driver: %s/iHD_drv_video.so\n' "$VA_DRIVER_DIR"
+    printf 'INFO LIBVA_DRIVERS_PATH and LIBVA_DRIVER_NAME apply only to diagnostic and legacy encode child processes.\n'
+else
+    printf 'INFO Test-scoped VA-API driver: none; inspecting the system default.\n'
+fi
+if command -v dpkg-query >/dev/null 2>&1; then
+    for package in intel-media-va-driver intel-media-va-driver-non-free i965-va-driver; do
+        if package_record=$(dpkg-query -W -f='${db:Status-Abbrev}\t${Version}' "$package" 2>/dev/null); then
+            package_status=${package_record%%$'\t'*}
+            package_version=${package_record#*$'\t'}
+            if [[ $package_status == ii* && -n $package_version ]]; then
+                printf 'Installed package: %s %s\n' "$package" "$package_version"
+            fi
+        fi
+    done
+else
+    printf 'INFO dpkg-query is unavailable; package variant was not identified.\n'
+fi
+if command -v vainfo >/dev/null 2>&1 && [[ -e /dev/dri/renderD128 ]]; then
+    set +e
+    run_modern_probe_bounded env "${LEGACY_DRIVER_ENV[@]}" \
+        vainfo --display drm --device /dev/dri/renderD128 >"$VAINFO_LOG" 2>&1
+    VAINFO_STATUS=$?
+    set -e
+    if (( VAINFO_STATUS == 0 )); then
+        grep -E 'vainfo: Driver version|VAProfileH264|VAProfileHEVC' "$VAINFO_LOG" || true
+        if grep -Eq 'VAProfileHEVC(Main|Main10)[[:space:]]*:[[:space:]]*VAEntrypointEncSlice([[:space:]]|$)' "$VAINFO_LOG"; then
+            HEVC_VAAPI_ENCODE_CAP=yes
+            printf 'READY VA-API advertises an HEVC encoding entry point.\n'
+        elif grep -Eq 'VAProfileHEVC(Main|Main10)' "$VAINFO_LOG"; then
+            HEVC_VAAPI_ENCODE_CAP=no
+            printf 'INFO VA-API advertises HEVC decoding but no HEVC encoding entry point.\n'
+        else
+            HEVC_VAAPI_ENCODE_CAP=no
+            printf 'INFO VA-API does not advertise an HEVC Main/Main10 profile.\n'
+        fi
+    elif (( VAINFO_STATUS == 124 || VAINFO_STATUS == 137 )); then
+        printf 'INFO vainfo timed out; VA-API entry points could not be inspected.\n'
+    else
+        printf 'INFO vainfo failed with status %s; relevant output follows.\n' "$VAINFO_STATUS"
+        tail -n 20 "$VAINFO_LOG" || true
+    fi
+else
+    printf 'INFO vainfo or /dev/dri/renderD128 is unavailable; VA-API entry points were not inspected.\n'
+fi
+
+heading 'Modern FFmpeg identity'
+"$MODERN_FFMPEG" -hide_banner -version | head -n 1
+"$MODERN_FFMPEG" -hide_banner -buildconf
+ldd "$MODERN_FFMPEG" | grep -E 'libmfx|libvpl|libva|libdrm' || printf 'INFO No matching dynamic media libraries shown by ldd.\n'
+
+heading 'Legacy compatibility runtime integrity'
+bash "$HERE/inspect.sh" "$RUNTIME"
+legacy "$LEGACY_FFMPEG" -hide_banner -version | head -n 1
+legacy "$LEGACY_FFMPEG" -hide_banner -buildconf
+legacy ldd "$LEGACY_FFMPEG" | grep -E 'libmfx|libvpl|libva|libdrm' || true
+
+heading 'Reference generation'
+python3 - "$REFERENCE" <<'PY'
+import sys
+
+width, height, frames = 640, 360, 150
+row = bytes(16 + (x * 180 // width) for x in range(width))
+base_luma = bytearray(row * height)
+neutral_chroma = bytes([128]) * (width * height // 2)
+
+with open(sys.argv[1], "wb") as output:
+    for frame in range(frames):
+        luma = base_luma.copy()
+        left = (frame * 3) % (width - 64)
+        top = (frame * 2) % (height - 64)
+        for y in range(top, top + 64):
+            start = y * width + left
+            luma[start:start + 64] = b"\xeb" * 64
+        output.write(luma)
+        output.write(neutral_chroma)
+PY
+EXPECTED_REFERENCE_BYTES=$(( 640 * 360 * 3 / 2 * 150 ))
+REFERENCE_BYTES=$(wc -c < "$REFERENCE")
+[[ $REFERENCE_BYTES == "$EXPECTED_REFERENCE_BYTES" ]] || {
+    printf 'FAIL Raw reference has %s bytes; expected %s.\n' "$REFERENCE_BYTES" "$EXPECTED_REFERENCE_BYTES" >&2
+    exit 1
+}
+printf 'PASS Deterministic 5-second 640x360 raw NV12 reference generated.\n'
+
+heading 'Genuine legacy HEVC encode'
+START_NS=$(date +%s%N)
+set +e
+run_bounded env \
+    INTEL_MEDIA_RUNTIME=MSDK \
+    LD_LIBRARY_PATH="$RUNTIME/lib" \
+    "${LEGACY_DRIVER_ENV[@]}" \
+    "$LEGACY_FFMPEG" -nostdin -hide_banner -loglevel verbose -y \
+    -f rawvideo -pixel_format nv12 -video_size 640x360 -framerate 30 -i "$REFERENCE" -an \
+    -frames:v 150 \
+    -c:v hevc_qsv -load_plugin hevc_hw -low_power 0 \
+    -global_quality 28 -preset medium \
+    "$OUTPUT" 2>&1 | tee "$ENCODE_LOG"
+ENCODE_STATUS=${PIPESTATUS[0]}
+set -e
+if (( ENCODE_STATUS != 0 )); then
+    if (( ENCODE_STATUS == 124 || ENCODE_STATUS == 137 )); then
+        printf 'FAIL The legacy HEVC encode timed out (status %s).\n' "$ENCODE_STATUS" >&2
+    else
+        printf 'FAIL The legacy HEVC encode exited with status %s.\n' "$ENCODE_STATUS" >&2
+    fi
+    if [[ $HEVC_VAAPI_ENCODE_CAP == no ]]; then
+        printf 'INFO The legacy Media SDK reached the Intel hardware runtime, but the active VA-API driver does not expose HEVC encoding.\n' >&2
+        printf 'INFO On Skylake, Intel documents HEVC encoding for the Full Feature media-driver build; the Free Kernel build exposes HEVC decoding only.\n' >&2
+        printf 'INFO Ubuntu/Debian package names are intel-media-va-driver-non-free (Full Feature) and intel-media-va-driver (Free Kernel).\n' >&2
+        printf 'INFO No driver package or global LIBVA setting was changed by this test.\n' >&2
+    fi
+    exit 1
+fi
+END_NS=$(date +%s%N)
+ELAPSED_MS=$(( (END_NS - START_NS) / 1000000 ))
+[[ -s $OUTPUT ]] || { printf 'FAIL The legacy encode produced an empty output.\n' >&2; exit 1; }
+
+grep -Fq 'Use Intel(R) Media SDK to create MFX session' "$ENCODE_LOG" || {
+    printf 'FAIL FFmpeg did not report creation of an Intel Media SDK session.\n' >&2
+    exit 1
+}
+grep -Fq 'Initialized an internal MFX session using hardware accelerated implementation' "$ENCODE_LOG" || {
+    printf 'FAIL FFmpeg did not report a hardware-accelerated Media SDK implementation.\n' >&2
+    exit 1
+}
+! grep -Fq 'software implementation' "$ENCODE_LOG" || {
+    printf 'FAIL FFmpeg reported a software Media SDK implementation.\n' >&2
+    exit 1
+}
+printf 'PASS Legacy FFmpeg used an Intel Media SDK hardware implementation.\n'
+printf 'PASS Runtime integrity inspection excludes oneVPL and resolves private libmfx.\n'
+printf 'Legacy encode elapsed_ms=%s\n' "$ELAPSED_MS"
+grep -E 'frame=.*(fps=|speed=)' "$ENCODE_LOG" | tail -n 1 || true
+
+heading 'Output verification'
+set +e
+CODEC=$("$MODERN_FFPROBE" -v error -select_streams v:0 \
+    -show_entries stream=codec_name -of default=nw=1:nk=1 "$OUTPUT" 2>"$FFPROBE_LOG")
+FFPROBE_STATUS=$?
+set -e
+if (( FFPROBE_STATUS != 0 )); then
+    printf 'FAIL Modern ffprobe could not inspect the legacy HEVC output (status %s).\n' "$FFPROBE_STATUS" >&2
+    tail -n 30 "$FFPROBE_LOG" >&2 || true
+    exit 1
+fi
+[[ $CODEC == hevc ]] || { printf 'FAIL Expected HEVC output, got: %s\n' "$CODEC" >&2; exit 1; }
+set +e
+DURATION=$("$MODERN_FFPROBE" -v error -show_entries format=duration \
+    -of default=nw=1:nk=1 "$OUTPUT" 2>>"$FFPROBE_LOG")
+DURATION_STATUS=$?
+set -e
+if (( DURATION_STATUS != 0 )); then
+    printf 'FAIL Modern ffprobe could not read the legacy HEVC duration (status %s).\n' "$DURATION_STATUS" >&2
+    tail -n 30 "$FFPROBE_LOG" >&2 || true
+    exit 1
+fi
+awk -v d="$DURATION" 'BEGIN { exit !(d >= 4.8 && d <= 5.2) }' || {
+    printf 'FAIL Output duration is outside 4.8-5.2 seconds: %s\n' "$DURATION" >&2
+    exit 1
+}
+set +e
+run_bounded "$MODERN_FFMPEG" -nostdin -hide_banner -loglevel error -xerror \
+    -i "$OUTPUT" -map 0:v:0 -f null - > /dev/null 2>"$DECODE_LOG"
+DECODE_STATUS=$?
+set -e
+if (( DECODE_STATUS != 0 )); then
+    printf 'FAIL Modern FFmpeg could not fully decode the legacy HEVC output (status %s).\n' "$DECODE_STATUS" >&2
+    tail -n 30 "$DECODE_LOG" >&2 || true
+    exit 1
+fi
+printf 'PASS codec=hevc duration=%s full_decode=ok\n' "$DURATION"
+
+heading 'Quality and software performance comparison'
+if "$MODERN_FFMPEG" -hide_banner -filters 2>&1 |
+   awk 'NF >= 2 && $2 == "libvmaf" {found=1} END {exit(found ? 0 : 1)}'; then
+    VMAF_LOG="$TMP/vmaf.log"
+    if run_bounded "$MODERN_FFMPEG" -hide_banner -i "$OUTPUT" \
+        -f rawvideo -pixel_format nv12 -video_size 640x360 -framerate 30 -i "$REFERENCE" \
+        -lavfi '[0:v][1:v]libvmaf' -f null - > /dev/null 2>"$VMAF_LOG"; then
+        VMAF=$(sed -n 's/.*VMAF score: \([0-9.]*\).*/\1/p' "$VMAF_LOG" | tail -n 1)
+        printf 'VMAF=%s\n' "${VMAF:-completed-score-not-parsed}"
+    else
+        printf 'INFO VMAF was available but comparison failed; this does not waive production quality validation.\n'
+    fi
+else
+    printf 'INFO Modern FFmpeg has no libvmaf filter; VMAF was not measured.\n'
+fi
+
+compare_software() {
+    local encoder=$1 log="$TMP/$1.log" out="$TMP/$1.mkv" start end elapsed
+    "$MODERN_FFMPEG" -hide_banner -encoders 2>&1 |
+        awk -v wanted="$encoder" 'NF >= 2 && $2 == wanted {found=1} END {exit(found ? 0 : 1)}' || {
+        printf 'SKIP %s unavailable\n' "$encoder"; return 0;
+    }
+    start=$(date +%s%N)
+    if run_bounded "$MODERN_FFMPEG" -hide_banner -y \
+        -f rawvideo -pixel_format nv12 -video_size 640x360 -framerate 30 -i "$REFERENCE" \
+        -an -c:v "$encoder" -crf 28 "$out" > /dev/null 2>"$log"; then
+        end=$(date +%s%N)
+        elapsed=$(( (end - start) / 1000000 ))
+        printf 'Software comparison encoder=%s elapsed_ms=%s bytes=%s\n' "$encoder" "$elapsed" "$(wc -c < "$out")"
+        grep -E 'frame=.*(fps=|speed=)' "$log" | tail -n 1 || true
+    else
+        printf 'INFO Software comparison encoder=%s failed or exceeded 45 seconds.\n' "$encoder"
+    fi
+}
+compare_software libx265
+compare_software libsvtav1
+
+# Probe the known-broken modern paths only after the legacy encode has been
+# completely verified. On legacy i915/media-driver combinations, killing a
+# hung modern probe can leave the next hardware process unable to initialise.
+heading 'Modern hardware capability probes'
+modern_probe av1_qsv -vf format=nv12 -c:v av1_qsv -global_quality 30 -preset medium
+modern_probe hevc_qsv -vf format=nv12 -c:v hevc_qsv -global_quality 28 -preset medium
+if [[ -e /dev/dri/renderD128 ]]; then
+    modern_probe hevc_vaapi -vaapi_device /dev/dri/renderD128 -vf format=nv12,hwupload -c:v hevc_vaapi -qp 28
+else
+    printf 'SKIP Modern probe hevc_vaapi: no render node\n'
+fi
+
+heading 'Acceptance result'
+printf 'PROVEN HEVC via Intel QSV (legacy Media SDK compatibility runtime)\n'
+printf 'Selected feasibility candidate: intel-msdk-legacy/hevc_qsv (hardware)\n'
+printf 'Production AUTO eligibility: enabled only while this isolated runtime and driver pass the application real-encode probe.\n'
+[[ -n $REPORT ]] && printf 'Report: %s\n' "$REPORT"

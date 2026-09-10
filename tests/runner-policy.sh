@@ -21,7 +21,9 @@ for module in \
     hardcore-archive-doctor-video-fix.sh \
     hardcore-archive-doctor-video-auto.sh \
     hardcore-archive-doctor-encoder-menu.sh \
-    hardcore-archive-doctor-encoder-runtime.sh
+    hardcore-archive-doctor-encoder-runtime.sh \
+    intel-legacy-video.sh \
+    hardcore-archive-doctor-intel-legacy.sh
 do
     sibling="$(dirname -- "$DOCTOR_LOADER")/$module"
     [[ -f $sibling ]] && cp "$sibling" "$TMP/app/lib/$module"
@@ -135,6 +137,11 @@ assert_has "$out" 'ARG=--no-image-optimize'
 assert_has "$out" 'ARG=--no-nested-repack'
 assert_has "$out" 'DEP_APPROVED=1'
 for tool in ffmpeg ffprobe jpegtran djpeg oxipng setsid; do mv "$TMP/bin/$tool.off" "$TMP/bin/$tool"; done
+
+# The documented short yes flag is an option, not the source positional.
+out=$(run_frontend -y --no-video-transcode --no-image-optimize --no-nested-repack --no-container-repack "$TMP/docs" 2>&1)
+assert_has "$out" 'ARG=-y'
+assert_has "$out" "ARG=$TMP/docs"
 
 # Safe transformations are enabled by default and are forwarded to the static
 # engine after dependency and hardware validation.

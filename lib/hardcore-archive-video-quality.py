@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable, Sequence
 
-POLICY_VERSION = "completed-video-quality-v3-timed-sustained"
+POLICY_VERSION = "completed-video-quality-v4-boundary-overlap"
 FRAME_BOUNDARY_TOLERANCE_SECONDS = 0.050
 STREAM_ENDPOINT_TOLERANCE_SECONDS = 0.100
 FRAME_SELECTION_EPSILON_SECONDS = 0.000001
@@ -464,10 +464,9 @@ def analyze_timeline_evidence(
     selected_durations: list[float] = []
     missing_timing = 0
     for frame_index, frame in enumerate(observations):
-        # Coverage evidence may look slightly outside the requested boundaries so
-        # it can prove display continuity. Frame-population matching must not use
-        # that wider tolerance: FFmpeg -ss/-t scores frames whose timestamps are
-        # in [start,end), with only a tiny floating-point comparison epsilon.
+        # Completed-output sample starts are snapped to candidate frame PTS.
+        # Count the same half-open [start,end) population that FFmpeg feeds to
+        # libvmaf, without using the wider coverage-gap tolerance.
         if (
             frame.pts + FRAME_SELECTION_EPSILON_SECONDS < window.start
             or frame.pts >= window.end - FRAME_SELECTION_EPSILON_SECONDS
@@ -534,6 +533,40 @@ def probe_frame_timeline(
     # or very-low-frame-rate material. Retry once farther back; this is bounded
     # and does not change the acceptance threshold.
     return _probe_frames_once(path, window, FALLBACK_PROBE_SEEK_BACK_SECONDS, ffprobe)
+
+
+def snap_windows_to_frame_starts(
+    windows: Sequence[Window], input_path: str, duration: float, ffprobe: str = "ffprobe",
+    evidence_provider: Callable[[str, Window, str], list[FrameObservation]] | None = None,
+) -> list[Window]:
+    """Snap sampled starts backward to decoded candidate frame boundaries.
+
+    FFmpeg input-side seeking can otherwise round a fractional request to a
+    neighbouring frame differently from ffprobe's half-open population count.
+    Snapping to a proven candidate PTS keeps the VMAF sequence and independent
+    timing evidence one-to-one without guessing an average frame rate.
+    """
+    provider = evidence_provider or probe_frame_timeline
+    snapped: list[Window] = []
+    for window in windows:
+        if window.start <= FRAME_SELECTION_EPSILON_SECONDS:
+            snapped.append(window)
+            continue
+        try:
+            observations = provider(input_path, window, ffprobe)
+            eligible = [
+                frame.pts for frame in observations
+                if frame.pts >= 0
+                and frame.pts <= window.start + FRAME_SELECTION_EPSILON_SECONDS
+                and frame.pts + window.length <= duration + STREAM_ENDPOINT_TOLERANCE_SECONDS
+            ]
+        except (OSError, TypeError, ValueError):
+            eligible = []
+        if eligible:
+            snapped.append(Window(window.kind, max(eligible), window.length))
+        else:
+            snapped.append(window)
+    return snapped
 
 
 def map_vmaf_scores_to_timeline(
@@ -795,7 +828,8 @@ def higher_quality(encoder: str, quality: int, step: int) -> int | None:
     if step < 1:
         raise ValueError("retry step must be positive")
     lower_is_better = {
-        "av1_vaapi", "hevc_vaapi", "av1_nvenc", "hevc_nvenc", "av1_qsv", "hevc_qsv"
+        "av1_vaapi", "hevc_vaapi", "av1_nvenc", "hevc_nvenc", "av1_qsv", "hevc_qsv",
+        "hevc_qsv_legacy"
     }
     higher_is_better = {"hevc_videotoolbox"}
     if encoder in lower_is_better:
@@ -822,6 +856,9 @@ def command_plan(args: argparse.Namespace) -> int:
                 args.complexity_samples, args.ffprobe,
             )
             windows = add_complexity_windows(windows, candidates, args.max_samples)
+        windows = snap_windows_to_frame_starts(
+            windows, args.input, args.duration, args.ffprobe
+        )
     for window in windows:
         print(f"{window.kind}\t{window.start:.6f}\t{window.length:.6f}")
     return 0

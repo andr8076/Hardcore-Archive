@@ -30,7 +30,8 @@ Video timestamps are discrete and container time bases can round seek/frame boun
 
 - **50 ms timeline-boundary tolerance** when deciding whether decoded display intervals establish the requested window start, an ordinary window end, or an internal continuity boundary.
 - **100 ms stream-endpoint tolerance** only when the requested window reaches the declared source timeline endpoint.
-- The expected VMAF frame population itself is counted from candidate frame timestamps in the requested half-open interval `[start, end)`, using only a **1 microsecond comparison epsilon** for floating-point representation. The wider 50 ms timeline tolerance is deliberately not used to count frames outside the requested window.
+- Before measurement, sampled window starts are snapped backward to an independently decoded candidate-frame PTS. This avoids input-seek rounding disagreements on rates such as 24000/1001 without assuming an average frame rate. If that evidence cannot be obtained, the original deterministic start is retained and the later exact-match check still fails closed on disagreement.
+- The expected VMAF frame population is counted from candidate frame timestamps in the snapped half-open interval `[start, end)`, using only a **1 microsecond comparison epsilon** for floating-point representation. The wider 50 ms timeline tolerance is deliberately not used to count frames outside the requested window.
 - The coverage check may still tolerate at most one boundary-frame count difference for windows containing at least 30 candidate frames, but the sustained-low-quality rule does **not** guess a timing alignment from that difference. If VMAF and candidate frame populations do not match exactly, sustained timing evidence is unavailable and the window cannot authorize the output.
 
 These tolerances allow normal timestamp rounding without turning missing seconds into accepted coverage. Reported confirmed coverage is calculated from the actual intersected display intervals; the tolerance is used for acceptance decisions, not added to the reported coverage number.
@@ -46,7 +47,7 @@ The production comparison graph feeds every completed-output frame to libvmaf (`
 For sustained-quality timing, VMAF sequence record `i` is associated with candidate presentation interval `i` only when all of the following hold:
 
 1. The VMAF sequence is contiguous from zero.
-2. The number of VMAF records exactly equals the number of candidate frames selected in `[start, end)`.
+2. The number of VMAF records exactly equals the number of candidate frames selected in the snapped `[start, end)` window.
 3. Every selected candidate frame has a valid display interval from its next presentation timestamp or explicit duration metadata.
 4. The candidate presentation intervals remain ordered and the surrounding coverage evidence is valid.
 
