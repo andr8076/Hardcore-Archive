@@ -12,7 +12,7 @@ after its own bounded HEVC encode, codec check, and full-decode check succeed.
 
 Intel archived Media SDK in 2023 and explicitly describes it as unmaintained,
 including known security issues that will not receive fixes. It is therefore an
-opt-in compatibility component, never a replacement for the current FFmpeg,
+isolated compatibility component, never a replacement for the current FFmpeg,
 oneVPL, libva configuration, or system packages.
 
 The builder:
@@ -50,22 +50,26 @@ The output is:
       licenses/
       runtime-manifest.txt
 
-Large binaries are intentionally not committed or downloaded automatically.
-Redistribution should not be enabled until licensing, security, supported Linux
-versions, and the target-machine evidence have been reviewed.
+Large binaries are not committed. A pinned, checksum-protected compatibility
+runtime is published on the separate `intel-legacy-runtime-latest` prerelease
+channel. On a relevant Intel/i915 host, a source checkout downloads it once into
+the user's cache only after all modern hardware candidates fail. It remains
+static until that cache is removed.
 
 The full-feature `iHD_drv_video.so` is also required on Skylake. The free-kernel
 Ubuntu/Debian driver can expose HEVC decode without HEVC encode. Hardcore
-Archive does not download, install, or redistribute the non-free driver. Supply
-it from a package obtained through the machine owner's normal distribution
-channels, then either copy it to `runtime/lib/dri/iHD_drv_video.so` or identify
-its extracted directory with `HARDCORE_ARCHIVE_INTEL_LEGACY_VA_DRIVER_DIR`.
-Do not replace the system driver.
+Archive does not install or redistribute the non-free driver. On Debian-family
+systems its first-use setup asks the configured package manager to download
+`intel-media-va-driver-non-free`, extracts the package into the same private
+cache, and records its version and driver hash. No `sudo`, package installation,
+or global libva setting is used. Manual placement at
+`runtime/lib/dri/iHD_drv_video.so` and
+`HARDCORE_ARCHIVE_INTEL_LEGACY_VA_DRIVER_DIR` remain supported.
 
-The manually triggered GitHub workflow builds the same pins in an ephemeral
-Ubuntu 22.04 runner and retains the result as a short-lived workflow artifact.
-It does not publish a release asset, and it cannot prove GPU capability because
-hosted runners do not provide the target P530.
+The GitHub workflow builds the same pins in an ephemeral Ubuntu 22.04 runner,
+inspects isolation, and publishes an immutable commit-addressed archive plus a
+small rolling pointer. It does not include the Full Feature driver and cannot
+prove GPU capability because hosted runners do not provide the target P530.
 
 ## Inspect isolation
 
@@ -132,6 +136,17 @@ available in that host FFmpeg build, so this number is a capability/performance
 diagnostic rather than a quality comparison.
 
 ## Production use
+
+Normal `VIDEO_CODEC=auto` operation needs no legacy-specific command. The flow
+is modern hardware probe, relevant Intel/i915 detection, private first-use setup,
+real legacy HEVC probe, then selection. If download, extraction, isolation, or
+encoding fails, the candidate is excluded and AUTO does not fall back to CPU.
+
+Automatic setup can be disabled without disabling the normal media runtime:
+
+    export HARDCORE_ARCHIVE_INTEL_LEGACY_AUTO_SETUP=0
+
+The following manual paths remain useful for offline or controlled deployments.
 
 Place the compatibility runtime in either of these locations:
 

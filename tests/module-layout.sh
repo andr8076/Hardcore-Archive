@@ -43,6 +43,7 @@ bash -n "$ROOT/tests/portable-runtime.sh"
 bash -n "$ROOT/tests/runtime-bootstrap.sh"
 bash -n "$ROOT/tests/runtime-build-safety.sh"
 bash -n "$ROOT/tests/intel-legacy-runtime.sh"
+bash -n "$ROOT/tests/intel-legacy-bootstrap.sh"
 bash -n "$ROOT/tests/intel-legacy-selection.sh"
 bash -n "$ROOT/tests/intel-legacy-production.sh"
 

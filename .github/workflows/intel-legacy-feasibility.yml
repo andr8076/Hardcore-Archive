@@ -2,14 +2,27 @@ name: Intel legacy runtime feasibility
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main, intel-legacy-feasibility]
+    paths:
+      - ".github/workflows/intel-legacy-feasibility.yml"
+      - "lib/intel-legacy-video.sh"
+      - "packaging/intel-legacy-runtime/**"
+      - "tests/intel-legacy-runtime.sh"
+      - "tests/intel-legacy-bootstrap.sh"
   pull_request:
     paths:
       - ".github/workflows/intel-legacy-feasibility.yml"
       - "packaging/intel-legacy-runtime/**"
       - "tests/intel-legacy-runtime.sh"
+      - "tests/intel-legacy-bootstrap.sh"
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: intel-legacy-runtime-latest
+  cancel-in-progress: true
 
 jobs:
   build-isolated-runtime:
@@ -26,10 +39,38 @@ jobs:
         run: bash packaging/intel-legacy-runtime/build.sh
       - name: Verify runtime isolation
         run: bash packaging/intel-legacy-runtime/inspect.sh dist/intel-legacy-runtime/runtime
-      - name: Archive temporary feasibility artifact
-        run: tar -C dist/intel-legacy-runtime -czf intel-legacy-runtime-linux-x86_64.tar.gz runtime
+      - name: Archive compatibility runtime
+        run: |
+          asset=hardcore-archive-intel-legacy-runtime-linux-x86_64.tar.gz
+          tar -C dist/intel-legacy-runtime -czf "$asset" runtime
+          sha256sum "$asset" > "$asset.sha256"
       - uses: actions/upload-artifact@v4
         with:
           name: intel-legacy-runtime-linux-x86_64
-          path: intel-legacy-runtime-linux-x86_64.tar.gz
+          path: hardcore-archive-intel-legacy-runtime-linux-x86_64.tar.gz*
           retention-days: 7
+      - name: Publish pinned rolling compatibility runtime
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tag=intel-legacy-runtime-latest
+          source packaging/intel-legacy-runtime/versions.env
+          source_asset=hardcore-archive-intel-legacy-runtime-linux-x86_64.tar.gz
+          versioned="hardcore-archive-intel-legacy-runtime-linux-x86_64-${GITHUB_SHA}.tar.gz"
+          cp -- "$source_asset" "$versioned"
+          sha256sum "$versioned" > "$versioned.sha256"
+          printf '%s\n' "$versioned" > hardcore-archive-intel-legacy-runtime-linux-x86_64.current
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --target "$GITHUB_SHA" \
+              --title "Hardcore Archive Intel legacy compatibility runtime" \
+              --notes "Discontinued Intel Media SDK ${INTEL_MEDIA_SDK_VERSION} compatibility runtime. Capability-gated; modern hardware remains preferred. The non-free VA driver is not included." \
+              --prerelease
+          fi
+          gh release upload "$tag" "$versioned" "$versioned.sha256" --clobber
+          gh release upload "$tag" hardcore-archive-intel-legacy-runtime-linux-x86_64.current --clobber
+          gh release edit "$tag" --target "$GITHUB_SHA" --prerelease \
+            --title "Hardcore Archive Intel legacy compatibility runtime" \
+            --notes "Latest pinned Intel Media SDK ${INTEL_MEDIA_SDK_VERSION} compatibility runtime. Capability-gated; modern hardware remains preferred. The non-free VA driver is obtained from the user's configured distribution repository and is never installed system-wide."
