@@ -2,6 +2,13 @@
 
 # State belongs to one video helper, not to the parent archive or other files.
 # Export functions so batch/nested helper shells use this checked-in module.
+if ! declare -F hardcore_video_encoder_command >/dev/null 2>&1; then
+    hardcore_video_encoder_command() {
+        HARDCORE_VIDEO_ENCODER_COMMAND=(ffmpeg)
+        HARDCORE_VIDEO_FFMPEG_ENCODER=$1
+    }
+fi
+
 hardcore_video_accel_init() {
     [[ ${HARDCORE_VIDEO_ACCEL_INITIALIZED:-0} == 1 ]] && return 0
     declare -gA HARDCORE_VIDEO_PIPELINES=() HARDCORE_VIDEO_DOWNLOAD_FORMATS=() HARDCORE_VIDEO_START_MODES=()
@@ -228,6 +235,7 @@ hardcore_video_build_full_command() {
     local -A primary_indexes=()
     hardcore_video_accel_arguments "$video_encoder"
     hardcore_video_accel_filter "$video_encoder"
+    hardcore_video_encoder_command "$video_encoder" || return 1
     primary_rows=$(ffprobe -v error -select_streams V -show_entries stream=index \
         -of csv=p=0 "$input") || return 1
     all_video_rows=$(ffprobe -v error -select_streams v -show_entries stream=index \
@@ -244,12 +252,12 @@ hardcore_video_build_full_command() {
         [[ -n ${primary_indexes[$stream_index]:-} ]] && continue
         video_maps+=(-map "0:$stream_index")
     done <<< "$all_video_rows"
-    command=(ffmpeg -hide_banner -nostdin -y "${HARDCORE_VIDEO_DEVICE_ARGS[@]}"
+    command=("${HARDCORE_VIDEO_ENCODER_COMMAND[@]}" -hide_banner -nostdin -y "${HARDCORE_VIDEO_DEVICE_ARGS[@]}"
         "${HARDCORE_VIDEO_INPUT_ARGS[@]}" -i "$input"
         "${video_maps[@]}" -map '0:a?' -map '0:s?' -map '0:d?' -map '0:t?'
         -map_metadata 0 -map_chapters 0
         -copy_unknown
-        -c:v copy -c:v:0 "$video_encoder" "${encoder_args[@]}" "${HARDCORE_VIDEO_OUTPUT_ARGS[@]}"
+        -c:v copy -c:v:0 "$HARDCORE_VIDEO_FFMPEG_ENCODER" "${encoder_args[@]}" "${HARDCORE_VIDEO_OUTPUT_ARGS[@]}"
         -c:s copy -c:d copy -c:t copy -max_muxing_queue_size 4096)
     [[ -z $CAL_FILTER_CHAIN ]] || command+=(-filter:v:0 "$CAL_FILTER_CHAIN")
     command+=("${audio_args[@]}" "$temporary")
