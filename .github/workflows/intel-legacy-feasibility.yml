@@ -21,7 +21,8 @@ permissions:
   contents: write
 
 concurrency:
-  group: intel-legacy-runtime-latest
+  # PR validation must not cancel the branch push that publishes the runtime.
+  group: intel-legacy-runtime-latest-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
