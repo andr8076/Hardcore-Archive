@@ -21,7 +21,9 @@ for module in \
     hardcore-archive-doctor-video-fix.sh \
     hardcore-archive-doctor-video-auto.sh \
     hardcore-archive-doctor-encoder-menu.sh \
-    hardcore-archive-doctor-encoder-runtime.sh
+    hardcore-archive-doctor-encoder-runtime.sh \
+    intel-legacy-video.sh \
+    hardcore-archive-doctor-intel-legacy.sh
 do
     sibling="$(dirname -- "$DOCTOR_LOADER")/$module"
     [[ -f $sibling ]] && cp "$sibling" "$TMP/app/lib/$module"
