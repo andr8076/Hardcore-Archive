@@ -614,6 +614,11 @@ dependency_resolve_7zip() {
 
 dependency_ffmpeg_has_encoder() {
     local encoder=$1
+    if [[ $encoder == hevc_qsv_legacy ]]; then
+        [[ -x ${HARDCORE_ARCHIVE_INTEL_LEGACY_RUNTIME:-}/bin/ffmpeg &&
+           -n ${HARDCORE_ARCHIVE_INTEL_LEGACY_RUNTIME_ID:-} ]]
+        return $?
+    fi
     ffmpeg -hide_banner -encoders 2>/dev/null | awk 'NF >= 2 {print $2}' | grep -Fxq "$encoder"
 }
 
@@ -3076,6 +3081,7 @@ cleanup() {
             printf 'video_transcode=%s\n' "${VIDEO_TRANSCODE:-unknown}"
             printf 'video_codec=%s\n' "${VIDEO_CODEC:-unknown}"
             printf 'video_encoder=%s\n' "${VIDEO_ENCODER:-unset}"
+            printf 'video_encoder_runtime=%s\n' "${HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID:-modern-default}"
             printf 'video_vaapi_device=%s\n' "${HARDCORE_ARCHIVE_VAAPI_DEVICE:-auto}"
             printf 'video_acceleration=%s\n' "${HARDCORE_ARCHIVE_VIDEO_ACCELERATION:-auto}"
             printf 'video_gpu_filters=%s\n' "${HARDCORE_ARCHIVE_VIDEO_GPU_FILTERS:-auto}"
@@ -3389,7 +3395,7 @@ fi
 # HARDCORE_EXPLICIT_VAAPI_DEVICE_V1
 video_encoder_is_hardware() {
     case "$1" in
-        av1_vaapi|av1_nvenc|av1_qsv|hevc_videotoolbox|hevc_vaapi|hevc_nvenc|hevc_qsv)
+        av1_vaapi|av1_nvenc|av1_qsv|hevc_videotoolbox|hevc_vaapi|hevc_nvenc|hevc_qsv|hevc_qsv_legacy)
             return 0 ;;
         *)
             return 1 ;;
@@ -3496,6 +3502,7 @@ fi
 choose_work_root
 JOB_ID=$(printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' \
     "$SOURCE" "$VIDEO_CODEC" "$VIDEO_ENCODER" "$VIDEO_MODE" \
+    "${HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID:-modern-default}" \
     "$VIDEO_MIN_VMAF" "$VIDEO_MIN_SAVINGS_PERCENT" "$VIDEO_NO_SCALE" "$VIDEO_NO_DENOISE" \
     "$IMAGE_OPTIMIZE" "$IMAGE_MODE" \
     "video-acceptance-v1-duration-scaled" "$VIDEO_QUALITY_VALIDATION" \
@@ -4473,6 +4480,7 @@ video_cache_key() {
         "$SCRIPT_VERSION" "$relative" "$stat_value" "$source_hash" "$stream_signature" \
         "$VIDEO_CODEC" "$VIDEO_ENCODER" "$VIDEO_MODE" "$VIDEO_MIN_VMAF" "$VIDEO_MIN_SAVINGS_PERCENT" \
         "$VIDEO_NO_SCALE" "$VIDEO_NO_DENOISE" "$VIDEO_AUDIO_COPY" "$QUALITY_CHECK" "$ffmpeg_version" \
+        "${HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID:-modern-default}" \
         "video-acceptance-v1-duration-scaled" "${HARDCORE_ARCHIVE_VIDEO_ACCELERATION:-auto}" \
         "${HARDCORE_ARCHIVE_VIDEO_GPU_FILTERS:-auto}" "${HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE:-0}" \
         "${VIDEO_QUALITY_VALIDATION:-sampled}" "${VIDEO_QUALITY_SAMPLE_SECONDS:-4}" "${VIDEO_QUALITY_INTERVAL_SECONDS:-300}" \
@@ -4616,6 +4624,10 @@ start_video_pipeline() {
         HARDCORE_ARCHIVE_VIDEO_QUALITY_SUSTAINED_SECONDS="$VIDEO_QUALITY_SUSTAINED_SECONDS"
         HARDCORE_ARCHIVE_VIDEO_QUALITY_RETRIES="$VIDEO_QUALITY_RETRIES"
         HARDCORE_ARCHIVE_VIDEO_QUALITY_RETRY_STEP="$VIDEO_QUALITY_RETRY_STEP"
+        HARDCORE_ARCHIVE_INTEL_LEGACY_RUNTIME="${HARDCORE_ARCHIVE_INTEL_LEGACY_RUNTIME:-}"
+        HARDCORE_ARCHIVE_INTEL_LEGACY_VA_DRIVER_DIR="${HARDCORE_ARCHIVE_INTEL_LEGACY_VA_DRIVER_DIR:-}"
+        HARDCORE_ARCHIVE_INTEL_LEGACY_RUNTIME_ID="${HARDCORE_ARCHIVE_INTEL_LEGACY_RUNTIME_ID:-}"
+        HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID="${HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID:-modern-default}"
         bash "$VIDEO_HELPER" "${VIDEO_HELPER_ARGS[@]}"
     )
     if $RESOURCE_POOL_ENABLED && $VIDEO_PARALLEL; then
