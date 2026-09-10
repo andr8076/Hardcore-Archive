@@ -29,7 +29,7 @@ fi
     printf 'FAIL This acceptance test requires Linux x86_64.\n' >&2
     exit 2
 }
-for cmd in awk date grep ldd mktemp python3 readelf sed; do
+for cmd in awk date grep ldd mktemp python3 readelf sed tee timeout; do
     command -v "$cmd" >/dev/null 2>&1 || { printf 'FAIL Missing diagnostic command: %s\n' "$cmd" >&2; exit 2; }
 done
 
@@ -135,14 +135,24 @@ printf 'PASS Deterministic 5-second 640x360 raw NV12 reference generated.\n'
 
 heading 'Genuine legacy HEVC encode'
 START_NS=$(date +%s%N)
-if ! run_bounded bash "$HERE/with-runtime.sh" "$RUNTIME" \
+set +e
+run_bounded env \
+    INTEL_MEDIA_RUNTIME=MSDK \
+    LD_LIBRARY_PATH="$RUNTIME/lib" \
     "$LEGACY_FFMPEG" -hide_banner -loglevel verbose -y \
     -f rawvideo -pixel_format nv12 -video_size 640x360 -framerate 30 -i "$REFERENCE" -an \
+    -frames:v 150 \
     -c:v hevc_qsv -load_plugin hevc_hw -low_power 0 \
     -global_quality 28 -preset medium \
-    "$OUTPUT" >"$ENCODE_LOG" 2>&1; then
-    printf 'FAIL The legacy HEVC encode failed. Last output follows:\n' >&2
-    tail -n 40 "$ENCODE_LOG" >&2 || true
+    "$OUTPUT" 2>&1 | tee "$ENCODE_LOG"
+ENCODE_STATUS=${PIPESTATUS[0]}
+set -e
+if (( ENCODE_STATUS != 0 )); then
+    if (( ENCODE_STATUS == 124 || ENCODE_STATUS == 137 )); then
+        printf 'FAIL The legacy HEVC encode timed out (status %s).\n' "$ENCODE_STATUS" >&2
+    else
+        printf 'FAIL The legacy HEVC encode exited with status %s.\n' "$ENCODE_STATUS" >&2
+    fi
     exit 1
 fi
 END_NS=$(date +%s%N)
