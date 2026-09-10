@@ -464,17 +464,25 @@ def analyze_timeline_evidence(
     selected_durations: list[float] = []
     missing_timing = 0
     for frame_index, frame in enumerate(observations):
-        # Coverage evidence may look slightly outside the requested boundaries so
-        # it can prove display continuity. Frame-population matching must not use
-        # that wider tolerance: FFmpeg -ss/-t scores frames whose timestamps are
-        # in [start,end), with only a tiny floating-point comparison epsilon.
-        if (
+        interval = frame_display_interval(observations, frame_index)
+        # Input-side accurate seeking can retain the frame already on screen at
+        # the requested start even when that frame's PTS is slightly earlier.
+        # libvmaf scores that boundary-overlapping frame. Select by display
+        # interval overlap so its sequence has an exact, evidence-backed timing
+        # mapping; do not use the wider gap tolerance to invent extra frames.
+        if interval is not None:
+            span_start, span_end = interval
+            if (
+                span_end <= window.start + FRAME_SELECTION_EPSILON_SECONDS
+                or span_start >= window.end - FRAME_SELECTION_EPSILON_SECONDS
+            ):
+                continue
+        elif (
             frame.pts + FRAME_SELECTION_EPSILON_SECONDS < window.start
             or frame.pts >= window.end - FRAME_SELECTION_EPSILON_SECONDS
         ):
             continue
         selected.append(frame)
-        interval = frame_display_interval(observations, frame_index)
         if interval is None:
             selected_intervals.append(None)
             selected_durations.append(0.0)
