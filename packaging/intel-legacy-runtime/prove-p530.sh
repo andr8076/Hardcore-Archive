@@ -62,6 +62,8 @@ REFERENCE="$TMP/reference.nv12"
 OUTPUT="$TMP/legacy-hevc.mkv"
 ENCODE_LOG="$TMP/legacy-encode.log"
 VAINFO_LOG="$TMP/vainfo.log"
+FFPROBE_LOG="$TMP/output-ffprobe.log"
+DECODE_LOG="$TMP/output-decode.log"
 HEVC_VAAPI_ENCODE_CAP=unknown
 
 heading() { printf '\n== %s ==\n' "$1"; }
@@ -239,15 +241,41 @@ printf 'Legacy encode elapsed_ms=%s\n' "$ELAPSED_MS"
 grep -E 'frame=.*(fps=|speed=)' "$ENCODE_LOG" | tail -n 1 || true
 
 heading 'Output verification'
-CODEC=$(legacy "$LEGACY_FFPROBE" -v error -select_streams v:0 -show_entries stream=codec_name -of default=nw=1:nk=1 "$OUTPUT")
+set +e
+CODEC=$("$MODERN_FFPROBE" -v error -select_streams v:0 \
+    -show_entries stream=codec_name -of default=nw=1:nk=1 "$OUTPUT" 2>"$FFPROBE_LOG")
+FFPROBE_STATUS=$?
+set -e
+if (( FFPROBE_STATUS != 0 )); then
+    printf 'FAIL Modern ffprobe could not inspect the legacy HEVC output (status %s).\n' "$FFPROBE_STATUS" >&2
+    tail -n 30 "$FFPROBE_LOG" >&2 || true
+    exit 1
+fi
 [[ $CODEC == hevc ]] || { printf 'FAIL Expected HEVC output, got: %s\n' "$CODEC" >&2; exit 1; }
-DURATION=$(legacy "$LEGACY_FFPROBE" -v error -show_entries format=duration -of default=nw=1:nk=1 "$OUTPUT")
+set +e
+DURATION=$("$MODERN_FFPROBE" -v error -show_entries format=duration \
+    -of default=nw=1:nk=1 "$OUTPUT" 2>>"$FFPROBE_LOG")
+DURATION_STATUS=$?
+set -e
+if (( DURATION_STATUS != 0 )); then
+    printf 'FAIL Modern ffprobe could not read the legacy HEVC duration (status %s).\n' "$DURATION_STATUS" >&2
+    tail -n 30 "$FFPROBE_LOG" >&2 || true
+    exit 1
+fi
 awk -v d="$DURATION" 'BEGIN { exit !(d >= 4.8 && d <= 5.2) }' || {
     printf 'FAIL Output duration is outside 4.8-5.2 seconds: %s\n' "$DURATION" >&2
     exit 1
 }
-run_bounded bash "$HERE/with-runtime.sh" "$RUNTIME" "$LEGACY_FFMPEG" \
-    -hide_banner -loglevel error -xerror -i "$OUTPUT" -map 0:v:0 -f null -
+set +e
+run_bounded "$MODERN_FFMPEG" -nostdin -hide_banner -loglevel error -xerror \
+    -i "$OUTPUT" -map 0:v:0 -f null - > /dev/null 2>"$DECODE_LOG"
+DECODE_STATUS=$?
+set -e
+if (( DECODE_STATUS != 0 )); then
+    printf 'FAIL Modern FFmpeg could not fully decode the legacy HEVC output (status %s).\n' "$DECODE_STATUS" >&2
+    tail -n 30 "$DECODE_LOG" >&2 || true
+    exit 1
+fi
 printf 'PASS codec=hevc duration=%s full_decode=ok\n' "$DURATION"
 
 heading 'Quality and software performance comparison'
