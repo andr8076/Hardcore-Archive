@@ -172,7 +172,7 @@ hardcore_video_raise_quality() {
     (( ${video_quality_retry_step:-0} > 0 )) || return 1
 
     case ${video_encoder:-} in
-        av1_vaapi|hevc_vaapi|av1_nvenc|hevc_nvenc|av1_qsv|hevc_qsv)
+        av1_vaapi|hevc_vaapi|av1_nvenc|hevc_nvenc|av1_qsv|hevc_qsv|hevc_qsv_legacy)
             current=${CAL_BEST_QUALITY:-}
             [[ $current =~ ^[1-9][0-9]*$ ]] || return 1
             next=$(python3 "$HARDCORE_ARCHIVE_VIDEO_QUALITY_HELPER" retry-quality \
@@ -184,7 +184,7 @@ hardcore_video_raise_quality() {
                 av1_vaapi) video_crf="CQP q_idx ${next} (final-quality retry)" ;;
                 hevc_vaapi) video_crf="CQP QP ${next} (final-quality retry)" ;;
                 av1_nvenc|hevc_nvenc) video_crf="CQ ${next} (final-quality retry)" ;;
-                av1_qsv|hevc_qsv) video_crf="ICQ ${next} (final-quality retry)" ;;
+                av1_qsv|hevc_qsv|hevc_qsv_legacy) video_crf="ICQ ${next} (final-quality retry)" ;;
             esac
             ;;
         hevc_videotoolbox)
