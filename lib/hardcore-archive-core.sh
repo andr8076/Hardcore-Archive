@@ -71,6 +71,7 @@ PROGRAM_NAME=${0##*/}
 SCRIPT_START_SECONDS=$SECONDS
 source "$(dirname -- "${BASH_SOURCE[0]}")/calibration-identity.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/timing.sh"
+source "$(dirname -- "${BASH_SOURCE[0]}")/video-encoder-capabilities.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/video-acceleration.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/media-policy.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/images.sh"
@@ -355,7 +356,8 @@ Video policy:
   --video-mode MODE        maximum, balanced, or fast. Default: balanced.
   --no-video-transcode     Store original videos bit-for-bit.
   --video-codec CODEC      av1 or hevc. Default: av1.
-  --video-encoder NAME     Force a specific FFmpeg encoder.
+  --video-encoder NAME     Force a proven encoder. libsvtav1/libx265 are
+                           explicit CPU choices and are never selected by AUTO.
   --video-parallel         Run video work beside LZMA2.
   --video-sequential       Finish video work before LZMA2.
   --video-no-scale         Never reduce large video resolution.
@@ -3391,75 +3393,41 @@ if (( IMAGE_COUNT > 0 )); then
 fi
 
 
-# HARDCORE_HARDWARE_ONLY_VIDEO_V1
+# HARDCORE_VIDEO_ENCODER_CLASS_POLICY_V1
 # HARDCORE_EXPLICIT_VAAPI_DEVICE_V1
 video_encoder_is_hardware() {
-    case "$1" in
-        av1_vaapi|av1_nvenc|av1_qsv|hevc_videotoolbox|hevc_vaapi|hevc_nvenc|hevc_qsv|hevc_qsv_legacy)
-            return 0 ;;
-        *)
-            return 1 ;;
-    esac
+    hardcore_video_encoder_auto_eligible "$1"
 }
 
 probe_parent_video_encoder() {
-    local relative='' selected='' input probe='' candidate expected actual
-    local -a command=() candidates=()
-    while IFS= read -r relative; do
-        [[ -n $relative ]] || continue
-        hardcore_media_list_contains "$VIDEO_SPECIAL_PRESERVE_LIST" "$relative" && continue
-        hardcore_media_list_contains "$VIDEO_SPECIAL_OMIT_LIST" "$relative" && continue
-        selected=$relative
-        break
-    done < "$VIDEO_LIST"
-    [[ -n $selected ]] || return 1
-    input="$SOURCE_PARENT/$selected"
-    probe=$(mktemp --suffix=.mkv)
-    [[ $VIDEO_CODEC == av1 ]] && expected=av1 || expected=hevc
-
+    local candidate
+    local -a candidates=()
     if [[ $VIDEO_CODEC == av1 ]]; then
         candidates=(av1_vaapi av1_nvenc av1_qsv)
     else
         candidates=(hevc_videotoolbox hevc_vaapi hevc_nvenc hevc_qsv)
     fi
     for candidate in "${candidates[@]}"; do
-        ffmpeg -hide_banner -encoders 2>/dev/null | grep -w "$candidate" >/dev/null || continue
-        command=(ffmpeg -hide_banner -v error -nostdin -y)
-        [[ $candidate == *_vaapi ]] && command+=( -init_hw_device "vaapi=va:${HARDCORE_ARCHIVE_VAAPI_DEVICE:-}" -filter_hw_device va )
-        command+=( -t 1 -i "$input" -map '0:V:0' -an -sn -dn )
-        case $candidate in
-            *_videotoolbox) command+=( -c:v "$candidate" -q:v 65 -pix_fmt nv12 ) ;;
-            *_vaapi) command+=( -vf 'format=nv12,hwupload' -c:v "$candidate" -rc_mode CQP -global_quality:v 33 ) ;;
-            *_nvenc) command+=( -c:v "$candidate" -gpu:v "${HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE:-0}" -cq:v 33 -preset:v p4 ) ;;
-            *_qsv) command+=( -c:v "$candidate" -global_quality:v 33 -preset:v balanced ) ;;
-        esac
-        command+=( -f matroska "$probe" )
-        if "${command[@]}" >/dev/null 2>&1; then
-            actual=$(ffprobe -v error -select_streams V:0 -show_entries stream=codec_name \
-                -of default=nw=1:nk=1 "$probe" 2>/dev/null | head -n1)
-            rm -f -- "$probe"
-            if [[ $actual == "$expected" ]]; then
-                VIDEO_ENCODER=$candidate
-                return 0
-            fi
+        if probe_hardware_encoder "$VIDEO_CODEC" "$candidate" "${HARDCORE_ARCHIVE_VAAPI_DEVICE:-}"; then
+            VIDEO_ENCODER=$candidate
+            return 0
         fi
-        rm -f -- "$probe"
+        [[ -z ${VIDEO_PROBE_ERROR:-} ]] || \
+            printf 'Automatic video candidate excluded after runtime probe: %s (%s).\n' "$candidate" "${VIDEO_PROBE_ERROR//$'\n'/ }" >&2
     done
-    rm -f -- "$probe"
     return 1
 }
 
-# Automatic video policy. Balanced keeps the existing hardware-first behavior
-# so video work can overlap the CPU-heavy LZMA process. Maximum prefers the
-# strongest available software encoder and runs sequentially unless explicitly
-# overridden. Fast keeps hardware-first behavior and parallel execution.
+# Automatic selection is hardware-only. Software encoders can enter this block
+# only through an explicit frontend/config selection that already passed the
+# runtime capability proof.
 if $VIDEO_TRANSCODE && (( VIDEO_TRANSCODE_COUNT > 0 )); then
+    VIDEO_ENCODER_CLASS=$(hardcore_video_encoder_class "$VIDEO_ENCODER" 2>/dev/null || true)
     case $VIDEO_MODE in
         maximum)
             if [[ -z $VIDEO_ENCODER ]]; then
-                probe_parent_video_encoder || die "Hardware video encoding is mandatory, but no compatible hardware encoder passed the real-file probe."
+                probe_parent_video_encoder || die "AUTO is hardware-only, but no compatible hardware encoder passed the runtime capability probe."
             fi
-            $VIDEO_PARALLEL_EXPLICIT || VIDEO_PARALLEL=true
             [[ $QUALITY_CHECK == auto ]] && QUALITY_CHECK=required
             ;;
         balanced)
@@ -3467,24 +3435,31 @@ if $VIDEO_TRANSCODE && (( VIDEO_TRANSCODE_COUNT > 0 )); then
                 if probe_parent_video_encoder; then
                     $VIDEO_PARALLEL_EXPLICIT || VIDEO_PARALLEL=true
                 else
-                    die "Hardware video encoding is mandatory, but the hardware probe failed."
+                    die "AUTO is hardware-only, but no hardware encoder passed the runtime capability probe."
                 fi
-            elif [[ $VIDEO_ENCODER == lib* ]]; then
-                $VIDEO_PARALLEL_EXPLICIT || VIDEO_PARALLEL=false
             fi
             ;;
         fast)
             [[ -z $VIDEO_ENCODER ]] && probe_parent_video_encoder || true
             if [[ -z $VIDEO_ENCODER ]]; then
-                die "Hardware video encoding is mandatory, but the hardware probe failed."
+                die "AUTO is hardware-only, but no hardware encoder passed the runtime capability probe."
             fi
             $VIDEO_PARALLEL_EXPLICIT || VIDEO_PARALLEL=true
             ;;
     esac
-    [[ -n $VIDEO_ENCODER ]] || die "Hardware video encoding is mandatory, but no hardware encoder could be selected."
-    video_encoder_is_hardware "$VIDEO_ENCODER" || die "Software/non-hardware video encoder '$VIDEO_ENCODER' is forbidden. Hardware encoding is mandatory."
-    $VIDEO_PARALLEL_EXPLICIT || VIDEO_PARALLEL=true
-    printf 'Hardware video encoder locked: %s\n' "$VIDEO_ENCODER"
+    [[ -n $VIDEO_ENCODER ]] || die "AUTO is hardware-only, but no hardware encoder could be selected. Choose a proven CPU encoder explicitly."
+    VIDEO_ENCODER_CLASS=$(hardcore_video_encoder_class "$VIDEO_ENCODER" 2>/dev/null || true)
+    [[ -n $VIDEO_ENCODER_CLASS ]] || die "Unknown or unsupported video encoder '$VIDEO_ENCODER'."
+    [[ $(hardcore_video_encoder_codec "$VIDEO_ENCODER") == "$VIDEO_CODEC" ]] || \
+        die "Video encoder '$VIDEO_ENCODER' does not match requested codec '$VIDEO_CODEC'."
+    if [[ $VIDEO_ENCODER_CLASS == software ]]; then
+        $VIDEO_PARALLEL_EXPLICIT || VIDEO_PARALLEL=false
+        printf 'Manual software video encoder locked: %s; AUTO remains hardware-only.\n' "$VIDEO_ENCODER"
+    else
+        $VIDEO_PARALLEL_EXPLICIT || VIDEO_PARALLEL=true
+        printf 'Hardware video encoder locked: %s\n' "$VIDEO_ENCODER"
+    fi
+    export HARDCORE_ARCHIVE_VIDEO_ENCODER_CLASS=$VIDEO_ENCODER_CLASS
 fi
 
 # Pick a persistent local working area. It is cleaned after success, but kept

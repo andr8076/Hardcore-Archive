@@ -132,7 +132,7 @@ vaapi_device_for_vendor() {
     return 1
 }
 encoder_matches_codec() {
-    case "$2:$1" in av1:av1_vaapi|av1:av1_nvenc|av1:av1_qsv|hevc:hevc_videotoolbox|hevc:hevc_vaapi|hevc:hevc_nvenc|hevc:hevc_qsv) return 0;; *) return 1;; esac
+    [[ $(hardcore_video_encoder_codec "$1" 2>/dev/null || true) == "$2" ]]
 }
 select_hardware_encoder() {
     local codec=$1 candidate

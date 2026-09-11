@@ -90,7 +90,7 @@ The strict fixtures are deliberately small and software-generated. FFV1 is used 
 - incomplete candidate/measurement rejection;
 - variable-frame-rate presentation timing and sustained-low-quality rejection.
 
-Passing this hosted CI lane demonstrates the CPU-side comparison, libvmaf models, timestamp/frame-evidence logic, sampling plan, and completed-output acceptance policy on standard GitHub Linux and macOS runners. It does **not** demonstrate vendor GPU drivers, hardware decoder/scaler behavior, VAAPI/NVENC/QSV/VideoToolbox encoder execution, device selection, or GPU-specific quality/performance. Those paths remain covered by policy/mocked tests in standard CI and require hardware-backed validation to prove real device behavior. The production hardware-only encoding policy is unchanged.
+Passing this hosted CI lane demonstrates the CPU-side comparison, libvmaf models, timestamp/frame-evidence logic, sampling plan, and completed-output acceptance policy on standard GitHub Linux and macOS runners. It does **not** demonstrate vendor GPU drivers, hardware decoder/scaler behavior, VAAPI/NVENC/QSV/VideoToolbox encoder execution, device selection, or GPU-specific quality/performance. Those paths remain covered by policy/mocked tests in standard CI and require hardware-backed validation to prove real device behavior. Production AUTO remains hardware-only; `libsvtav1` and `libx265` are capability-probed, explicit manual choices.
 
 The ordinary `video-quality-performance.py` and `video-final-quality.py` suites retain conditional real-media skips so contributors can still run the broader test suite without downloading the managed media runtime. Strict no-skip behavior is confined to the dedicated CI integration lane.
 

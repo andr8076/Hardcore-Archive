@@ -34,6 +34,8 @@ apply_scaling=${SCALING:-false}
 apply_denoise=${DENOISE:-false}
 TARGET_HEIGHT=1080
 DENOISE_FILTER='hqdn3d=1.2:1.0:3.0:2.5'
+AV1_PRESET=10
+HEVC_PRESET=ultrafast
 video_encoder=hevc_vaapi
 expected_codec=hevc
 video_preflight=true
@@ -42,6 +44,13 @@ preflight_min_size=134217728
 preflight_sample_seconds=12
 preflight_files=()
 measure_count=0
+HARDCORE_VIDEO_ENCODER_COMMAND=()
+HARDCORE_VIDEO_FFMPEG_ENCODER=''
+
+hardcore_video_encoder_command() {
+    HARDCORE_VIDEO_ENCODER_COMMAND=(ffmpeg)
+    HARDCORE_VIDEO_FFMPEG_ENCODER=$1
+}
 
 ffmpeg() {
     if [[ $1 == -version ]]; then
@@ -495,7 +504,7 @@ printf 'SELECTED:%s\n' "$video_encoder"
         output, _, _ = self.run_calibration(body, CURVE="av1-plateau")
         self.assertIn("SELECTED:hevc_vaapi", output)
 
-    def test_quality_off_and_unsupported_encoder_keep_existing_paths(self):
+    def test_quality_off_software_encoder_and_unsupported_paths(self):
         self.run_calibration(r'''
 calibrate_and_choose_video_codec
 [[ $CAL_SELECTED_VALIDATED == false ]]
@@ -503,6 +512,12 @@ calibrate_and_choose_video_codec
 ''', QUALITY_MODE="off")
         self.run_calibration(r'''
 video_encoder=libx265
+calibrate_and_choose_video_codec
+[[ $CAL_SELECTED_VALIDATED == true ]]
+[[ $CAL_QUALITY_LABEL == CRF ]]
+''')
+        self.run_calibration(r'''
+video_encoder=h264_nvenc
 calibrate_and_choose_video_codec
 [[ $CAL_SELECTED_VALIDATED == false ]]
 ''')

@@ -18,6 +18,7 @@ cp "$DOCTOR_CHECKS" "$TMP/app/lib/hardcore-archive-doctor-checks.sh"
 cp "$DOCTOR_REPORT" "$TMP/app/lib/hardcore-archive-doctor-report.sh"
 cp "$(dirname -- "$DOCTOR_LOADER")/runtime.sh" "$TMP/app/lib/runtime.sh"
 for module in \
+    video-encoder-capabilities.sh \
     hardcore-archive-doctor-video-fix.sh \
     hardcore-archive-doctor-video-auto.sh \
     hardcore-archive-doctor-encoder-menu.sh \
@@ -88,7 +89,12 @@ if [[ " $* " == *" -encoders "* ]]; then
     cat <<'OUT'
  V..... av1_vaapi AV1
  V..... hevc_vaapi HEVC
+ V..... libx265 HEVC software
 OUT
+    if [[ (${FAKE_NO_LIBSVTAV1:-0} != 1 || ${0##*/} != ffmpeg) &&
+          (${FAKE_NO_SYSTEM_LIBSVTAV1:-0} != 1 || ${0##*/} != system-ffmpeg) ]]; then
+        printf ' V..... libsvtav1 AV1 software\n'
+    fi
     exit 0
 fi
 if [[ " $* " == *" -filters "* ]]; then
@@ -96,11 +102,12 @@ if [[ " $* " == *" -filters "* ]]; then
     echo ' ... ssim VV->V'
     exit 0
 fi
-if [[ ${FAKE_HW_BROKEN:-0} == 1 ]]; then echo 'device initialization failed' >&2; exit 1; fi
+if [[ ${FAKE_HW_BROKEN:-0} == 1 && " $* " == *"_vaapi "* ]]; then echo 'device initialization failed' >&2; exit 1; fi
+if [[ ${FAKE_CPU_BROKEN:-0} == 1 && ( " $* " == *" libsvtav1 "* || " $* " == *" libx265 "* ) ]]; then echo 'software encoder failed' >&2; exit 1; fi
 if [[ ${FAKE_AV1_INCOMPAT:-0} == 1 && " $* " == *" av1_vaapi "* ]]; then echo 'device does not support AV1' >&2; exit 1; fi
 last=${!#}
 if [[ $last != - ]]; then
-    if [[ " $* " == *" av1_vaapi "* ]]; then printf 'av1\n' > "$last"; else printf 'hevc\n' > "$last"; fi
+    if [[ " $* " == *" av1_vaapi "* || " $* " == *" libsvtav1 "* ]]; then printf 'av1\n' > "$last"; else printf 'hevc\n' > "$last"; fi
 fi
 exit 0
 EOF_TOOL
@@ -111,6 +118,7 @@ last=${!#}
 cat -- "$last"
 EOF_TOOL
 chmod +x "$TMP/bin"/*
+cp "$TMP/bin/ffmpeg" "$TMP/bin/system-ffmpeg"
 
 : > "$TMP/source/movie.mp4"
 : > "$TMP/source/photo.jpg"
@@ -121,6 +129,8 @@ chmod +x "$TMP/bin"/*
 
 run_frontend() {
     HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/home/.config" PATH="$TMP/bin:$PATH" \
+    HARDCORE_ARCHIVE_USE_SYSTEM_FFMPEG=1 \
+    HARDCORE_ARCHIVE_SYSTEM_FFMPEG="$TMP/bin/system-ffmpeg" \
     HARDCORE_ARCHIVE_PACKAGE_MANAGER=pacman \
         bash "$TMP/app/hardcore-archive.sh" "$@"
 }
@@ -185,6 +195,7 @@ out=$(FAKE_HW_BROKEN=1 run_frontend --video-transcode "$TMP/source" 2>&1); rc=$?
 set -e
 (( rc == 3 )) || { printf 'All failed auto-codec candidates must fail doctor.\n%s\n' "$out" >&2; exit 1; }
 assert_contains "$out" 'No automatic hardware candidate passed its runtime probe'
+assert_contains "$out" 'Manual software encoders are available but are never automatic'
 
 # Explicit AV1 codec mode retains its existing HEVC compatibility fallback.
 out=$(FAKE_AV1_INCOMPAT=1 run_frontend --video-transcode --video-codec av1 "$TMP/source" 2>&1)
@@ -245,11 +256,35 @@ out=$(run_frontend --video-special-policy preserve "$TMP/source" 2>&1)
 assert_has "$out" 'ARG=--video-special-policy'
 assert_has "$out" 'ARG=preserve'
 
+# Proven CPU encoders are valid only after explicit selection and are routed
+# sequentially. AUTO above still failed instead of selecting either one.
+out=$(run_frontend --video-transcode --video-encoder libsvtav1 "$TMP/source" 2>&1)
+assert_has "$out" 'ARG=libsvtav1'
+assert_has "$out" 'ARG=--video-sequential'
+assert_contains "$out" 'Manual software video policy: AV1 via libsvtav1'
+assert_contains "$out" 'AUTO remains hardware-only'
+
+out=$(run_frontend --video-transcode --video-encoder libx265 "$TMP/source" 2>&1)
+assert_has "$out" 'ARG=libx265'
+assert_has "$out" 'ARG=hevc'
+
+# The managed/default FFmpeg may omit an optional CPU encoder while the saved
+# pre-activation host FFmpeg provides it. Selection retains that distinct path.
+out=$(FAKE_NO_LIBSVTAV1=1 run_frontend --video-transcode --video-encoder libsvtav1 "$TMP/source" 2>&1)
+assert_has "$out" 'ARG=libsvtav1'
+assert_contains "$out" 'Manual software video policy: AV1 via libsvtav1'
+
 set +e
-out=$(run_frontend --video-transcode --video-encoder libsvtav1 "$TMP/source" 2>&1); rc=$?
+out=$(FAKE_CPU_BROKEN=1 run_frontend --video-transcode --video-encoder libsvtav1 "$TMP/source" 2>&1); rc=$?
 set -e
-(( rc == 3 )) || { printf 'Software encoder should fail doctor.\n%s\n' "$out" >&2; exit 1; }
-assert_contains "$out" 'UNSUPPORTED'
-assert_contains "$out" 'software encoder fallback is forbidden'
+(( rc == 3 )) || { printf 'Broken explicit software encoder must fail doctor.\n%s\n' "$out" >&2; exit 1; }
+assert_contains "$out" 'did not pass its runtime capability probe'
+
+set +e
+out=$(FAKE_NO_LIBSVTAV1=1 FAKE_NO_SYSTEM_LIBSVTAV1=1 run_frontend --video-transcode --video-encoder libsvtav1 "$TMP/source" 2>&1); rc=$?
+set -e
+(( rc == 3 )) || { printf 'Unavailable explicit software encoder must fail doctor.\n%s\n' "$out" >&2; exit 1; }
+assert_contains "$out" 'No available FFmpeg runtime advertises the supported encoder'
+assert_lacks "$out" 'ARG=libx265'
 
 printf 'Frontend + doctor policy tests passed.\n'

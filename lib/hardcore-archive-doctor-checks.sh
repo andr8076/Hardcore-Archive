@@ -37,10 +37,12 @@ probe_indicates_av1_hardware_incompatibility() {
 }
 
 HARDWARE_VIDEO_ENCODER=''
+VIDEO_SELECTED_ENCODER=''
+VIDEO_SELECTED_ENCODER_CLASS=''
 VIDEO_CODEC_FELL_BACK=false
 check_video_capability() {
     [[ $VIDEO_ENABLED == true && $VIDEO_RELEVANT == true ]] || return 0
-    local encoder hevc_encoder av1_error
+    local encoder hevc_encoder av1_error encoder_class
     if ! check_version_command FFmpeg ffmpeg ffmpeg 'Video transcoding requires FFmpeg.' -version; then return 0; fi
     if ! check_version_command FFprobe ffprobe ffmpeg 'Video stream validation requires FFprobe.' -version; then return 0; fi
 
@@ -61,15 +63,31 @@ check_video_capability() {
     fi
 
     if [[ -n $REQUESTED_VIDEO_ENCODER ]]; then
-        if ! encoder_matches_codec "$REQUESTED_VIDEO_ENCODER" "$EFFECTIVE_VIDEO_CODEC"; then
-            add_failure UNSUPPORTED "FFmpeg encoder: $REQUESTED_VIDEO_ENCODER" "Only hardware $EFFECTIVE_VIDEO_CODEC encoders are allowed; software encoder fallback is forbidden." ffmpeg
+        encoder_class=$(hardcore_video_encoder_class "$REQUESTED_VIDEO_ENCODER" 2>/dev/null || true)
+        if [[ -z $encoder_class ]] || ! encoder_matches_codec "$REQUESTED_VIDEO_ENCODER" "$EFFECTIVE_VIDEO_CODEC"; then
+            add_failure UNSUPPORTED "FFmpeg encoder: $REQUESTED_VIDEO_ENCODER" \
+                "The requested encoder is not a supported $EFFECTIVE_VIDEO_CODEC hardware or manual software encoder." ffmpeg
             return 0
         fi
-        if ! encoder_available "$REQUESTED_VIDEO_ENCODER"; then
-            add_failure UNSUPPORTED "FFmpeg encoder: $REQUESTED_VIDEO_ENCODER" 'FFmpeg is installed but this hardware encoder is not compiled/exposed.' ffmpeg-gpu
+        if [[ $encoder_class == hardware ]] && ! encoder_available "$REQUESTED_VIDEO_ENCODER"; then
+            add_failure UNSUPPORTED "FFmpeg encoder: $REQUESTED_VIDEO_ENCODER" \
+                'FFmpeg is installed but the explicitly requested encoder is not compiled/exposed.' ffmpeg
             return 0
         fi
         encoder=$REQUESTED_VIDEO_ENCODER
+        if [[ $encoder_class == software ]]; then
+            if probe_software_encoder "$EFFECTIVE_VIDEO_CODEC" "$encoder"; then
+                VIDEO_SELECTED_ENCODER=$encoder
+                VIDEO_SELECTED_ENCODER_CLASS=software
+                HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID=$HARDCORE_VIDEO_CAPABILITY_RUNTIME_ID
+                export HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID
+                add_ready "Video software (manual-only): ${EFFECTIVE_VIDEO_CODEC^^} via $encoder (runtime probe passed)"
+            else
+                add_failure BROKEN "Software ${EFFECTIVE_VIDEO_CODEC^^} encode" \
+                    "The explicitly requested encoder is unavailable or did not pass its runtime capability probe: ${VIDEO_PROBE_ERROR//$'\n'/ }" ffmpeg
+            fi
+            return 0
+        fi
     else
         if ! encoder=$(select_hardware_encoder "$EFFECTIVE_VIDEO_CODEC"); then
             add_failure UNSUPPORTED "Hardware ${EFFECTIVE_VIDEO_CODEC^^} encoder" "FFmpeg is installed but exposes no supported hardware $EFFECTIVE_VIDEO_CODEC encoder." ffmpeg-gpu
@@ -79,6 +97,8 @@ check_video_capability() {
 
     if probe_hardware_encoder "$EFFECTIVE_VIDEO_CODEC" "$encoder"; then
         HARDWARE_VIDEO_ENCODER=$encoder
+        VIDEO_SELECTED_ENCODER=$encoder
+        VIDEO_SELECTED_ENCODER_CLASS=hardware
         add_ready "Video hardware: ${EFFECTIVE_VIDEO_CODEC^^} via $encoder"
         return 0
     fi
@@ -88,6 +108,8 @@ check_video_capability() {
         if hevc_encoder=$(select_hardware_encoder hevc 2>/dev/null) && [[ -n $hevc_encoder ]] && probe_hardware_encoder hevc "$hevc_encoder"; then
             EFFECTIVE_VIDEO_CODEC=hevc
             HARDWARE_VIDEO_ENCODER=$hevc_encoder
+            VIDEO_SELECTED_ENCODER=$hevc_encoder
+            VIDEO_SELECTED_ENCODER_CLASS=hardware
             VIDEO_CODEC_FELL_BACK=true
             add_info "GPU cannot encode AV1; using the only permitted fallback: HEVC via $hevc_encoder."
             add_ready "Video hardware: HEVC via $hevc_encoder"

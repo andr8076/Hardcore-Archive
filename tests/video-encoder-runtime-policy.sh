@@ -5,6 +5,7 @@ IFS=$'\n\t'
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 MENU="$ROOT/lib/hardcore-archive-doctor-encoder-menu.sh"
 RUNTIME="$ROOT/lib/hardcore-archive-doctor-encoder-runtime.sh"
+CAPABILITIES="$ROOT/lib/video-encoder-capabilities.sh"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/hardcore-encoder-runtime.XXXXXX")
 cleanup() { rm -rf -- "$TMP"; }
 trap cleanup EXIT
@@ -19,14 +20,15 @@ for required in "$MENU" "$RUNTIME"; do
 done
 bash -n "$MENU"
 bash -n "$RUNTIME"
-grep -Fq 'HARDCORE_ENCODER_PROBE_SIZE=${HARDCORE_ENCODER_PROBE_SIZE:-640x360}' "$RUNTIME"
-grep -Fq -- '-preset:v medium' "$RUNTIME"
+grep -Fq 'HARDCORE_VIDEO_PROBE_SIZE=${HARDCORE_VIDEO_PROBE_SIZE:-640x360}' "$CAPABILITIES"
+grep -Fq -- '-preset:v medium' "$CAPABILITIES"
 grep -Fq 'hardcore_encoder_has_controlling_tty' "$RUNTIME"
 grep -Fq '/dev/tty' "$RUNTIME"
 
 # The menu wraps these functions when sourced.
 check_video_capability() { return 0; }
 probe_hardware_encoder() { VIDEO_PROBE_ERROR=''; return 0; }
+source "$CAPABILITIES"
 source "$MENU"
 source "$RUNTIME"
 
@@ -40,6 +42,7 @@ encoder_available() {
 }
 # Collection behavior is tested independently from FFmpeg hardware availability.
 probe_hardware_encoder() { VIDEO_PROBE_ERROR=''; return 0; }
+probe_software_encoder() { VIDEO_PROBE_ERROR=''; return 0; }
 HARDCORE_ARCHIVE_RENDER_NODES='/dev/dri/renderD128'
 export HARDCORE_ARCHIVE_RENDER_NODES
 hardcore_encoder_menu_collect
@@ -53,7 +56,7 @@ hardcore_encoder_menu_collect
 [[ ${HARDCORE_ENCODER_MENU_ENCODER[0]} == av1_vaapi ]]
 [[ ${HARDCORE_ENCODER_MENU_ENCODER[1]} == hevc_vaapi ]]
 (( ${#HARDCORE_ENCODER_MENU_FAILED[@]} == 0 ))
-(( ${#HARDCORE_ENCODER_MENU_CPU[@]} == 4 ))
+(( ${#HARDCORE_ENCODER_MENU_CPU[@]} == 2 ))
 
 # The persistent logger can pipe stdout; prompt input must still work separately.
 EFFECTIVE_VIDEO_CODEC=auto
@@ -64,5 +67,11 @@ hardcore_encoder_menu_prompt <<< '2'
 [[ $EFFECTIVE_VIDEO_CODEC == hevc ]]
 [[ $REQUESTED_VIDEO_ENCODER == hevc_vaapi ]]
 [[ ${HARDCORE_ARCHIVE_VAAPI_DEVICE:-} == /dev/dri/renderD128 ]]
+
+EFFECTIVE_VIDEO_CODEC=auto
+REQUESTED_VIDEO_ENCODER=''
+hardcore_encoder_menu_prompt <<< '3'
+[[ $EFFECTIVE_VIDEO_CODEC == av1 ]]
+[[ $REQUESTED_VIDEO_ENCODER == libsvtav1 ]]
 
 printf 'Encoder runtime probe/backend/prompt tests passed.\n'

@@ -45,6 +45,9 @@ POWER_OFF_ON_SUCCESS=false
 # the smallest one that meets the same quality and minimum-savings requirements.
 # Set av1 or hevc to force a codec globally.
 VIDEO_CODEC=auto
+# Leave empty for hardware-only AUTO. Set libsvtav1 or libx265 to opt into a
+# capability-proven CPU encoder; software encoders are never automatic.
+VIDEO_ENCODER=
 VIDEO_MODE=balanced
 # Unusual media (HDR/Dolby Vision, alpha/interlaced/multi-video content,
 # data/cover-art streams, lossless/object audio, or sensitive subtitles) asks

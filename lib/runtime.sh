@@ -347,6 +347,15 @@ hardcore_runtime_prepare_video_toolchain() {
     root=${HARDCORE_ARCHIVE_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)}
     target=$(hardcore_runtime_target)
 
+    # Retain the host FFmpeg identity before a managed media runtime is placed
+    # first in PATH. A proven manual software encoder may use this binary when
+    # the VMAF-focused managed build does not contain that optional codec.
+    if [[ -z ${HARDCORE_ARCHIVE_SYSTEM_FFMPEG+x} ]]; then
+        HARDCORE_ARCHIVE_SYSTEM_FFMPEG=$(command -v ffmpeg 2>/dev/null || true)
+        HARDCORE_ARCHIVE_SYSTEM_FFPROBE=$(command -v ffprobe 2>/dev/null || true)
+        export HARDCORE_ARCHIVE_SYSTEM_FFMPEG HARDCORE_ARCHIVE_SYSTEM_FFPROBE
+    fi
+
     # Explicit escape hatch for developers and distro packages.
     if [[ ${HARDCORE_ARCHIVE_USE_SYSTEM_FFMPEG:-0} == 1 ]]; then
         command -v ffmpeg >/dev/null 2>&1 || return 0

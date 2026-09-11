@@ -52,7 +52,7 @@ Options:
   --av1             Use AV1. Default.
   --hevc, --h265    Use H.265/HEVC.
   --list-encoders   List all successfully probed encoders on this system and exit.
-  --encoder NAME    Force a specific encoder (e.g., hevc_videotoolbox). Bypasses auto-select.
+  --encoder NAME    Force a proven encoder. libsvtav1/libx265 are manual-only.
   --yes, -y         Accept automatic recommendations and confirmations.
   --replace         Replace each source after successful validation.
                     Non-MKV input becomes NAME.mkv; MKV keeps its name.
@@ -72,6 +72,13 @@ USAGE
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 [[ -n ${HARDCORE_ARCHIVE_VIDEO_QUALITY_FINAL_SH:-} && -f ${HARDCORE_ARCHIVE_VIDEO_QUALITY_FINAL_SH:-} ]] || die 'Completed-video quality runner is unavailable.'
 source "$HARDCORE_ARCHIVE_VIDEO_QUALITY_FINAL_SH"
+VIDEO_CAPABILITY_FILE=${HARDCORE_ARCHIVE_ROOT:+$HARDCORE_ARCHIVE_ROOT/lib/video-encoder-capabilities.sh}
+if [[ -z $VIDEO_CAPABILITY_FILE ]]; then
+    VIDEO_CAPABILITY_FILE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/video-encoder-capabilities.sh
+fi
+[[ -r $VIDEO_CAPABILITY_FILE ]] || \
+    die 'Video encoder capability registry is unavailable.'
+source "$VIDEO_CAPABILITY_FILE"
 has_command() { command -v "$1" >/dev/null 2>&1; }
 # HARDCORE_MEDIA_NESTED_FIX_V1
 [[ -n ${HARDCORE_ARCHIVE_ROOT:-} && -r $HARDCORE_ARCHIVE_ROOT/lib/intel-legacy-video.sh ]] && \
@@ -88,7 +95,12 @@ hardcore_video_encoder_command() {
         HARDCORE_VIDEO_ENCODER_COMMAND=("${HARDCORE_INTEL_LEGACY_COMMAND[@]}")
         HARDCORE_VIDEO_FFMPEG_ENCODER=hevc_qsv
     else
-        HARDCORE_VIDEO_ENCODER_COMMAND=(ffmpeg)
+        if [[ $(hardcore_video_encoder_class "$encoder" 2>/dev/null || true) == software ]]; then
+            hardcore_video_default_ffmpeg_command "$encoder" || return 1
+            HARDCORE_VIDEO_ENCODER_COMMAND=("${HARDCORE_VIDEO_CAPABILITY_COMMAND[@]}")
+        else
+            HARDCORE_VIDEO_ENCODER_COMMAND=(ffmpeg)
+        fi
         HARDCORE_VIDEO_FFMPEG_ENCODER=$encoder
     fi
 }
@@ -99,6 +111,7 @@ has_encoder() {
     "${HARDCORE_VIDEO_ENCODER_COMMAND[@]}" -hide_banner -encoders 2>/dev/null |
         awk -v wanted="$table_name" 'NF >= 2 && $2 == wanted {found=1} END {exit(found ? 0 : 1)}'
 }
+encoder_available() { has_encoder "$1"; }
 has_filter() { ffmpeg -hide_banner -filters 2>/dev/null | awk -v wanted="$1" 'NF >= 2 && $2 == wanted {found=1} END {exit(found ? 0 : 1)}'; }
 human_size() { numfmt --to=iec-i --suffix=B "$1" 2>/dev/null || printf '%s bytes' "$1"; }
 
@@ -123,28 +136,20 @@ prevent_sleep() {
 }
 
 probe_encoder_synthetic() {
-    local enc="$1"
-    shift 1
-    has_encoder "$enc" || return 1
-
-    local va_probe=()
-    [[ "$enc" == *_vaapi ]] && va_probe=("-init_hw_device" "vaapi=va:${HARDCORE_ARCHIVE_VAAPI_DEVICE:-}" "-filter_hw_device" "va" "-vf" "format=nv12,hwupload")
-
-    hardcore_video_encoder_command "$enc" || return 1
-    "${HARDCORE_VIDEO_ENCODER_COMMAND[@]}" -hide_banner -v error "${va_probe[@]}" \
-        -f lavfi -i color=c=black:s=1280x720:r=24 -vframes 1 \
-        -c:v "$HARDCORE_VIDEO_FFMPEG_ENCODER" "$@" -f null - >/dev/null 2>&1
+    local enc=$1 codec
+    codec=$(hardcore_video_encoder_codec "$enc") || return 1
+    probe_video_encoder_capability "$codec" "$enc"
 }
 
 do_list_encoders() {
     for required in ffmpeg; do has_command "$required" || die "Missing command: $required"; done
-    printf "Probing system for working encoders (Synthetic 720p Test)...\n\n"
+    printf "Probing system for working encoders (bounded synthetic encode test)...\n\n"
 
     printf "AV1 Encoders:\n"
     probe_encoder_synthetic av1_vaapi -rc_mode CQP -global_quality:v 33 && printf "  av1_vaapi          (AMD/Mesa VA-API Linux Hardware)\n"
     probe_encoder_synthetic av1_nvenc -cq:v 33 -preset:v p4 && printf "  av1_nvenc          (NVIDIA NVENC)\n"
     probe_encoder_synthetic av1_qsv -global_quality:v 33 -preset:v balanced && printf "  av1_qsv            (Intel QSV)\n"
-    has_encoder libsvtav1 && printf "  libsvtav1          (Software SVT-AV1)\n"
+    probe_encoder_synthetic libsvtav1 && printf "  libsvtav1          (Software SVT-AV1; manual only)\n"
 
     printf "\nHEVC / H.265 Encoders:\n"
     probe_encoder_synthetic hevc_videotoolbox -q:v 65 -pix_fmt nv12 && printf "  hevc_videotoolbox  (Apple VideoToolbox Hardware)\n"
@@ -153,7 +158,7 @@ do_list_encoders() {
     probe_encoder_synthetic hevc_qsv -global_quality:v 28 -preset:v balanced && printf "  hevc_qsv           (Intel QSV)\n"
     probe_encoder_synthetic hevc_qsv_legacy -load_plugin hevc_hw -low_power 0 -global_quality:v 28 -preset:v medium && \
         printf "  hevc_qsv_legacy    (Intel QSV, legacy Media SDK compatibility runtime)\n"
-    has_encoder libx265 && printf "  libx265            (Software x265)\n"
+    probe_encoder_synthetic libx265 && printf "  libx265            (Software x265; manual only)\n"
 
     printf "\nUsage: compress-video --encoder <name> INPUT\n"
 }
@@ -246,16 +251,18 @@ determine_encoder() {
         hardcore_video_encoder_command "$enc" || { printf "Unavailable runtime.\n"; return 1; }
         if "${HARDCORE_VIDEO_ENCODER_COMMAND[@]}" -hide_banner -v error -y -t 2 -i "$sample" \
             "${va_args[@]}" -map '0:V:0' -c:v "$HARDCORE_VIDEO_FFMPEG_ENCODER" "$@" \
-            -an -sn -f matroska "$test_out" >/dev/null 2>&1; then
+            -an -sn -f matroska "$test_out" >/dev/null 2>&1 && [[ -s $test_out ]]; then
 
             local actual_c
             actual_c=$(ffprobe -v error -select_streams V:0 -show_entries stream=codec_name -of default=nw=1:nk=1 "$test_out" 2>/dev/null | head -n1)
-            rm -f -- "$test_out"
 
-            if [[ "$actual_c" == "$expected" ]]; then
+            if [[ "$actual_c" == "$expected" ]] && \
+               ffmpeg -hide_banner -v error -nostdin -i "$test_out" -map '0:V:0' -f null - >/dev/null 2>&1; then
+                rm -f -- "$test_out"
                 printf "Success!\n"
                 return 0
             else
+                rm -f -- "$test_out"
                 printf "Failed (Output codec mismatch: %s).\n" "${actual_c:-None}"
                 return 1
             fi
@@ -269,20 +276,17 @@ determine_encoder() {
     printf '\nValidating encoder against real file constraints:\n  %s\n' "$(basename -- "$sample")"
 
     if [[ -n "$force_encoder" ]]; then
-        case "$force_encoder" in
-            av1_vaapi|av1_nvenc|av1_qsv|hevc_videotoolbox|hevc_vaapi|hevc_nvenc|hevc_qsv|hevc_qsv_legacy) ;;
-            *) die "Software/non-hardware video encoder '$force_encoder' is forbidden. Hardware encoding is mandatory." ;;
-        esac
+        hardcore_video_encoder_supported "$force_encoder" || \
+            die "Unknown or unsupported video encoder '$force_encoder'."
+        [[ $(hardcore_video_encoder_codec "$force_encoder") == "$codec_choice" ]] || \
+            die "Encoder '$force_encoder' does not match requested codec '$codec_choice'."
         apply_encoder "$force_encoder"
-        if [[ "$force_encoder" != libsvtav1 && "$force_encoder" != libx265 ]]; then
-            if [[ ${HARDCORE_ARCHIVE_HARDWARE_ENCODER_LOCKED:-} == "$force_encoder" ]]; then
-                printf "  Inherited hardware encoder %s already validated by parent.\n" "$force_encoder"
-            else
-                test_real_encode "$force_encoder" "$expected_codec" "${encoder_args[@]}" || die "Forced encoder '$force_encoder' crashed on the real file test."
-            fi
+        if [[ $(hardcore_video_encoder_class "$force_encoder") == hardware && \
+              ${HARDCORE_ARCHIVE_HARDWARE_ENCODER_LOCKED:-} == "$force_encoder" ]]; then
+            printf "  Inherited hardware encoder %s already validated by parent.\n" "$force_encoder"
         else
-            has_encoder "$force_encoder" || die "Software encoder '$force_encoder' is missing."
-            printf "  Forced software encoder %s accepted.\n" "$force_encoder"
+            test_real_encode "$force_encoder" "$expected_codec" "${encoder_args[@]}" || \
+                die "Explicit encoder '$force_encoder' failed the real-file capability test."
         fi
     else
         case "$codec_choice" in
@@ -1165,7 +1169,7 @@ calibration_has_plateau() {
 
 calibration_encoder_supported() {
     case "$1" in
-        av1_vaapi|hevc_vaapi|av1_nvenc|hevc_nvenc|av1_qsv|hevc_qsv|hevc_qsv_legacy) return 0 ;;
+        av1_vaapi|hevc_vaapi|av1_nvenc|hevc_nvenc|av1_qsv|hevc_qsv|hevc_qsv_legacy|libsvtav1|libx265) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -1176,6 +1180,8 @@ calibration_quality_range() {
         hevc_vaapi) printf '1 51 QP' ;;
         av1_nvenc|hevc_nvenc) printf '1 51 CQ' ;;
         av1_qsv|hevc_qsv|hevc_qsv_legacy) printf '1 51 ICQ' ;;
+        libsvtav1) printf '1 63 CRF' ;;
+        libx265) printf '1 51 CRF' ;;
         *) return 1 ;;
     esac
 }
@@ -1191,6 +1197,10 @@ calibration_apply_quality() {
             encoder_args=("-global_quality:v" "$quality" "-preset:v" "balanced") ;;
         hevc_qsv_legacy)
             encoder_args=("-load_plugin" "hevc_hw" "-low_power" "0" "-global_quality:v" "$quality" "-preset:v" "medium") ;;
+        libsvtav1)
+            encoder_args=("-crf:v" "$quality" "-preset:v" "$AV1_PRESET") ;;
+        libx265)
+            encoder_args=("-crf:v" "$quality" "-preset:v" "$HEVC_PRESET") ;;
         *) return 1 ;;
     esac
 }
@@ -1217,6 +1227,8 @@ calibration_candidate_command() {
         av1_nvenc|hevc_nvenc) CAL_COMMAND+=(-cq:v "$quality" -preset:v p4) ;;
         av1_qsv|hevc_qsv) CAL_COMMAND+=(-global_quality:v "$quality" -preset:v balanced) ;;
         hevc_qsv_legacy) CAL_COMMAND+=(-load_plugin hevc_hw -low_power 0 -global_quality:v "$quality" -preset:v medium) ;;
+        libsvtav1) CAL_COMMAND+=(-crf:v "$quality" -preset:v "$AV1_PRESET") ;;
+        libx265) CAL_COMMAND+=(-crf:v "$quality" -preset:v "$HEVC_PRESET") ;;
         *) return 1 ;;
     esac
     [[ -n "$CAL_FILTER_CHAIN" ]] && CAL_COMMAND+=(-vf "$CAL_FILTER_CHAIN")
@@ -1440,7 +1452,7 @@ calibrate_hardware_candidate_impl() {
     fi
     CAL_REQUIRED_SAVINGS=$required_savings
 
-    printf '\n%s hardware quality calibration\n' "${codec^^}"
+    printf '\n%s encoder quality calibration\n' "${codec^^}"
     printf '%s\n' '────────────────────────────────────────────────────────────'
     printf 'Encoder: %s | searching %s %s..%s for worst-sample VMAF >= %s.\n' \
         "$encoder" "$quality_label" "$low" "$high" "$quality_vmaf_threshold"
@@ -1605,6 +1617,7 @@ apply_calibrated_candidate() {
         hevc_vaapi) video_crf="CQP QP ${quality} (calibrated)" ;;
         av1_nvenc|hevc_nvenc) video_crf="CQ ${quality} (calibrated)" ;;
         av1_qsv|hevc_qsv|hevc_qsv_legacy) video_crf="ICQ ${quality} (calibrated)" ;;
+        libsvtav1|libx265) video_crf="CRF ${quality} (calibrated)" ;;
     esac
     printf 'Selected %s via %s at %s %s.\n' "${codec^^}" "$encoder" "$label" "$quality"
 }

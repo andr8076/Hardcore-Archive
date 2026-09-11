@@ -79,7 +79,8 @@ Transformations (enabled by default):
 Video policy:
   --video-codec CODEC       auto, av1, or hevc. Default: auto.
                             auto compares working hardware codecs per file.
-  --video-encoder NAME      Force a supported hardware FFmpeg encoder.
+  --video-encoder NAME      Force a supported encoder. libsvtav1 and libx265
+                            are manual-only CPU choices and never AUTO fallbacks.
   --video-parallel          Hardware video work runs beside LZMA2.
   --video-sequential        Accepted for compatibility; hardware policy overrides it.
   --video-mode MODE         maximum, balanced, or fast.
@@ -94,10 +95,11 @@ Video policy:
   --quality-check MODE      auto, off, or required.
   --no-video-manifest       Omit transformation manifest.
 
-auto compares every working hardware AV1/HEVC encoder exposed for this machine.
+auto compares every working hardware AV1/HEVC encoder proven on this machine.
 Each file keeps the smallest candidate that satisfies the same VMAF and minimum-
 savings policy. Explicit --video-codec or --video-encoder requests remain authoritative.
-Broken advertised hardware capabilities still fail closed instead of being ignored.
+Every encoder must pass a real encode/ffprobe/decode capability probe. CPU encoders
+are selectable only by explicit --video-encoder and never participate in AUTO.
 
 Source deletion:
   --remove-source           Delete source only after strong verification.
@@ -463,28 +465,40 @@ printf 'Self-check: READY for this source; all required capabilities passed.\n' 
 for info in "${INFO_LINES[@]}"; do printf '%s\n' "$info" >&2; done
 
 if [[ $VIDEO_ENABLED == true && $VIDEO_RELEVANT == true ]]; then
-    [[ -n $HARDWARE_VIDEO_ENCODER ]] || { printf 'Error: internal doctor error: video encoder was not resolved.\n' >&2; exit 3; }
     if [[ $EFFECTIVE_VIDEO_CODEC == auto ]]; then
+        [[ -n $HARDWARE_VIDEO_ENCODER ]] || { printf 'Error: internal doctor error: AUTO hardware encoder was not resolved.\n' >&2; exit 3; }
         [[ -n ${HARDWARE_VIDEO_PRIMARY_CODEC:-} ]] || { printf 'Error: internal doctor error: automatic video primary codec was not resolved.\n' >&2; exit 3; }
         FORWARDED+=(--video-codec "$HARDWARE_VIDEO_PRIMARY_CODEC" --video-encoder "$HARDWARE_VIDEO_ENCODER" --video-parallel)
         export HARDCORE_ARCHIVE_VIDEO_CODEC_AUTO=1
         export HARDCORE_ARCHIVE_AUTO_AV1_ENCODER="${HARDWARE_AV1_ENCODER:-}"
         export HARDCORE_ARCHIVE_AUTO_HEVC_ENCODER="${HARDWARE_HEVC_ENCODER:-}"
         export HARDCORE_ARCHIVE_HARDWARE_ENCODER_LOCKED="$HARDWARE_VIDEO_ENCODER"
+        export HARDCORE_ARCHIVE_VIDEO_ENCODER_CLASS=hardware
         export HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID="${HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID:-modern-default}"
         printf 'Hardware video policy: AUTO; AV1=%s; HEVC=%s; primary=%s via %s; runtime=%s; CPU fallback disabled.\n' \
             "${HARDWARE_AV1_ENCODER:-unavailable}" "${HARDWARE_HEVC_ENCODER:-unavailable}" \
             "${HARDWARE_VIDEO_PRIMARY_CODEC^^}" "$HARDWARE_VIDEO_ENCODER" \
             "$HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID" >&2
     else
-        FORWARDED+=(--video-codec "$EFFECTIVE_VIDEO_CODEC" --video-encoder "$HARDWARE_VIDEO_ENCODER" --video-parallel)
+        [[ -n ${VIDEO_SELECTED_ENCODER:-} ]] || { printf 'Error: internal doctor error: requested video encoder was not resolved.\n' >&2; exit 3; }
+        FORWARDED+=(--video-codec "$EFFECTIVE_VIDEO_CODEC" --video-encoder "$VIDEO_SELECTED_ENCODER")
         export HARDCORE_ARCHIVE_VIDEO_CODEC_AUTO=0
         export HARDCORE_ARCHIVE_AUTO_AV1_ENCODER=''
         export HARDCORE_ARCHIVE_AUTO_HEVC_ENCODER=''
         export HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID="${HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID:-modern-default}"
-        printf 'Hardware video policy: %s via %s; runtime=%s; CPU fallback disabled; video runs in parallel.\n' \
-            "${EFFECTIVE_VIDEO_CODEC^^}" "$HARDWARE_VIDEO_ENCODER" \
-            "$HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID" >&2
+        export HARDCORE_ARCHIVE_VIDEO_ENCODER_CLASS=${VIDEO_SELECTED_ENCODER_CLASS:-hardware}
+        if [[ $HARDCORE_ARCHIVE_VIDEO_ENCODER_CLASS == hardware ]]; then
+            FORWARDED+=(--video-parallel)
+            export HARDCORE_ARCHIVE_HARDWARE_ENCODER_LOCKED=$VIDEO_SELECTED_ENCODER
+            printf 'Hardware video policy: %s via %s; runtime=%s; CPU fallback disabled; video runs in parallel.\n' \
+                "${EFFECTIVE_VIDEO_CODEC^^}" "$VIDEO_SELECTED_ENCODER" \
+                "$HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID" >&2
+        else
+            FORWARDED+=(--video-sequential)
+            unset HARDCORE_ARCHIVE_HARDWARE_ENCODER_LOCKED 2>/dev/null || true
+            printf 'Manual software video policy: %s via %s; selected explicitly; AUTO remains hardware-only; video runs sequentially.\n' \
+                "${EFFECTIVE_VIDEO_CODEC^^}" "$VIDEO_SELECTED_ENCODER" >&2
+        fi
     fi
 fi
 

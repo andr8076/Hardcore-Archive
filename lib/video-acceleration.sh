@@ -53,6 +53,10 @@ hardcore_video_accel_prepare() {
 hardcore_video_accel_describe() {
     local encoder=$1 mode
     mode=$(hardcore_video_accel_mode "$encoder")
+    if [[ $(hardcore_video_encoder_class "$encoder" 2>/dev/null || true) == software ]]; then
+        printf 'Video preprocessing via %s: CPU decoding and filtering; manual software encoding.\n' "$encoder"
+        return 0
+    fi
     case "$mode" in
         gpu) printf 'Video preprocessing via %s: GPU decoding and GPU scaling/format conversion.\n' "$encoder" ;;
         hybrid) printf 'Video preprocessing via %s: GPU decoding, CPU filtering.\n' "$encoder" ;;

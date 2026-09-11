@@ -3,87 +3,30 @@
 # automatic codec policy, and encoder menu so it can correct backend probing
 # without changing the archive engine.
 
-# Use a conservative synthetic frame size accepted by modern AV1/HEVC hardware
-# encoders. 128x72 is below the minimum supported by some AMD HEVC VAAPI paths.
-HARDCORE_ENCODER_PROBE_SIZE=${HARDCORE_ENCODER_PROBE_SIZE:-640x360}
-
 probe_hardware_encoder() {
-    local codec=$1 encoder=$2 out err actual device='' quality=33 ignored_line
-    out=$(mktemp "${TMPDIR:-/tmp}/hardcore-archive-hw.XXXXXX.mkv") || return 1
-    err=$(mktemp "${TMPDIR:-/tmp}/hardcore-archive-hw.XXXXXX.err") || { rm -f -- "$out"; return 1; }
-    local -a cmd=(ffmpeg -hide_banner -v warning -nostdin -y)
-
-    case $encoder in
-        *_vaapi)
-            if [[ -n ${HARDCORE_ARCHIVE_VAAPI_DEVICE:-} ]]; then
-                device=$HARDCORE_ARCHIVE_VAAPI_DEVICE
-            elif [[ ${PLATFORM:-} == Linux ]]; then
-                case $encoder in
-                    av1_vaapi|hevc_vaapi)
-                        if linux_has_drm_vendor 0x1002; then device=$(vaapi_device_for_vendor 0x1002 || true)
-                        elif linux_has_drm_vendor 0x8086; then device=$(vaapi_device_for_vendor 0x8086 || true)
-                        else device=$(vaapi_device_for_vendor '' || true); fi
-                        ;;
-                esac
-            fi
-            [[ $encoder == hevc_vaapi ]] && quality=28
-            [[ -n $device ]] && cmd+=( -init_hw_device "vaapi=va:$device" ) || cmd+=( -init_hw_device 'vaapi=va:' )
-            cmd+=(
-                -filter_hw_device va
-                -f lavfi -i "color=c=black:s=${HARDCORE_ENCODER_PROBE_SIZE}:r=30" -t 0.25
-                -vf 'format=nv12,hwupload'
-                -c:v "$encoder" -rc_mode CQP -global_quality:v "$quality"
-            )
-            ;;
-        *_nvenc)
-            cmd+=(
-                -f lavfi -i "color=c=black:s=${HARDCORE_ENCODER_PROBE_SIZE}:r=30" -t 0.25
-                -c:v "$encoder" -gpu:v "${HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE:-0}" -cq:v 33 -preset:v p4
-            )
-            ;;
-        *_qsv)
-            # FFmpeg QSV names the balanced target-usage preset "medium".
-            cmd+=(
-                -f lavfi -i "color=c=black:s=${HARDCORE_ENCODER_PROBE_SIZE}:r=30" -t 0.25
-                -c:v "$encoder" -global_quality:v 33 -preset:v medium
-            )
-            ;;
-        *_videotoolbox)
-            cmd+=(
-                -f lavfi -i "color=c=black:s=${HARDCORE_ENCODER_PROBE_SIZE}:r=30" -t 0.25
-                -c:v "$encoder" -q:v 65 -pix_fmt nv12
-            )
-            ;;
-        *)
-            rm -f -- "$out" "$err"
-            VIDEO_PROBE_ERROR='unsupported encoder policy'
-            return 1
-            ;;
-    esac
-
-    cmd+=( -an -sn -dn -f matroska "$out" )
-    if ! "${cmd[@]}" >/dev/null 2>"$err"; then
-        VIDEO_PROBE_ERROR=$(tail -n 12 "$err" 2>/dev/null || true)
-        [[ -n $device ]] && VIDEO_PROBE_ERROR="VAAPI device $device: $VIDEO_PROBE_ERROR"
-        rm -f -- "$out" "$err"
-        return 1
-    fi
-
-    ignored_line=$(awk '/AVOption .* has not been used for any stream|No quality level set; using default/ {print; exit}' "$err" 2>/dev/null || true)
-    if [[ -n $ignored_line ]]; then
-        VIDEO_PROBE_ERROR="FFmpeg ignored required encoder quality options: $ignored_line"
-        rm -f -- "$out" "$err"
-        return 1
-    fi
-
-    actual=$(ffprobe -v error -select_streams V:0 -show_entries stream=codec_name -of default=nw=1:nk=1 "$out" 2>"$err" | head -n1 || true)
-    rm -f -- "$out" "$err"
-    [[ $actual == "$codec" ]] || {
-        VIDEO_PROBE_ERROR="Hardware probe produced codec '$actual' instead of '$codec'."
+    local codec=$1 encoder=$2 device=''
+    hardcore_video_encoder_auto_eligible "$encoder" || {
+        VIDEO_PROBE_ERROR="Encoder '$encoder' is software/manual-only and cannot participate in AUTO."
         return 1
     }
-    VIDEO_PROBE_ERROR=''
-    return 0
+    if [[ $encoder == *_vaapi ]]; then
+        if [[ -n ${HARDCORE_ARCHIVE_VAAPI_DEVICE:-} ]]; then
+            device=$HARDCORE_ARCHIVE_VAAPI_DEVICE
+        elif [[ ${PLATFORM:-} == Linux ]]; then
+            if linux_has_drm_vendor 0x1002; then device=$(vaapi_device_for_vendor 0x1002 || true)
+            elif linux_has_drm_vendor 0x8086; then device=$(vaapi_device_for_vendor 0x8086 || true)
+            else device=$(vaapi_device_for_vendor '' || true); fi
+        fi
+    fi
+    probe_video_encoder_capability "$codec" "$encoder" "$device"
+}
+
+probe_software_encoder() {
+    [[ $(hardcore_video_encoder_class "$2" 2>/dev/null || true) == software ]] || {
+        VIDEO_PROBE_ERROR="Encoder '$2' is not a supported software/manual-only encoder."
+        return 1
+    }
+    probe_video_encoder_capability "$@"
 }
 
 hardcore_encoder_backend_applicable() {
@@ -117,12 +60,15 @@ hardcore_encoder_menu_collect() {
     HARDCORE_ENCODER_MENU_LABEL=()
     HARDCORE_ENCODER_MENU_FAILED=()
     HARDCORE_ENCODER_MENU_CPU=()
+    HARDCORE_ENCODER_MENU_CPU_CODEC=()
+    HARDCORE_ENCODER_MENU_CPU_ENCODER=()
+    HARDCORE_ENCODER_MENU_CPU_FAILED=()
 
     command -v ffmpeg >/dev/null 2>&1 || return 0
 
     local encoder codec node label err
     local -a hardware=(av1_vaapi hevc_vaapi av1_nvenc hevc_nvenc av1_qsv hevc_qsv hevc_videotoolbox)
-    local -a software=(libaom-av1 librav1e libsvtav1 libx265)
+    local -a software=(libsvtav1 libx265)
     local -a nodes=()
     mapfile -t nodes < <(hardcore_encoder_render_nodes)
 
@@ -166,9 +112,14 @@ hardcore_encoder_menu_collect() {
     done
 
     for encoder in "${software[@]}"; do
-        encoder_available "$encoder" || continue
         codec=$(hardcore_encoder_codec "$encoder") || continue
-        HARDCORE_ENCODER_MENU_CPU+=("${codec^^} $encoder")
+        if probe_software_encoder "$codec" "$encoder"; then
+            HARDCORE_ENCODER_MENU_CPU+=("${codec^^} $encoder")
+            HARDCORE_ENCODER_MENU_CPU_CODEC+=("$codec")
+            HARDCORE_ENCODER_MENU_CPU_ENCODER+=("$encoder")
+        else
+            HARDCORE_ENCODER_MENU_CPU_FAILED+=("${codec^^} $encoder — ${VIDEO_PROBE_ERROR//$'\n'/ }")
+        fi
     done
 }
 
@@ -195,16 +146,16 @@ hardcore_encoder_menu_should_prompt() {
 }
 
 hardcore_encoder_menu_prompt() {
-    local choice index codec encoder device
+    local choice index codec encoder device hardware_count=${#HARDCORE_ENCODER_MENU_ENCODER[@]}
     local use_tty=false
     hardcore_encoder_has_controlling_tty && use_tty=true
 
     while true; do
         if $use_tty; then
-            printf 'Select GPU encoder [0=auto]: ' > /dev/tty
+            printf 'Select encoder [0=AUTO hardware]: ' > /dev/tty
             IFS= read -r choice < /dev/tty || return 1
         else
-            printf 'Select GPU encoder [0=auto]: ' >&2
+            printf 'Select encoder [0=AUTO hardware]: ' >&2
             IFS= read -r choice || return 1
         fi
         choice=${choice:-0}
@@ -215,14 +166,20 @@ hardcore_encoder_menu_prompt() {
         fi
         [[ $choice =~ ^[0-9]+$ ]] || { printf 'Enter a listed number.\n' >&2; continue; }
         index=$((choice-1))
-        if (( index < 0 || index >= ${#HARDCORE_ENCODER_MENU_ENCODER[@]} )); then
+        if (( index < 0 || index >= hardware_count + ${#HARDCORE_ENCODER_MENU_CPU_ENCODER[@]} )); then
             printf 'Enter a listed number.\n' >&2
             continue
         fi
-
-        codec=${HARDCORE_ENCODER_MENU_CODEC[index]}
-        encoder=${HARDCORE_ENCODER_MENU_ENCODER[index]}
-        device=${HARDCORE_ENCODER_MENU_DEVICE[index]}
+        if (( index < hardware_count )); then
+            codec=${HARDCORE_ENCODER_MENU_CODEC[index]}
+            encoder=${HARDCORE_ENCODER_MENU_ENCODER[index]}
+            device=${HARDCORE_ENCODER_MENU_DEVICE[index]}
+        else
+            index=$((index - hardware_count))
+            codec=${HARDCORE_ENCODER_MENU_CPU_CODEC[index]}
+            encoder=${HARDCORE_ENCODER_MENU_CPU_ENCODER[index]}
+            device=''
+        fi
         EFFECTIVE_VIDEO_CODEC=$codec
         REQUESTED_VIDEO_ENCODER=$encoder
         if [[ -n $device ]]; then
