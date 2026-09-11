@@ -125,6 +125,8 @@ fi
 child_rc=0
 child_diag=${diagnostics_dir:-$task_dir/diagnostics}
 mkdir -p -- "$child_diag"
+hardware_encoder_lock=''
+[[ ${HARDCORE_ARCHIVE_VIDEO_ENCODER_CLASS:-hardware} != hardware ]] || hardware_encoder_lock=$video_encoder
 child_command=(
     env
     HARDCORE_ARCHIVE_INHIBITED=1
@@ -137,7 +139,8 @@ child_command=(
     HARDCORE_ARCHIVE_CALIBRATION_NAMESPACE="$calibration_namespace"
     HARDCORE_ARCHIVE_DIAGNOSTIC_DIR="$child_diag"
     HARDCORE_ARCHIVE_LIVE_LOG="$log_file"
-    HARDCORE_ARCHIVE_HARDWARE_ENCODER_LOCKED="$video_encoder"
+    HARDCORE_ARCHIVE_HARDWARE_ENCODER_LOCKED="$hardware_encoder_lock"
+    HARDCORE_ARCHIVE_VIDEO_ENCODER_CLASS="${HARDCORE_ARCHIVE_VIDEO_ENCODER_CLASS:-hardware}"
     HARDCORE_ARCHIVE_INTEL_LEGACY_RUNTIME="${HARDCORE_ARCHIVE_INTEL_LEGACY_RUNTIME:-}"
     HARDCORE_ARCHIVE_INTEL_LEGACY_VA_DRIVER_DIR="${HARDCORE_ARCHIVE_INTEL_LEGACY_VA_DRIVER_DIR:-}"
     HARDCORE_ARCHIVE_INTEL_LEGACY_RUNTIME_ID="${HARDCORE_ARCHIVE_INTEL_LEGACY_RUNTIME_ID:-}"
@@ -153,7 +156,7 @@ child_command=(
     "$extracted" "$child_archive"
 )
 
-if [[ $video_transcode == true && -n $gpu_lock ]] && contains_direct_video; then
+if [[ $video_transcode == true && ${HARDCORE_ARCHIVE_VIDEO_ENCODER_CLASS:-hardware} == hardware && -n $gpu_lock ]] && contains_direct_video; then
     mkdir -p -- "$(dirname -- "$gpu_lock")"
     flock "$gpu_lock" "${child_command[@]}" >>"$log_file" 2>&1 || child_rc=$?
 else

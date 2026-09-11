@@ -82,6 +82,8 @@ check_video_capability() {
         HARDWARE_HEVC_ENCODER=hevc_qsv_legacy
         HARDWARE_VIDEO_ENCODER=hevc_qsv_legacy
         HARDWARE_VIDEO_PRIMARY_CODEC=hevc
+        VIDEO_SELECTED_ENCODER=hevc_qsv_legacy
+        VIDEO_SELECTED_ENCODER_CLASS=hardware
         add_ready 'Video hardware: HEVC via Intel legacy compatibility runtime'
         add_info 'Modern hardware AV1/HEVC probing found no usable candidate; validated legacy Media SDK compatibility runtime is being used.'
         add_info "Legacy runtime identity: ${HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID:-unknown}."

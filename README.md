@@ -44,7 +44,7 @@ lib/
     planner.sh                runtime component planning
     scheduler.sh              top-level runtime orchestration
     archive.sh                static archive-engine boundary
-    video.sh                  hardware-only video policy
+    video.sh                  capability-proven video policy
     images.sh                 image-policy boundary
     containers.sh             format-preserving application containers
     nested.sh                 recursive nested-archive policy
@@ -184,13 +184,29 @@ bash hardcore-archive.sh --doctor "/data/My folder"
 
 Normal create jobs perform the same check automatically. Repair commands are printed, never executed automatically.
 
-## Hardware video policy
+## Video encoder policy
 
-Video transcoding is hardware-only. CPU encoders are never accepted as dependency fallbacks.
+Every supported encoder must complete a bounded real encode, produce a non-empty
+file, report the expected codec through `ffprobe`, and survive a complete decode.
+An encoder name in `ffmpeg -encoders` is only an advertisement and is never
+sufficient by itself.
+
+`AUTO` is hardware-only. Working hardware encoders may participate in automatic
+AV1/HEVC selection. CPU encoders are never automatic fallbacks, but a proven
+`libsvtav1` or `libx265` encoder can be selected explicitly with
+`--video-encoder libsvtav1` or `--video-encoder libx265`. A failed explicit
+selection stops clearly instead of choosing another encoder.
+
+The VMAF-focused managed FFmpeg and an optional host software-encoder FFmpeg
+may coexist. If the managed build does not contain an explicitly requested CPU
+codec, Hardcore Archive can use the pre-activation host FFmpeg for that encoder
+only, while retaining the managed runtime for VMAF and validation. The selected
+binary has its own runtime identity and must pass the same real capability
+proof; it is not added to AUTO.
 
 `VIDEO_CODEC=auto` is the default. When both working AV1 and HEVC hardware encoders are available, Hardcore Archive checks them against the same VMAF floor and minimum-savings target for each video, then uses the candidate predicted to be smaller. `--video-codec av1` and `--video-codec hevc` remain explicit overrides.
 
-Automatic discovery uses real encode probes, not GPU-model rules or FFmpeg's encoder list alone. If AV1 is exposed by FFmpeg but fails on the installed hardware while HEVC works, only HEVC participates; the reverse also works. Excluded candidates and probe errors remain visible in diagnostics. No usable hardware candidate, missing VMAF, or a failed explicitly requested encoder still stops preflight rather than silently bypassing the quality or hardware-encoding requirements.
+Automatic discovery uses real encode probes, not GPU-model rules or FFmpeg's encoder list alone. If AV1 is exposed by FFmpeg but fails on the installed hardware while HEVC works, only HEVC participates; the reverse also works. Excluded candidates and bounded probe errors remain visible in diagnostics. If no hardware candidate works, AUTO stops and reports any proven manual CPU choices. Missing VMAF or a failed explicitly requested encoder also stops preflight rather than silently bypassing quality requirements.
 
 An isolated [Intel Media SDK compatibility runtime](packaging/intel-legacy-runtime/README.md)
 is available for legacy Intel Gen9 hardware where modern oneVPL no longer
@@ -213,6 +229,7 @@ setup.
 | AMD/Linux VAAPI | VAAPI decoding and `scale_vaapi` high-quality scaling/format conversion | VAAPI decoding with CPU filters, then CPU decoding and filters |
 | NVIDIA NVENC | CUDA decoding and `scale_cuda` Lanczos scaling/format conversion | CUDA decoding with CPU filters, then CPU decoding and filters |
 | Other hardware backends / unsupported source pixel formats | Existing CPU decoding and filtering | Existing hardware encoding policy |
+| Explicit `libsvtav1` / `libx265` | CPU decoding and filters | No GPU device is initialized |
 
 The accelerated paths support probed 8-bit and 10-bit 4:2:0 source formats. Actual calibration encodes exercise the decoder, filters and encoder together; merely having a filter or encoder listed by FFmpeg does not count as a successful probe. Missing GPU filters select CPU filtering directly. Denoising retains the existing CPU `hqdn3d` filter, using hardware decoding where possible. With quality checks disabled, GPU scaling is not selected because there is no quality comparison available.
 
@@ -222,7 +239,7 @@ The accelerated paths support probed 8-bit and 10-bit 4:2:0 source formats. Actu
 
 On a first comparison, a confirmed endpoint failure on one path seeds a single endpoint test on the next path before another binary search. A passing endpoint continues into the normal boundary search; an unmeasurable endpoint is not treated as a quality rejection. Existing per-path calibration records remain usable, so upgrading does not discard the measurements from a previous GPU test. A first comparison still does more work than a repeat run, especially when another path needs calibration.
 
-Sample encoding/probe failures, failed quality checks, and insufficient savings retry progressively more conservative preprocessing, ending with the existing CPU path. If an accelerated full encode or its decode audit fails, its partial output is removed and that encoder is recalibrated with CPU preprocessing before retrying. Full encoding is capped at three attempts per video across AUTO's two encoders. Hardware video encoding remains mandatory throughout; failure of the encoder itself never starts a software encoder.
+Sample encoding/probe failures, failed quality checks, and insufficient savings retry progressively more conservative preprocessing, ending with the existing CPU path. If an accelerated full encode or its decode audit fails, its partial output is removed and that encoder is recalibrated with CPU preprocessing before retrying. Full encoding is capped at three attempts per video across AUTO's two encoders. Failure of an AUTO hardware encoder never starts a software encoder. An explicitly selected software encoder stays software throughout its run.
 
 VMAF scoring, completed-output acceptance, and the final full decode audit remain on the CPU. The decode audit treats decoder errors as fatal (`-xerror`); completed-output VMAF is a separate fidelity gate. Stream-count, codec, duration, final size and archive verification checks remain in place. Acceleration does not change the VMAF target, timestamp alignment or audio/subtitle/attachment/chapter mappings.
 
@@ -240,7 +257,7 @@ The video log prints the selected preprocessing path, decision reuse, path compa
 
 ### Completed-output video quality validation
 
-Encoder calibration remains deliberately inexpensive: supported hardware encoders still search quality using the existing three 3-second calibration positions near 10%, 50%, and 90%. Those measurements choose an encoder/quality boundary; they **do not authorize the completed file by themselves**.
+Encoder calibration remains deliberately inexpensive: supported encoders search quality using the existing three 3-second calibration positions near 10%, 50%, and 90%. Those measurements choose an encoder/quality boundary; they **do not authorize the completed file by themselves**.
 
 After the real full encode and CPU decode audit, Hardcore Archive independently compares the **actual completed output** with the original using the same source-display-resolution VMAF policy described above. The reference is never shrunk to a reduced candidate resolution, timestamps use the existing AVTB/`PTS-STARTPTS`/nearest-frame policy, and both inputs use the same color/range normalization.
 
@@ -250,13 +267,13 @@ Acceptance is stricter than an average alone. The aggregate mean and **every sam
 
 Use `--video-quality-validation full` (or `VIDEO_QUALITY_VALIDATION=full`) to run VMAF across the completed timeline. Full mode is much slower: it can approach another full decode of both source and candidate plus VMAF computation and can produce a large temporary VMAF log. Sampled mode is intentionally cheaper: at the shipped maximum it scores at most about 64 seconds of non-overlapping source material, plus inexpensive packet-header inspection. **Sampled validation is sampled assurance, not a whole-video guarantee.** Full mode provides whole-timeline metric coverage, but VMAF itself remains a model of perceptual quality rather than proof that every viewer will judge every frame perfect.
 
-Missing, empty, malformed, or failed final measurements never authorize a transcode. A measured quality rejection may trigger the configured bounded higher-quality retry (`VIDEO_QUALITY_RETRIES`, default 1); the VMAF target is never lowered. If the backend cannot move to a higher-quality setting, retries are exhausted, validation still fails, or the higher-quality output no longer meets minimum savings, the original is preserved. Hardware-only encoding and the existing CPU/RAM resource limits remain unchanged.
+Missing, empty, malformed, or failed final measurements never authorize a transcode. A measured quality rejection may trigger the configured bounded higher-quality retry (`VIDEO_QUALITY_RETRIES`, default 1); the VMAF target is never lowered. If the backend cannot move to a higher-quality setting, retries are exhausted, validation still fails, or the higher-quality output no longer meets minimum savings, the original is preserved. AUTO remains hardware-only, and existing CPU/RAM resource limits remain unchanged.
 
 Completed-output resume identities and calibration/preprocessing identities include the final-validation mode, sampling bounds, local-quality criteria, and retry policy. Changing any of those settings invalidates older evidence instead of silently reusing a transcode accepted under a different policy.
 
 ### Calibration reuse
 
-Hardware calibration (VAAPI, NVENC and QSV) prioritizes compression at your configured `QUALITY_CHECK` target. A cached setting is a search hint until a compression boundary has been found for that exact video:
+Encoder calibration (VAAPI, NVENC, QSV, SVT-AV1 and x265) prioritizes compression at your configured `QUALITY_CHECK` target. A cached setting is a search hint until a compression boundary has been found for that exact video:
 
 - **First file in a group:** binary-search the encoder's quality range using three 3-second segments (one for clips shorter than 9 seconds), seeking the highest compression setting that passes every tested segment.
 - **Similar unfamiliar video or old cache entry:** test the hint on all three segments. If it passes, check the next compression step and search upward when that also passes; if it fails, search toward higher quality. A conservative group setting cannot simply become the final setting for an easier video. The search is bounded by the encoder's finite quality range; it does not sweep every setting.
@@ -292,17 +309,17 @@ Settings persist across runs and are shared with batch/nested children. Entries 
 Before an interactive create run starts, Hardcore Archive prints the available AV1/HEVC FFmpeg encoders in two groups:
 
 ```text
-GPU / hardware encoders (selectable)
-CPU / software encoders (informational only; GPU encoding is mandatory)
+GPU / hardware encoders (AUTO eligible)
+CPU / software encoders (manual selection only)
 ```
 
-Working hardware entries are real encode probes, not just names returned by `ffmpeg -encoders`. On Linux/VAAPI, entries are expanded per `/dev/dri/renderD*` device and include the GPU/device label when available. Choosing a VAAPI entry exports that exact render node through calibration, preflight, nested child work, and the final FFmpeg command, so selecting a GPU does not merely select the generic `av1_vaapi`/`hevc_vaapi` backend.
+Every displayed entry passed a real encode/codec/decode probe, not just a name check against `ffmpeg -encoders`. On Linux/VAAPI, hardware entries are expanded per `/dev/dri/renderD*` device and include the GPU/device label when available. Choosing a VAAPI entry exports that exact render node through calibration, preflight, nested child work, and the final FFmpeg command, so selecting a GPU does not merely select the generic `av1_vaapi`/`hevc_vaapi` backend.
 
-`[0] AUTO` keeps automatic AV1/HEVC competition. Selecting a numbered GPU entry locks that exact encoder (and, for VAAPI, render node). An explicit `--video-encoder NAME` also bypasses the prompt. `--yes`, non-interactive runs, and nested child runs do not block waiting for input.
+`[0] AUTO` keeps hardware-only AV1/HEVC competition. Selecting a numbered GPU entry locks that exact encoder (and, for VAAPI, render node). Selecting a CPU entry, or using explicit `--video-encoder libsvtav1|libx265`, opts into sequential software encoding for that run. `--yes`, non-interactive runs, and nested child runs do not block waiting for input.
 
 On FFmpeg 9 VA-API, Hardcore Archive explicitly uses CQP/global-quality rate control and treats warnings that the requested encoder option was ignored as a broken configuration. VMAF extraction reads `pooled_metrics.vmaf.mean` specifically.
 
-Video encoder selection belongs exclusively to the video/doctor policy modules and the checked-in engine. CPU fallback is forbidden at the engine level.
+Video encoder selection belongs exclusively to the video/doctor policy modules and the checked-in engine. Automatic CPU fallback is forbidden at the engine level; software encoding requires an explicit selection.
 
 Video transcoding is intentionally perceptually lossy, not bit-exact. The loss budget is now one direct quality-check value rather than a separate hardcoded VMAF constant:
 

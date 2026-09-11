@@ -18,12 +18,14 @@ check_video_capability() {
     fi
 
     [[ $VIDEO_ENABLED == true && $VIDEO_RELEVANT == true ]] || return 0
-    local encoder codec
+    local encoder codec encoder_class manual_summary=''
     local -a failed_probes=()
     HARDWARE_AV1_ENCODER=''
     HARDWARE_HEVC_ENCODER=''
     HARDWARE_VIDEO_ENCODER=''
     HARDWARE_VIDEO_PRIMARY_CODEC=''
+    VIDEO_SELECTED_ENCODER=''
+    VIDEO_SELECTED_ENCODER_CLASS=''
 
     if ! check_version_command FFmpeg ffmpeg ffmpeg 'Video transcoding requires FFmpeg.' -version; then return 0; fi
     if ! check_version_command FFprobe ffprobe ffmpeg 'Video stream validation requires FFprobe.' -version; then return 0; fi
@@ -41,16 +43,31 @@ check_video_capability() {
     add_ready 'Video quality filter: libvmaf'
 
     if [[ -n $REQUESTED_VIDEO_ENCODER ]]; then
-        if encoder_matches_codec "$REQUESTED_VIDEO_ENCODER" av1; then codec=av1
-        elif encoder_matches_codec "$REQUESTED_VIDEO_ENCODER" hevc; then codec=hevc
-        else
+        codec=$(hardcore_video_encoder_codec "$REQUESTED_VIDEO_ENCODER" 2>/dev/null || true)
+        encoder_class=$(hardcore_video_encoder_class "$REQUESTED_VIDEO_ENCODER" 2>/dev/null || true)
+        if [[ -z $codec || -z $encoder_class ]]; then
             add_failure UNSUPPORTED "FFmpeg encoder: $REQUESTED_VIDEO_ENCODER" \
-                'Only supported hardware AV1/HEVC encoders are allowed; software encoder fallback is forbidden.' ffmpeg
+                'The requested encoder is not a supported AV1/HEVC hardware or manual software encoder.' ffmpeg
             return 0
         fi
-        if ! encoder_available "$REQUESTED_VIDEO_ENCODER"; then
+        if [[ $encoder_class == hardware ]] && ! encoder_available "$REQUESTED_VIDEO_ENCODER"; then
             add_failure UNSUPPORTED "FFmpeg encoder: $REQUESTED_VIDEO_ENCODER" \
-                'FFmpeg is installed but this hardware encoder is not compiled/exposed.' ffmpeg-gpu
+                'FFmpeg is installed but the explicitly requested encoder is not compiled/exposed.' ffmpeg
+            return 0
+        fi
+        if [[ $encoder_class == software ]]; then
+            if ! probe_software_encoder "$codec" "$REQUESTED_VIDEO_ENCODER"; then
+                add_failure BROKEN "Software ${codec^^} encode" \
+                    "The explicitly requested encoder is unavailable or did not pass its runtime capability probe: ${VIDEO_PROBE_ERROR//$'\n'/ }" ffmpeg
+                return 0
+            fi
+            EFFECTIVE_VIDEO_CODEC=$codec
+            VIDEO_SELECTED_ENCODER=$REQUESTED_VIDEO_ENCODER
+            VIDEO_SELECTED_ENCODER_CLASS=software
+            HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID=$HARDCORE_VIDEO_CAPABILITY_RUNTIME_ID
+            export HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID
+            add_ready "Video software (manual-only): ${codec^^} via $REQUESTED_VIDEO_ENCODER (runtime probe passed)"
+            add_info 'Software video encoding is active only because it was explicitly selected; AUTO remains hardware-only.'
             return 0
         fi
         if ! probe_hardware_encoder "$codec" "$REQUESTED_VIDEO_ENCODER"; then
@@ -59,6 +76,8 @@ check_video_capability() {
             return 0
         fi
         HARDWARE_VIDEO_ENCODER=$REQUESTED_VIDEO_ENCODER
+        VIDEO_SELECTED_ENCODER=$REQUESTED_VIDEO_ENCODER
+        VIDEO_SELECTED_ENCODER_CLASS=hardware
         HARDWARE_VIDEO_PRIMARY_CODEC=$codec
         [[ $codec == av1 ]] && HARDWARE_AV1_ENCODER=$REQUESTED_VIDEO_ENCODER || HARDWARE_HEVC_ENCODER=$REQUESTED_VIDEO_ENCODER
         add_ready "Video hardware: ${codec^^} via $REQUESTED_VIDEO_ENCODER (explicit encoder)"
@@ -92,15 +111,23 @@ check_video_capability() {
         HARDWARE_VIDEO_PRIMARY_CODEC=hevc
         HARDWARE_VIDEO_ENCODER=$HARDWARE_HEVC_ENCODER
     elif (( ${#FAIL_TYPES[@]} == 0 )); then
+        if declare -p HARDCORE_ENCODER_MENU_CPU_ENCODER >/dev/null 2>&1 && \
+           ((${#HARDCORE_ENCODER_MENU_CPU_ENCODER[@]} > 0)); then
+            manual_summary=$(IFS=', '; printf '%s' "${HARDCORE_ENCODER_MENU_CPU_ENCODER[*]}")
+            add_info "Manual software encoders passed their real probes: $manual_summary. Select one explicitly with --video-encoder NAME."
+        fi
         if (( ${#failed_probes[@]} > 0 )); then
             add_failure BROKEN 'Hardware AV1/HEVC encoder' \
-                "No automatic hardware candidate passed its runtime probe: ${failed_probes[*]}" ffmpeg-gpu
+                "No automatic hardware candidate passed its runtime probe: ${failed_probes[*]}${manual_summary:+ Manual software encoders are available but are never automatic: $manual_summary.}" ffmpeg-gpu
         else
             add_failure UNSUPPORTED 'Hardware AV1/HEVC encoder' \
-                'VIDEO_CODEC=auto is enabled but FFmpeg exposes no supported hardware AV1 or HEVC encoder.' ffmpeg-gpu
+                "VIDEO_CODEC=auto has no usable hardware AV1/HEVC encoder.${manual_summary:+ Manual software encoders are available but are never automatic: $manual_summary.}" ffmpeg-gpu
         fi
         return 0
     fi
+
+    VIDEO_SELECTED_ENCODER=$HARDWARE_VIDEO_ENCODER
+    VIDEO_SELECTED_ENCODER_CLASS=hardware
 
     if [[ -n $HARDWARE_AV1_ENCODER && -n $HARDWARE_HEVC_ENCODER ]]; then
         add_info "Automatic video competition: AV1 ($HARDWARE_AV1_ENCODER) vs HEVC ($HARDWARE_HEVC_ENCODER) per file."

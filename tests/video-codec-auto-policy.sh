@@ -13,6 +13,7 @@ DOCTOR_BASE="$ROOT/lib/hardcore-archive-doctor-base.sh"
 DOCTOR_CHECKS="$ROOT/lib/hardcore-archive-doctor-checks.sh"
 DOCTOR_FIX="$ROOT/lib/hardcore-archive-doctor-video-fix.sh"
 DOCTOR_AUTO="$ROOT/lib/hardcore-archive-doctor-video-auto.sh"
+CAPABILITIES="$ROOT/lib/video-encoder-capabilities.sh"
 
 for f in "$POLICY" "$BASE_PATCH" "$AUTO_PATCH" "$DOCTOR_BASE" "$DOCTOR_CHECKS" "$DOCTOR_FIX" "$DOCTOR_AUTO"; do
     [[ -f $f ]] || { printf 'Missing auto-codec test dependency: %s\n' "$f" >&2; exit 1; }
@@ -41,6 +42,8 @@ VIDEO_PREFLIGHT_ENABLED=true
 QUALITY_CHECK_EFFECTIVE=auto
 EFFECTIVE_VIDEO_CODEC=auto
 REQUESTED_VIDEO_ENCODER=''
+# shellcheck source=/dev/null
+source "$CAPABILITIES"
 # shellcheck source=/dev/null
 source "$DOCTOR_BASE"
 # shellcheck source=/dev/null
@@ -142,5 +145,32 @@ BROKEN_CODEC=av1
 check_video_capability
 (( ${#FAIL_TYPES[@]} == 1 ))
 [[ ${FAIL_TYPES[0]} == BROKEN && -z $HARDWARE_VIDEO_ENCODER ]]
+
+# Software encoders are supported only as explicit manual selections. They can
+# never satisfy the AUTO hardware invariant.
+! hardcore_video_encoder_auto_eligible libsvtav1
+! hardcore_video_encoder_auto_eligible libx265
+[[ $(hardcore_video_encoder_class libsvtav1) == software ]]
+[[ $(hardcore_video_encoder_class libx265) == software ]]
+probe_software_encoder() { VIDEO_PROBE_ERROR=''; return 0; }
+for manual in libsvtav1 libx265; do
+    reset_auto_doctor
+    REQUESTED_VIDEO_ENCODER=$manual
+    check_video_capability
+    [[ $VIDEO_SELECTED_ENCODER == "$manual" ]]
+    [[ $VIDEO_SELECTED_ENCODER_CLASS == software ]]
+    [[ -z $HARDWARE_VIDEO_ENCODER && -z $HARDWARE_AV1_ENCODER && -z $HARDWARE_HEVC_ENCODER ]]
+    [[ ${READY_LINES[*]} == *'manual-only'* ]]
+done
+
+# P530-style result: all advertised hardware probes fail while both CPU probes
+# pass. AUTO remains unresolved and reports the manual choices without using one.
+reset_auto_doctor
+REQUESTED_VIDEO_ENCODER=''
+BROKEN_CODEC=both
+HARDCORE_ENCODER_MENU_CPU_ENCODER=(libsvtav1 libx265)
+check_video_capability
+[[ -z $VIDEO_SELECTED_ENCODER && -z $HARDWARE_VIDEO_ENCODER ]]
+[[ ${FAIL_DETAILS[0]} == *'Manual software encoders are available but are never automatic'* ]]
 
 printf 'Automatic AV1/HEVC policy tests passed.\n'

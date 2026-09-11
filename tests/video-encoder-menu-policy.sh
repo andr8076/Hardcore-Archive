@@ -4,6 +4,7 @@ IFS=$'\n\t'
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 MENU="$ROOT/lib/hardcore-archive-doctor-encoder-menu.sh"
+CAPABILITIES="$ROOT/lib/video-encoder-capabilities.sh"
 VAAPI_PATCH="$ROOT/lib/hardcore-archive-vaapi-device.py"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/hardcore-encoder-menu-test.XXXXXX")
 cleanup() { rm -rf -- "$TMP"; }
@@ -14,7 +15,7 @@ trap cleanup EXIT
 bash -n "$MENU"
 python3 -m py_compile "$VAAPI_PATCH"
 grep -Fq 'vaapi=va:$device' "$MENU"
-grep -Fq 'CPU / software encoders (detected, not selectable: GPU encoding is mandatory)' "$MENU"
+grep -Fq 'CPU / software encoders (manual selection only)' "$MENU"
 grep -Fq 'HARDCORE_ARCHIVE_VAAPI_DEVICE=$device' "$MENU"
 
 mkdir -p "$TMP/bin"
@@ -29,6 +30,7 @@ export PATH
 # The menu module wraps these doctor functions when sourced.
 check_video_capability() { return 0; }
 probe_hardware_encoder() { VIDEO_PROBE_ERROR=''; return 0; }
+source "$CAPABILITIES"
 # shellcheck source=/dev/null
 source "$MENU"
 
@@ -40,6 +42,7 @@ encoder_available() {
     esac
 }
 probe_hardware_encoder() { VIDEO_PROBE_ERROR=''; return 0; }
+probe_software_encoder() { VIDEO_PROBE_ERROR=''; return 0; }
 
 HARDCORE_ARCHIVE_RENDER_NODES='/dev/dri/renderD128:/dev/dri/renderD129'
 export HARDCORE_ARCHIVE_RENDER_NODES
@@ -56,7 +59,7 @@ hardcore_encoder_menu_collect
 }
 
 menu_output=$(hardcore_encoder_menu_display 2>&1)
-grep -Fq 'GPU / hardware encoders (selectable)' <<< "$menu_output"
+grep -Fq 'GPU / hardware encoders (AUTO eligible)' <<< "$menu_output"
 grep -Fq '[0] AUTO' <<< "$menu_output"
 grep -Fq 'av1_vaapi' <<< "$menu_output"
 grep -Fq '/dev/dri/renderD128' <<< "$menu_output"
@@ -71,5 +74,11 @@ hardcore_encoder_menu_prompt <<< '1'
 [[ $EFFECTIVE_VIDEO_CODEC == av1 ]]
 [[ $REQUESTED_VIDEO_ENCODER == av1_vaapi ]]
 [[ ${HARDCORE_ARCHIVE_VAAPI_DEVICE:-} == /dev/dri/renderD128 ]]
+
+EFFECTIVE_VIDEO_CODEC=auto
+REQUESTED_VIDEO_ENCODER=''
+hardcore_encoder_menu_prompt <<< '6'
+[[ $EFFECTIVE_VIDEO_CODEC == av1 ]]
+[[ $REQUESTED_VIDEO_ENCODER == libsvtav1 ]]
 
 printf 'Interactive GPU encoder menu tests passed.\n'

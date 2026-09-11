@@ -134,6 +134,39 @@ printf 'FULL:'; printf '%q ' "${command[@]}"; printf '\n'
                 self.assertIn("-map_metadata", full)
                 self.assertIn("-map_chapters", full)
 
+    def test_software_encoders_use_cpu_pipeline_for_calibration_and_full_encode(self):
+        for encoder, codec, preset in (("libsvtav1", "av1", "10"),
+                                       ("libx265", "hevc", "ultrafast")):
+            with self.subTest(encoder=encoder):
+                output, _ = self.run_shell(r'''
+hardcore_video_accel_prepare "$ENCODER"
+calibration_candidate_command "$ENCODER" 24 3 3 "$TEST_ROOT/sample.mkv"
+printf 'SAMPLE:'; printf '%q ' "${CAL_COMMAND[@]}"; printf '\n'
+video_encoder=$ENCODER
+encoder_args=(-crf:v 24 -preset:v "$PRESET")
+audio_args=(-c:a copy)
+temporary="$TEST_ROOT/output.mkv"
+hardcore_video_build_full_command
+printf 'FULL:'; printf '%q ' "${command[@]}"; printf '\n'
+''', ENCODER=encoder, PRESET=preset, AV1_PRESET=10, HEVC_PRESET="ultrafast",
+                                             SCALING="true", DENOISE="true")
+                sample = shlex.split(next(x[7:] for x in output.splitlines() if x.startswith("SAMPLE:")))
+                full = shlex.split(next(x[5:] for x in output.splitlines() if x.startswith("FULL:")))
+                for command in (sample, full):
+                    encoder_option = "-c:v" if command is sample else "-c:v:0"
+                    self.assertEqual(command[command.index(encoder_option) + 1], encoder)
+                    self.assertNotIn("-hwaccel", command)
+                    self.assertNotIn("-init_hw_device", command)
+                    self.assertNotIn("-gpu:v", command)
+                    graph_option = "-vf" if command is sample else "-filter:v:0"
+                    graph = command[command.index(graph_option) + 1]
+                    self.assertIn("hqdn3d", graph)
+                    self.assertIn("scale=-2:1080:flags=lanczos", graph)
+                for stream in ("0:0", "0:a?", "0:s?", "0:d?", "0:t?"):
+                    self.assertIn(stream, full)
+                self.assertIn("-map_metadata", full)
+                self.assertIn("-map_chapters", full)
+
     def test_gpu_scaler_failure_retries_hardware_decode_with_cpu_filters(self):
         output, commands = self.run_shell(FAIL_MODE="gpu")
         self.assertIn("RESULT:0:18:hybrid", output)
@@ -417,12 +450,22 @@ printf 'KEY:%s\n' "$CAL_FILE_CACHE_FILE"
 
     def test_nvenc_capability_probe_uses_selected_cuda_device(self):
         probe_module = ROOT / "lib/hardcore-archive-doctor-encoder-runtime.sh"
-        _, commands = self.run_shell("source " + shlex.quote(str(probe_module)) + r'''
+        capability_module = ROOT / "lib/video-encoder-capabilities.sh"
+        _, commands = self.run_shell("source " + shlex.quote(str(capability_module)) +
+                                     "\nsource " + shlex.quote(str(probe_module)) + r'''
+hardcore_video_command_advertises_encoder() { return 0; }
 ffprobe() { printf 'hevc\n'; }
+hardcore_video_probe_run_bounded() { shift; "$@"; }
+eval "$(declare -f ffmpeg | sed '1s/ffmpeg/base_probe_ffmpeg/')"
+ffmpeg() {
+    [[ ${!#} != - ]] || return 0
+    base_probe_ffmpeg "$@"
+}
 probe_hardware_encoder hevc hevc_nvenc
 ''', HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE=2)
-        self.assertEqual(len(commands), 1)
-        self.assertEqual(commands[0][commands[0].index("-gpu:v") + 1], "2")
+        encode_commands = [command for command in commands if "-c:v" in command]
+        self.assertEqual(len(encode_commands), 1)
+        self.assertEqual(encode_commands[0][encode_commands[0].index("-gpu:v") + 1], "2")
 
     def test_resume_keys_change_with_preprocessing_policy_and_cuda_device(self):
         core = (ROOT / "lib/hardcore-archive-core.sh").read_text()

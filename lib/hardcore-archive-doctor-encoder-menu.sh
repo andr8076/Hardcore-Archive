@@ -14,6 +14,9 @@ declare -a HARDCORE_ENCODER_MENU_DEVICE=()
 declare -a HARDCORE_ENCODER_MENU_LABEL=()
 declare -a HARDCORE_ENCODER_MENU_FAILED=()
 declare -a HARDCORE_ENCODER_MENU_CPU=()
+declare -a HARDCORE_ENCODER_MENU_CPU_CODEC=()
+declare -a HARDCORE_ENCODER_MENU_CPU_ENCODER=()
+declare -a HARDCORE_ENCODER_MENU_CPU_FAILED=()
 
 probe_hardware_encoder() {
     local codec=$1 encoder=$2
@@ -56,13 +59,7 @@ probe_hardware_encoder() {
 }
 
 hardcore_encoder_codec() {
-    case "$1" in
-        av1_*) printf av1 ;;
-        hevc_*) printf hevc ;;
-        libaom-av1|librav1e|libsvtav1) printf av1 ;;
-        libx265) printf hevc ;;
-        *) return 1 ;;
-    esac
+    hardcore_video_encoder_codec "$1"
 }
 
 hardcore_encoder_backend_label() {
@@ -125,12 +122,15 @@ hardcore_encoder_menu_collect() {
     HARDCORE_ENCODER_MENU_LABEL=()
     HARDCORE_ENCODER_MENU_FAILED=()
     HARDCORE_ENCODER_MENU_CPU=()
+    HARDCORE_ENCODER_MENU_CPU_CODEC=()
+    HARDCORE_ENCODER_MENU_CPU_ENCODER=()
+    HARDCORE_ENCODER_MENU_CPU_FAILED=()
 
     command -v ffmpeg >/dev/null 2>&1 || return 0
 
     local encoder codec node label err
     local -a hardware=(av1_vaapi hevc_vaapi av1_nvenc hevc_nvenc av1_qsv hevc_qsv hevc_videotoolbox)
-    local -a software=(libaom-av1 librav1e libsvtav1 libx265)
+    local -a software=(libsvtav1 libx265)
     local -a nodes=()
     mapfile -t nodes < <(hardcore_encoder_render_nodes)
 
@@ -172,9 +172,14 @@ hardcore_encoder_menu_collect() {
     done
 
     for encoder in "${software[@]}"; do
-        encoder_available "$encoder" || continue
         codec=$(hardcore_encoder_codec "$encoder") || continue
-        HARDCORE_ENCODER_MENU_CPU+=("${codec^^} $encoder")
+        if probe_software_encoder "$codec" "$encoder"; then
+            HARDCORE_ENCODER_MENU_CPU+=("${codec^^} $encoder")
+            HARDCORE_ENCODER_MENU_CPU_CODEC+=("$codec")
+            HARDCORE_ENCODER_MENU_CPU_ENCODER+=("$encoder")
+        else
+            HARDCORE_ENCODER_MENU_CPU_FAILED+=("${codec^^} $encoder — ${VIDEO_PROBE_ERROR//$'\n'/ }")
+        fi
     done
 }
 
@@ -182,7 +187,7 @@ hardcore_encoder_menu_display() {
     local i
     printf '\nFFmpeg AV1/HEVC encoder inventory\n' >&2
     printf '%s\n' '════════════════════════════════════════════════════════════' >&2
-    printf 'GPU / hardware encoders (selectable)\n' >&2
+    printf 'GPU / hardware encoders (AUTO eligible)\n' >&2
     printf '  [0] AUTO — let Hardcore Archive choose/compare working GPU encoders\n' >&2
     if ((${#HARDCORE_ENCODER_MENU_ENCODER[@]} == 0)); then
         printf '  none passed the real hardware probe\n' >&2
@@ -198,11 +203,19 @@ hardcore_encoder_menu_display() {
         for i in "${HARDCORE_ENCODER_MENU_FAILED[@]}"; do printf '  - %s\n' "$i" >&2; done
     fi
 
-    printf '\nCPU / software encoders (detected, not selectable: GPU encoding is mandatory)\n' >&2
+    printf '\nCPU / software encoders (manual selection only)\n' >&2
     if ((${#HARDCORE_ENCODER_MENU_CPU[@]} == 0)); then
-        printf '  none detected\n' >&2
+        printf '  none passed the real software probe\n' >&2
     else
-        for i in "${HARDCORE_ENCODER_MENU_CPU[@]}"; do printf '  - %s\n' "$i" >&2; done
+        for ((i=0; i<${#HARDCORE_ENCODER_MENU_CPU_ENCODER[@]}; i++)); do
+            printf '  [%s] %-4s %-20s software / CPU\n' \
+                "$((1 + ${#HARDCORE_ENCODER_MENU_ENCODER[@]} + i))" \
+                "${HARDCORE_ENCODER_MENU_CPU_CODEC[i]^^}" "${HARDCORE_ENCODER_MENU_CPU_ENCODER[i]}" >&2
+        done
+    fi
+    if ((${#HARDCORE_ENCODER_MENU_CPU_FAILED[@]} > 0)); then
+        printf '\nCPU encoders exposed by FFmpeg but failing the real probe\n' >&2
+        for i in "${HARDCORE_ENCODER_MENU_CPU_FAILED[@]}"; do printf '  - %s\n' "$i" >&2; done
     fi
     printf '%s\n' '════════════════════════════════════════════════════════════' >&2
 }
@@ -220,9 +233,9 @@ hardcore_encoder_menu_should_prompt() {
 }
 
 hardcore_encoder_menu_prompt() {
-    local choice index codec encoder device
+    local choice index codec encoder device hardware_count=${#HARDCORE_ENCODER_MENU_ENCODER[@]}
     while true; do
-        printf 'Select GPU encoder [0=auto]: ' >&2
+        printf 'Select encoder [0=AUTO hardware]: ' >&2
         IFS= read -r choice || return 1
         choice=${choice:-0}
         if [[ $choice == 0 ]]; then
@@ -231,13 +244,20 @@ hardcore_encoder_menu_prompt() {
         fi
         [[ $choice =~ ^[0-9]+$ ]] || { printf 'Enter a listed number.\n' >&2; continue; }
         index=$((choice-1))
-        if (( index < 0 || index >= ${#HARDCORE_ENCODER_MENU_ENCODER[@]} )); then
+        if (( index < 0 || index >= hardware_count + ${#HARDCORE_ENCODER_MENU_CPU_ENCODER[@]} )); then
             printf 'Enter a listed number.\n' >&2
             continue
         fi
-        codec=${HARDCORE_ENCODER_MENU_CODEC[index]}
-        encoder=${HARDCORE_ENCODER_MENU_ENCODER[index]}
-        device=${HARDCORE_ENCODER_MENU_DEVICE[index]}
+        if (( index < hardware_count )); then
+            codec=${HARDCORE_ENCODER_MENU_CODEC[index]}
+            encoder=${HARDCORE_ENCODER_MENU_ENCODER[index]}
+            device=${HARDCORE_ENCODER_MENU_DEVICE[index]}
+        else
+            index=$((index - hardware_count))
+            codec=${HARDCORE_ENCODER_MENU_CPU_CODEC[index]}
+            encoder=${HARDCORE_ENCODER_MENU_CPU_ENCODER[index]}
+            device=''
+        fi
         EFFECTIVE_VIDEO_CODEC=$codec
         REQUESTED_VIDEO_ENCODER=$encoder
         if [[ -n $device ]]; then
@@ -253,6 +273,12 @@ hardcore_encoder_menu_prompt() {
 check_video_capability() {
     if [[ $VIDEO_ENABLED == true && $VIDEO_RELEVANT == true && ${HARDCORE_ARCHIVE_NESTED_CHILD:-0} != 1 ]]; then
         hardcore_encoder_menu_collect
+        if ((${#HARDCORE_ENCODER_MENU_CPU_ENCODER[@]} > 0)); then
+            add_ready "Manual software video encoders: $(IFS=', '; printf '%s' "${HARDCORE_ENCODER_MENU_CPU_ENCODER[*]}")"
+        fi
+        if ((${#HARDCORE_ENCODER_MENU_CPU_FAILED[@]} > 0)); then
+            add_info "Software encoder(s) excluded after runtime probe: $(IFS='; '; printf '%s' "${HARDCORE_ENCODER_MENU_CPU_FAILED[*]}")"
+        fi
         hardcore_encoder_menu_display
         if hardcore_encoder_menu_should_prompt; then
             hardcore_encoder_menu_prompt || {
