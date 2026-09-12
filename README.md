@@ -45,6 +45,7 @@ lib/
     scheduler.sh              top-level runtime orchestration
     archive.sh                static archive-engine boundary
     video.sh                  capability-proven video policy
+    av1encode-dependency.sh   AV1Encode protocol negotiation/evaluate/execute adapter
     images.sh                 image-policy boundary
     containers.sh             format-preserving application containers
     nested.sh                 recursive nested-archive policy
@@ -58,6 +59,32 @@ lib/
 ```
 
 The old transformation scripts are retained only as development/migration history. No production path invokes them. Changes to the engine are reviewed, syntax-checked, and tested as normal static source changes.
+
+### AV1Encode dependency
+
+AV1 encoding is migrating behind the versioned
+[`AV1Encode`](https://github.com/andr8076/AV1Encode) process interface. The
+repository pins AV1Encode as `vendor/AV1Encode`; portable releases include that
+pinned source automatically. Source checkouts should initialize it with:
+
+```bash
+git clone --recurse-submodules https://github.com/andr8076/Hardcore-Archive.git
+# Existing checkout:
+git submodule update --init --recursive
+```
+
+Hardcore Archive negotiates protocol 2, submits structured outcome requirements,
+receives an opaque plan ID plus predicted quality/size/speed, and returns the
+unchanged plan for execution. It never reads AV1Encode's private FFmpeg recipe.
+Implementation, runtime, input, and requirement fingerprints make saved plans
+stale whenever AV1Encode policy or the execution environment changes.
+
+AUTO remains hardware-only. `libsvtav1` is accepted only after an explicit
+manual selection. Hardcore Archive still owns archive-wide decisions and final
+completed-output acceptance. During the migration, archive audio optimization,
+scaling, and denoising continue through the existing compatibility path because
+protocol 2 does not yet express those transformations; copied-audio AV1 jobs
+without scaling or denoising use the dependency end to end.
 
 ## Configuration
 

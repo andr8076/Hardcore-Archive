@@ -8,6 +8,7 @@
 hardcore_video_measure_completed_segment() {
     local candidate=$1 kind=$2 start=$3 length=$4 index=$5 manifest=$6
     local geometry eval_width eval_height model_info model model_condition log_file filter_graph
+    local decode_ffmpeg='' normalized_reference='' normalized_candidate=''
     geometry=$(quality_source_display_geometry) || return 1
     IFS=$'\t' read -r eval_width eval_height <<< "$geometry"
     model_info=$(quality_vmaf_model_for_canvas "$eval_width" "$eval_height") || return 1
@@ -27,10 +28,33 @@ hardcore_video_measure_completed_segment() {
     filter_graph=$(quality_vmaf_filter_graph "$eval_width" "$eval_height" "$log_file" \
         "$QUALITY_WORKER_THREADS" "$model") || return 1
 
+    # The archive's managed VMAF build may deliberately omit AV1 software
+    # decoding. AV1Encode has already proved the saved host FFmpeg can decode
+    # its output completely, so normalize both bounded windows losslessly and
+    # reserve the managed runtime for scoring.
+    if [[ ${use_av1encode_dependency:-false} == true &&
+          -x ${HARDCORE_ARCHIVE_SYSTEM_FFMPEG:-} ]]; then
+        decode_ffmpeg=$HARDCORE_ARCHIVE_SYSTEM_FFMPEG
+        normalized_reference="${candidate}.final-reference.$$.${index}.mkv"
+        normalized_candidate="${candidate}.final-candidate.$$.${index}.mkv"
+        preflight_files+=("$normalized_reference" "$normalized_candidate")
+        if ! "$decode_ffmpeg" -hide_banner -v error -nostdin -y \
+            -ss "$start" -t "$length" -i "$input" -map '0:V:0' -an -sn -dn \
+            -c:v ffv1 "$normalized_reference" ||
+           ! "$decode_ffmpeg" -hide_banner -v error -nostdin -y \
+            -ss "$start" -t "$length" -i "$candidate" -map '0:V:0' -an -sn -dn \
+            -c:v ffv1 "$normalized_candidate"; then
+            return 1
+        fi
+        if ! ffmpeg -hide_banner -v error -nostdin \
+            -i "$normalized_reference" -i "$normalized_candidate" \
+            -filter_complex "$filter_graph" -an -f null - >/dev/null 2>&1; then
+            return 1
+        fi
     # Unlike calibration samples, the completed candidate retains the original
     # timeline. Seek BOTH inputs to the same deterministic window, then let the
     # existing AVTB/PTS-reset/nearest-framesync graph align the decoded frames.
-    if ! ffmpeg -hide_banner -v error -nostdin \
+    elif ! ffmpeg -hide_banner -v error -nostdin \
         -ss "$start" -t "$length" -i "$input" \
         -ss "$start" -t "$length" -i "$candidate" \
         -filter_complex "$filter_graph" -an -f null - >/dev/null 2>&1; then
@@ -44,6 +68,7 @@ hardcore_video_validate_completed_quality() {
     local candidate=$1 plan manifest result started elapsed rc=0 index=0
     local kind start length requested_seconds requested_percent coverage_seconds coverage_percent
     local mean minimum_window low_value low_percentile longest reasons status windows frames evidence_complete
+    local evidence_ffprobe=ffprobe
 
     VIDEO_FINAL_QUALITY_RESULT=''
     VIDEO_FINAL_QUALITY_REASON=''
@@ -100,9 +125,13 @@ hardcore_video_validate_completed_quality() {
         fi
     done < "$plan"
 
+    if [[ ${use_av1encode_dependency:-false} == true &&
+          -x ${HARDCORE_ARCHIVE_SYSTEM_FFPROBE:-} ]]; then
+        evidence_ffprobe=$HARDCORE_ARCHIVE_SYSTEM_FFPROBE
+    fi
     if result=$(python3 "$HARDCORE_ARCHIVE_VIDEO_QUALITY_HELPER" evaluate \
         --manifest "$manifest" --duration "$duration" --threshold "$quality_vmaf_threshold" \
-        --reference "$input" --candidate "$candidate" --ffprobe ffprobe \
+        --reference "$input" --candidate "$candidate" --ffprobe "$evidence_ffprobe" \
         --low-percentile "$video_quality_low_percentile" \
         --percentile-delta "$video_quality_percentile_delta" \
         --sustained-delta "$video_quality_sustained_delta" \

@@ -79,6 +79,12 @@ fi
 [[ -r $VIDEO_CAPABILITY_FILE ]] || \
     die 'Video encoder capability registry is unavailable.'
 source "$VIDEO_CAPABILITY_FILE"
+AV1ENCODE_DEPENDENCY_FILE=${HARDCORE_ARCHIVE_ROOT:+$HARDCORE_ARCHIVE_ROOT/lib/av1encode-dependency.sh}
+if [[ -z $AV1ENCODE_DEPENDENCY_FILE ]]; then
+    AV1ENCODE_DEPENDENCY_FILE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/av1encode-dependency.sh
+fi
+[[ -r $AV1ENCODE_DEPENDENCY_FILE ]] || die 'AV1Encode dependency adapter is unavailable.'
+source "$AV1ENCODE_DEPENDENCY_FILE"
 has_command() { command -v "$1" >/dev/null 2>&1; }
 # HARDCORE_MEDIA_NESTED_FIX_V1
 [[ -n ${HARDCORE_ARCHIVE_ROOT:-} && -r $HARDCORE_ARCHIVE_ROOT/lib/intel-legacy-video.sh ]] && \
@@ -275,6 +281,26 @@ determine_encoder() {
 
     printf '\nValidating encoder against real file constraints:\n  %s\n' "$(basename -- "$sample")"
 
+    # AV1Encode owns AV1 capability proof and AUTO selection. This keeps the
+    # helper from duplicating an encoder recipe that can drift when the
+    # standalone dependency improves.
+    if [[ $codec_choice == av1 ]]; then
+        if [[ -n $force_encoder ]]; then
+            hardcore_video_encoder_supported "$force_encoder" || \
+                die "Unknown or unsupported video encoder '$force_encoder'."
+            [[ $(hardcore_video_encoder_codec "$force_encoder") == av1 ]] || \
+                die "Encoder '$force_encoder' does not match requested codec 'av1'."
+        fi
+        if ! hardcore_av1encode_probe "$force_encoder"; then
+            die "AV1Encode capability proof failed: $HARDCORE_AV1ENCODE_ERROR"
+        fi
+        apply_encoder "$HARDCORE_AV1ENCODE_SELECTED_ENCODER"
+        printf '  AV1Encode selected and proved %s (%s).\n' \
+            "$HARDCORE_AV1ENCODE_SELECTED_ENCODER" "$HARDCORE_AV1ENCODE_SELECTED_CLASS"
+        probe_temporary=''
+        return 0
+    fi
+
     if [[ -n "$force_encoder" ]]; then
         hardcore_video_encoder_supported "$force_encoder" || \
             die "Unknown or unsupported video encoder '$force_encoder'."
@@ -352,6 +378,9 @@ cleanup() {
     for preflight_file in "${preflight_files[@]:-}"; do
         [[ -n "$preflight_file" ]] && rm -f -- "$preflight_file"
     done
+    if [[ -n ${AV1_DEPENDENCY_WORK:-} && -d ${AV1_DEPENDENCY_WORK:-} ]]; then
+        rm -rf --one-file-system -- "$AV1_DEPENDENCY_WORK" 2>/dev/null || true
+    fi
     if [[ -n "${inhibit_pid:-}" ]] && kill -0 "$inhibit_pid" 2>/dev/null; then
         kill "$inhibit_pid" 2>/dev/null || true
     fi
@@ -805,6 +834,63 @@ mkdir -p -- "$output_dir" || die "Could not create output directory: $output_dir
 
 cleanup_orphaned_partials "$output_dir" false
 temporary="${output_dir}/.${output_name}.partial.$$.mkv"
+
+use_av1encode_dependency=false
+av1encode_dependency_reason=''
+AV1_DEPENDENCY_WORK=''
+AV1_DEPENDENCY_REQUIREMENTS=''
+AV1_DEPENDENCY_PLAN=''
+AV1_DEPENDENCY_RESULT=''
+if [[ $expected_codec == av1 ]]; then
+    if [[ $automatic_audio != false ]]; then
+        av1encode_dependency_reason='archive audio optimization is not yet expressible by AV1Encode protocol 2'
+    elif [[ $apply_scaling == true ]]; then
+        av1encode_dependency_reason='the selected archive scaling operation is not yet executable by AV1Encode protocol 2'
+    elif [[ $apply_denoise == true ]]; then
+        av1encode_dependency_reason='the selected archive denoise operation is not yet executable by AV1Encode protocol 2'
+    elif [[ $quality_check == off ]]; then
+        av1encode_dependency_reason='AV1Encode protocol 2 requires a semantic quality target'
+    elif [[ $(hardcore_video_encoder_class "$video_encoder" 2>/dev/null || true) == hardware &&
+            $video_encoder != "$HARDCORE_AV1ENCODE_AUTO_ENCODER" ]]; then
+        av1encode_dependency_reason='protocol 2 cannot express the locked non-default hardware encoder'
+    else
+        use_av1encode_dependency=true
+    fi
+fi
+
+hardcore_prepare_av1encode_plan() {
+    local policy=auto_hardware_only
+    [[ $(hardcore_video_encoder_class "$video_encoder" 2>/dev/null || true) != software ]] || policy=manual_software
+    AV1_DEPENDENCY_WORK=$(mktemp -d "${TMPDIR:-/tmp}/hardcore-av1encode-plan.XXXXXX") || return 1
+    AV1_DEPENDENCY_REQUIREMENTS="$AV1_DEPENDENCY_WORK/requirements.json"
+    AV1_DEPENDENCY_PLAN="$AV1_DEPENDENCY_WORK/plan.json"
+    AV1_DEPENDENCY_RESULT="$AV1_DEPENDENCY_WORK/result.json"
+    if ! hardcore_av1encode_write_requirements "$AV1_DEPENDENCY_REQUIREMENTS" "$input" "$temporary" \
+        "$policy" "$quality_vmaf_threshold" null never 3; then
+        HARDCORE_AV1ENCODE_ERROR='Could not create structured AV1Encode requirements.'
+        return 1
+    fi
+    hardcore_av1encode_evaluate "$AV1_DEPENDENCY_REQUIREMENTS" "$AV1_DEPENDENCY_PLAN" || return 1
+    if [[ $HARDCORE_AV1ENCODE_PLAN_ENCODER != "$video_encoder" ]]; then
+        HARDCORE_AV1ENCODE_ERROR="AV1Encode selected $HARDCORE_AV1ENCODE_PLAN_ENCODER, but Hardcore Archive locked $video_encoder during capability negotiation."
+        return 1
+    fi
+    video_codec_label="AV1 via AV1Encode protocol 2 ($HARDCORE_AV1ENCODE_PLAN_ENCODER)"
+    video_crf='AV1Encode-owned policy; sealed opaque plan'
+}
+
+hardcore_execute_av1encode_plan() {
+    rm -f -- "$temporary"
+    printf '\nExecuting sealed AV1Encode plan %s\n' "$HARDCORE_AV1ENCODE_PLAN_ID"
+    if ! hardcore_av1encode_execute "$AV1_DEPENDENCY_PLAN" "$AV1_DEPENDENCY_RESULT" "$temporary"; then
+        printf 'AV1Encode dependency execution failed: %s\n' "$HARDCORE_AV1ENCODE_ERROR" >&2
+        return 1
+    fi
+    if ! hardcore_video_validate_completed_quality "$temporary"; then
+        rm -f -- "$temporary"
+        return 3
+    fi
+}
 
 # --- Advanced VA-API Hybrid Filtering ---
 # Software processing must happen before uploading to the GPU space.
@@ -1895,15 +1981,31 @@ run_video_preflight() {
     printf 'Preflight supports a full encode, or is uncertain enough that skipping would be unsafe.\n'
 }
 
-calibrate_and_choose_video_codec
-calibration_rc=$?
-if (( calibration_rc == 3 )); then
-    exit 3
-elif (( calibration_rc != 0 )); then
-    die "Video codec calibration/selection failed with exit code $calibration_rc."
+# HARDCORE_AV1ENCODE_EXECUTION_ROUTING_V1
+if [[ $use_av1encode_dependency == true ]]; then
+    if ! hardcore_prepare_av1encode_plan; then
+        die "AV1Encode planning failed: $HARDCORE_AV1ENCODE_ERROR"
+    fi
+    printf '\nAV1Encode evaluated plan\n'
+    printf '%s\n' '────────────────────────────────────────────────────────────'
+    printf 'Plan ID:            %s\n' "$HARDCORE_AV1ENCODE_PLAN_ID"
+    printf 'Encoder:            %s (%s)\n' "$HARDCORE_AV1ENCODE_PLAN_ENCODER" "$HARDCORE_AV1ENCODE_PLAN_CLASS"
+    printf 'Predicted size:     %s bytes\n' "$HARDCORE_AV1ENCODE_PREDICTED_BYTES"
+    printf 'Predicted time:     %ss\n' "$HARDCORE_AV1ENCODE_PREDICTED_SECONDS"
+    printf 'Predicted VMAF:     %s\n' "$HARDCORE_AV1ENCODE_PREDICTED_QUALITY"
+else
+    if [[ $expected_codec == av1 && -n $av1encode_dependency_reason ]]; then
+        printf 'AV1 compatibility path retained for this job: %s.\n' "$av1encode_dependency_reason"
+    fi
+    calibrate_and_choose_video_codec
+    calibration_rc=$?
+    if (( calibration_rc == 3 )); then
+        exit 3
+    elif (( calibration_rc != 0 )); then
+        die "Video codec calibration/selection failed with exit code $calibration_rc."
+    fi
+    run_video_preflight
 fi
-
-run_video_preflight
 
 printf '\nRecommended encoding plan\n'
 printf '%s\n' '════════════════════════════════════════════════════════════'
@@ -1931,7 +2033,11 @@ if [[ "$assume_yes" != true ]]; then
 fi
 
 encode_rc=0
-hardcore_video_encode_full || encode_rc=$?
+if [[ $use_av1encode_dependency == true ]]; then
+    hardcore_execute_av1encode_plan || encode_rc=$?
+else
+    hardcore_video_encode_full || encode_rc=$?
+fi
 if (( encode_rc != 0 )); then
     rm -f -- "$temporary"
     temporary=''

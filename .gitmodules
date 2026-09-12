@@ -1,0 +1,3 @@
+[submodule "vendor/AV1Encode"]
+	path = vendor/AV1Encode
+	url = https://github.com/andr8076/AV1Encode.git

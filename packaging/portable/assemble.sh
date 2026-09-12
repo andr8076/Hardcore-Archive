@@ -55,6 +55,13 @@ mkdir -p -- "$APP"
 # runtime inputs. Release builds therefore cannot accidentally include local
 # build products or credentials.
 git -C "$ROOT" archive --format=tar HEAD | tar -xf - -C "$APP"
+[[ -x $ROOT/vendor/AV1Encode/AV1Encode.sh ]] || {
+    printf 'AV1Encode submodule is not initialized. Run: git submodule update --init --recursive\n' >&2
+    exit 3
+}
+mkdir -p -- "$APP/vendor/AV1Encode"
+git -C "$ROOT/vendor/AV1Encode" archive --format=tar HEAD |
+    tar -xf - -C "$APP/vendor/AV1Encode"
 mkdir -p -- "$APP/runtime"
 cp -a -- "$TOOLS/." "$APP/runtime/"
 cp -a -- "$MEDIA/." "$APP/runtime/"

@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CORE = (ROOT / "lib/hardcore-archive-core.sh").read_text()
 VIDEO_HELPER = (ROOT / "lib/hardcore-archive-video-helper.sh").read_text()
 FUNCTIONS = VIDEO_HELPER.split("\nHARDCORE_AUTO_CODEC_MODE=", 1)[1].split(
-    "\ncalibrate_and_choose_video_codec\n", 1
+    "\n# HARDCORE_AV1ENCODE_EXECUTION_ROUTING_V1\n", 1
 )[0]
 FUNCTIONS = (f'source {shlex.quote(str(ROOT / "lib/calibration-identity.sh"))}\n'
              f'source {shlex.quote(str(ROOT / "lib/timing.sh"))}\n'
