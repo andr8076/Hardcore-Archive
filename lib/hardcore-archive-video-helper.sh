@@ -870,7 +870,9 @@ hardcore_prepare_av1encode_plan() {
         HARDCORE_AV1ENCODE_ERROR='Could not create structured AV1Encode requirements.'
         return 1
     fi
-    hardcore_av1encode_evaluate "$AV1_DEPENDENCY_REQUIREMENTS" "$AV1_DEPENDENCY_PLAN" || return 1
+    hardcore_av1encode_evaluate "$AV1_DEPENDENCY_REQUIREMENTS" "$AV1_DEPENDENCY_PLAN"
+    local evaluate_rc=$?
+    (( evaluate_rc == 0 )) || return "$evaluate_rc"
     if [[ $HARDCORE_AV1ENCODE_PLAN_ENCODER != "$video_encoder" ]]; then
         HARDCORE_AV1ENCODE_ERROR="AV1Encode selected $HARDCORE_AV1ENCODE_PLAN_ENCODER, but Hardcore Archive locked $video_encoder during capability negotiation."
         return 1
@@ -1983,7 +1985,14 @@ run_video_preflight() {
 
 # HARDCORE_AV1ENCODE_EXECUTION_ROUTING_V1
 if [[ $use_av1encode_dependency == true ]]; then
-    if ! hardcore_prepare_av1encode_plan; then
+    if hardcore_prepare_av1encode_plan; then
+        :
+    else
+        plan_rc=$?
+        if (( plan_rc == 3 )); then
+            printf '%s Original preserved unchanged.\n' "$HARDCORE_AV1ENCODE_ERROR"
+            exit 3
+        fi
         die "AV1Encode planning failed: $HARDCORE_AV1ENCODE_ERROR"
     fi
     printf '\nAV1Encode evaluated plan\n'

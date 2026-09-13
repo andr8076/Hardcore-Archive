@@ -153,7 +153,7 @@ quality_vmaf_filter_graph 1920 1080 "$TEST_ROOT/a.json" 4 vmaf_v0.6.1
     def test_quality_cache_policy_versions_invalidate_old_scores_and_outputs(self):
         self.assertIn("calibration-v4-source-display-resolution-bicubic-sar-nearest-vmaf-model", VIDEO_HELPER)
         self.assertNotIn("calibration-v3-nominal-fps-nearest-timestamps-center-validation", VIDEO_HELPER)
-        self.assertIn('"video-acceptance-v1-duration-scaled"', CORE)
+        self.assertIn('"video-acceptance-v3-primary-video-duration"', CORE)
         self.assertNotIn('"video-preprocessing-v2-selection"', CORE + VIDEO_HELPER)
         self.assertIn("QUALITY_VMAF_POLICY_VERSION='source-display-v1'", VIDEO_HELPER)
 

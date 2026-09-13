@@ -26,14 +26,15 @@ case ${1:-} in
         ;;
     --machine-evaluate)
         python3 - "$2" "$4" <<'PY'
-import json, sys
+import json, os, sys
 requirements=json.load(open(sys.argv[1], encoding="utf-8"))
+rejected=os.environ.get("FAKE_REJECT") == "1"
 plan={
     "schema":"av1encode.plan", "protocol_version":2, "plan_id":"av1p_test",
     "requirements":requirements,
     "selection":{"encoder":"av1_vaapi","class":"hardware","policy_owner":"AV1Encode"},
     "prediction":{"size":{"predicted_output_bytes":12345},"speed":{"predicted_encode_seconds":6.5},"quality":{"predicted_score":97.25}},
-    "execution":{"state":"ready","reason":None},
+    "execution":{"state":"rejected" if rejected else "ready","reason":"sample_quality_below_target" if rejected else None},
 }
 json.dump(plan, open(sys.argv[2], "w", encoding="utf-8"))
 PY
@@ -99,6 +100,19 @@ hardcore_av1encode_evaluate "$requirements" "$plan"
 [[ $HARDCORE_AV1ENCODE_PREDICTED_BYTES == 12345 ]]
 [[ $HARDCORE_AV1ENCODE_PREDICTED_SECONDS == 6.5 ]]
 [[ $HARDCORE_AV1ENCODE_PREDICTED_QUALITY == 97.25 ]]
+export FAKE_REJECT=1
+if hardcore_av1encode_evaluate "$requirements" "$plan"; then
+    printf 'Rejected AV1Encode plan was accepted as executable.\n' >&2
+    exit 1
+else
+    rejected_rc=$?
+fi
+unset FAKE_REJECT
+[[ $rejected_rc == 3 ]]
+[[ $HARDCORE_AV1ENCODE_PLAN_STATE == rejected ]]
+[[ $HARDCORE_AV1ENCODE_PLAN_REASON == sample_quality_below_target ]]
+[[ $HARDCORE_AV1ENCODE_ERROR == *'rejected this transcode plan'* ]]
+hardcore_av1encode_evaluate "$requirements" "$plan"
 hardcore_av1encode_execute "$plan" "$result" "$output"
 [[ -s $output ]]
 

@@ -84,8 +84,15 @@ hardcore_video_probe_run_bounded() {
 }
 
 hardcore_video_probe_command() {
-    local encoder=$1 binary
-    if declare -F hardcore_video_encoder_command >/dev/null 2>&1; then
+    local encoder=$1 binary class
+    class=$(hardcore_video_encoder_class "$encoder" 2>/dev/null || true)
+    # Software encoders are manual-only and may intentionally live in the host
+    # FFmpeg while the managed VMAF runtime omits them. Resolve that runtime
+    # before consulting generic hardware command shims.
+    if [[ $class == software ]]; then
+        hardcore_video_default_ffmpeg_command "$encoder" || return 1
+        HARDCORE_VIDEO_CAPABILITY_FFMPEG_ENCODER=$encoder
+    elif declare -F hardcore_video_encoder_command >/dev/null 2>&1; then
         hardcore_video_encoder_command "$encoder" || return 1
         HARDCORE_VIDEO_CAPABILITY_COMMAND=("${HARDCORE_VIDEO_ENCODER_COMMAND[@]}")
         HARDCORE_VIDEO_CAPABILITY_FFMPEG_ENCODER=$HARDCORE_VIDEO_FFMPEG_ENCODER

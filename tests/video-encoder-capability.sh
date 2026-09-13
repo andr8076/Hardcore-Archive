@@ -65,6 +65,17 @@ HARDCORE_ARCHIVE_SYSTEM_FFMPEG="$TMP/bin/system-ffmpeg"
 OMIT_PRIMARY_LIBSVTAV1=1 probe_video_encoder_capability av1 libsvtav1
 [[ ${HARDCORE_VIDEO_CAPABILITY_COMMAND[0]} == "$TMP/bin/system-ffmpeg" ]]
 
+# The archive core defines a generic hardware command shim after loading this
+# registry. That shim must not steal manual software encoders back from the
+# host/runtime selector.
+hardcore_video_encoder_command() {
+    HARDCORE_VIDEO_ENCODER_COMMAND=(ffmpeg)
+    HARDCORE_VIDEO_FFMPEG_ENCODER=$1
+}
+OMIT_PRIMARY_LIBSVTAV1=1 probe_video_encoder_capability av1 libsvtav1
+[[ ${HARDCORE_VIDEO_CAPABILITY_COMMAND[0]} == "$TMP/bin/system-ffmpeg" ]]
+unset -f hardcore_video_encoder_command
+
 ! FAIL_ENCODER=av1_qsv probe_video_encoder_capability av1 av1_qsv
 [[ $VIDEO_PROBE_ERROR == *'mock runtime failure'* ]]
 ! EMPTY_ENCODER=libsvtav1 probe_video_encoder_capability av1 libsvtav1

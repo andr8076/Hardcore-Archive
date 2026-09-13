@@ -442,7 +442,7 @@ class StaticIntegrationTests(unittest.TestCase):
         acceleration = (ROOT / "lib/video-acceleration.sh").read_text()
         self.assertIn("hardcore_video_validate_completed_quality", acceleration)
         self.assertIn("VIDEO_QUALITY_VALIDATION", core)
-        self.assertIn("video-acceptance-v1-duration-scaled", core)
+        self.assertIn("video-acceptance-v3-primary-video-duration", core)
         self.assertIn("VIDEO_QUALITY_LOW_PERCENTILE", core)
         self.assertIn("VIDEO_QUALITY_SUSTAINED_SECONDS", core)
         self.assertIn("VIDEO_QUALITY_RETRIES", core)
@@ -453,7 +453,7 @@ class StaticIntegrationTests(unittest.TestCase):
             self.skipTest("full repository checkout unavailable")
         core = core_path.read_text()
         identity_blocks = re.findall(
-            r'"video-acceptance-v1-duration-scaled".*?sha256sum', core, re.S
+            r'"video-acceptance-v3-primary-video-duration".*?sha256sum', core, re.S
         )
         self.assertGreaterEqual(len(identity_blocks), 2)
         settings = (
@@ -492,6 +492,9 @@ class StaticIntegrationTests(unittest.TestCase):
         self.assertIn("Confirmed quality coverage:", final)
         self.assertIn("only windows with complete timestamp/frame evidence", final)
         self.assertIn("must have complete timestamp/frame evidence", final)
+        self.assertIn("hardcore_video_stream_relative_seek", final)
+        self.assertIn('reference_seek=$(hardcore_video_stream_relative_seek "$input" "$start"', final)
+        self.assertIn('candidate_seek=$(hardcore_video_stream_relative_seek "$candidate" "$start"', final)
 
     def test_readme_still_distinguishes_sampled_assurance_from_full_validation(self):
         readme_path = ROOT / "README.md"
@@ -517,6 +520,34 @@ class StaticIntegrationTests(unittest.TestCase):
 
 
 class RealMediaTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"),
+                         "FFmpeg/ffprobe unavailable")
+    def test_primary_video_timeline_duration_ignores_container_origin_and_trailing_audio(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            media = root / "offset-video-long-audio.mkv"
+            process = subprocess.run([
+                "ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-y",
+                "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=10:duration=2",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+                "-filter:v", "setpts=PTS+0.1/TB",
+                "-c:v", "ffv1", "-c:a", "pcm_s16le", str(media),
+            ], capture_output=True, text=True, timeout=30)
+            self.assertEqual(process.returncode, 0, process.stderr)
+            final = ROOT / "lib/video-quality-final.sh"
+            measured = subprocess.run([
+                "bash", "-c",
+                'source "$1"; hardcore_video_stream_relative_duration "$2" ffprobe',
+                "_", str(final), str(media),
+            ], capture_output=True, text=True, timeout=30)
+            self.assertEqual(measured.returncode, 0, measured.stderr)
+            self.assertAlmostEqual(float(measured.stdout.strip()), 2.0, places=3)
+            container = subprocess.check_output([
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=nw=1:nk=1", str(media),
+            ], text=True).strip()
+            self.assertGreater(float(container), 2.9)
+
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"),
                          "FFmpeg/ffprobe unavailable")
     def test_real_ffprobe_timeline_evidence_handles_vfr(self):

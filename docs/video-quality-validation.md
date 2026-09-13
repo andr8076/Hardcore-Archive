@@ -43,6 +43,8 @@ Frame display duration is derived from the next decoded presentation timestamp w
 The VMAF JSON used by this project does not provide a trustworthy presentation timestamp for each score. `frameNum` is treated only as a sequence index; it is never interpreted as a timestamp.
 
 The production comparison graph feeds every completed-output frame to libvmaf (`n_subsample=1`) after converting both inputs to a common AVTB and resetting each sampled window to a zero-based local timeline. It does not insert an FPS conversion. Separately, `ffprobe` reads the completed file's presentation timestamps. The video stream's `start_time` is subtracted so those observations are expressed on the same source-relative timeline used by the sample plan.
+FFmpeg measurement seeks are translated back into the file timestamp domain by adding each input video's `stream.start_time` to the source-relative sample start. This keeps the VMAF frame population and the independent timestamp evidence in the same coordinate system even when a container's video stream begins after timestamp zero.
+Completed-output sample planning also derives its duration from the primary video packet timeline (maximum video packet end minus `stream.start_time`) rather than the container duration. This prevents delayed video starts or longer audio tracks from extending the requested video-quality timeline beyond the actual video.
 
 For sustained-quality timing, VMAF sequence record `i` is associated with candidate presentation interval `i` only when all of the following hold:
 

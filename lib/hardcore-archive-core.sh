@@ -621,6 +621,14 @@ dependency_ffmpeg_has_encoder() {
            -n ${HARDCORE_ARCHIVE_INTEL_LEGACY_RUNTIME_ID:-} ]]
         return $?
     fi
+    # Use the central runtime selector instead of assuming the PATH FFmpeg owns
+    # every explicitly selected encoder. Software encoders may intentionally
+    # live in the managed media runtime while the host FFmpeg lacks them.
+    if declare -F hardcore_video_probe_command >/dev/null 2>&1 &&
+       hardcore_video_probe_command "$encoder"; then
+        hardcore_video_command_advertises_encoder "$encoder"             "${HARDCORE_VIDEO_CAPABILITY_COMMAND[@]}"
+        return $?
+    fi
     ffmpeg -hide_banner -encoders 2>/dev/null | awk 'NF >= 2 {print $2}' | grep -Fxq "$encoder"
 }
 
@@ -3480,7 +3488,7 @@ JOB_ID=$(printf '%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0%s\0' \
     "${HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID:-modern-default}" \
     "$VIDEO_MIN_VMAF" "$VIDEO_MIN_SAVINGS_PERCENT" "$VIDEO_NO_SCALE" "$VIDEO_NO_DENOISE" \
     "$IMAGE_OPTIMIZE" "$IMAGE_MODE" \
-    "video-acceptance-v1-duration-scaled" "$VIDEO_QUALITY_VALIDATION" \
+    "video-acceptance-v3-primary-video-duration" "$VIDEO_QUALITY_VALIDATION" \
     "$VIDEO_QUALITY_SAMPLE_SECONDS" "$VIDEO_QUALITY_INTERVAL_SECONDS" "$VIDEO_QUALITY_MIN_SAMPLES" \
     "$VIDEO_QUALITY_MAX_SAMPLES" "$VIDEO_QUALITY_COMPLEXITY_SAMPLES" "$VIDEO_QUALITY_LOW_PERCENTILE" \
     "$VIDEO_QUALITY_PERCENTILE_DELTA" "$VIDEO_QUALITY_SUSTAINED_DELTA" "$VIDEO_QUALITY_SUSTAINED_SECONDS" \
@@ -4456,7 +4464,7 @@ video_cache_key() {
         "$VIDEO_CODEC" "$VIDEO_ENCODER" "$VIDEO_MODE" "$VIDEO_MIN_VMAF" "$VIDEO_MIN_SAVINGS_PERCENT" \
         "$VIDEO_NO_SCALE" "$VIDEO_NO_DENOISE" "$VIDEO_AUDIO_COPY" "$QUALITY_CHECK" "$ffmpeg_version" \
         "${HARDCORE_ARCHIVE_VIDEO_ENCODER_RUNTIME_ID:-modern-default}" \
-        "video-acceptance-v1-duration-scaled" "${HARDCORE_ARCHIVE_VIDEO_ACCELERATION:-auto}" \
+        "video-acceptance-v3-primary-video-duration" "${HARDCORE_ARCHIVE_VIDEO_ACCELERATION:-auto}" \
         "${HARDCORE_ARCHIVE_VIDEO_GPU_FILTERS:-auto}" "${HARDCORE_ARCHIVE_VIDEO_CUDA_DEVICE:-0}" \
         "${VIDEO_QUALITY_VALIDATION:-sampled}" "${VIDEO_QUALITY_SAMPLE_SECONDS:-4}" "${VIDEO_QUALITY_INTERVAL_SECONDS:-300}" \
         "${VIDEO_QUALITY_MIN_SAMPLES:-5}" "${VIDEO_QUALITY_MAX_SAMPLES:-16}" "${VIDEO_QUALITY_COMPLEXITY_SAMPLES:-2}" \

@@ -5,10 +5,44 @@
 # source-display geometry/model/filter functions so calibration and final
 # acceptance cannot drift into different VMAF comparison policies.
 
+hardcore_video_stream_relative_seek() {
+    local path=$1 relative=$2 probe=${3:-ffprobe} origin
+    origin=$("$probe" -v error -select_streams V:0 -show_entries stream=start_time \
+        -of default=nw=1:nk=1 "$path" 2>/dev/null | head -n1 || true)
+    [[ $origin =~ ^-?[0-9]+([.][0-9]+)?$ ]] || origin=0
+    LC_NUMERIC=C awk -v relative="$relative" -v origin="$origin" \
+        'BEGIN { printf "%.6f", relative + origin }'
+}
+
+hardcore_video_stream_relative_duration() {
+    local path=$1 probe=${2:-ffprobe} origin endpoint value
+    origin=$("$probe" -v error -select_streams V:0 -show_entries stream=start_time \
+        -of default=nw=1:nk=1 "$path" 2>/dev/null | head -n1 || true)
+    [[ $origin =~ ^-?[0-9]+([.][0-9]+)?$ ]] || origin=0
+    endpoint=$("$probe" -v error -select_streams V:0 -show_packets \
+        -show_entries packet=pts_time,duration_time -of csv=p=0 "$path" 2>/dev/null | \
+        LC_NUMERIC=C awk -F, '
+            $1 ~ /^-?[0-9]+([.][0-9]+)?$/ {
+                pts=$1+0; d=0
+                if ($2 ~ /^[0-9]+([.][0-9]+)?$/) d=$2+0
+                e=pts+d
+                if (!seen || e>max) { max=e; seen=1 }
+            }
+            END { if (seen) printf "%.9f", max }
+        ')
+    if [[ $endpoint =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
+        value=$(LC_NUMERIC=C awk -v endpoint="$endpoint" -v origin="$origin" \
+            'BEGIN { d=endpoint-origin; if (d>0) printf "%.6f", d }')
+        [[ $value =~ ^[0-9]+([.][0-9]+)?$ ]] && { printf '%s' "$value"; return 0; }
+    fi
+    return 1
+}
+
 hardcore_video_measure_completed_segment() {
     local candidate=$1 kind=$2 start=$3 length=$4 index=$5 manifest=$6
     local geometry eval_width eval_height model_info model model_condition log_file filter_graph
-    local decode_ffmpeg='' normalized_reference='' normalized_candidate=''
+    local decode_ffmpeg='' normalized_reference='' normalized_candidate='' seek_ffprobe=ffprobe
+    local reference_seek candidate_seek
     geometry=$(quality_source_display_geometry) || return 1
     IFS=$'\t' read -r eval_width eval_height <<< "$geometry"
     model_info=$(quality_vmaf_model_for_canvas "$eval_width" "$eval_height") || return 1
@@ -28,6 +62,16 @@ hardcore_video_measure_completed_segment() {
     filter_graph=$(quality_vmaf_filter_graph "$eval_width" "$eval_height" "$log_file" \
         "$QUALITY_WORKER_THREADS" "$model") || return 1
 
+    if [[ ${use_av1encode_dependency:-false} == true &&
+          -x ${HARDCORE_ARCHIVE_SYSTEM_FFPROBE:-} ]]; then
+        seek_ffprobe=$HARDCORE_ARCHIVE_SYSTEM_FFPROBE
+    fi
+    # Sample plans are expressed relative to the video stream origin. Seek FFmpeg
+    # in the file timestamp domain so VMAF measures the same frame population
+    # that the independent evidence probe later validates.
+    reference_seek=$(hardcore_video_stream_relative_seek "$input" "$start" "$seek_ffprobe") || return 1
+    candidate_seek=$(hardcore_video_stream_relative_seek "$candidate" "$start" "$seek_ffprobe") || return 1
+
     # The archive's managed VMAF build may deliberately omit AV1 software
     # decoding. AV1Encode has already proved the saved host FFmpeg can decode
     # its output completely, so normalize both bounded windows losslessly and
@@ -39,10 +83,10 @@ hardcore_video_measure_completed_segment() {
         normalized_candidate="${candidate}.final-candidate.$$.${index}.mkv"
         preflight_files+=("$normalized_reference" "$normalized_candidate")
         if ! "$decode_ffmpeg" -hide_banner -v error -nostdin -y \
-            -ss "$start" -t "$length" -i "$input" -map '0:V:0' -an -sn -dn \
+            -ss "$reference_seek" -t "$length" -i "$input" -map '0:V:0' -an -sn -dn \
             -c:v ffv1 "$normalized_reference" ||
            ! "$decode_ffmpeg" -hide_banner -v error -nostdin -y \
-            -ss "$start" -t "$length" -i "$candidate" -map '0:V:0' -an -sn -dn \
+            -ss "$candidate_seek" -t "$length" -i "$candidate" -map '0:V:0' -an -sn -dn \
             -c:v ffv1 "$normalized_candidate"; then
             return 1
         fi
@@ -55,8 +99,8 @@ hardcore_video_measure_completed_segment() {
     # timeline. Seek BOTH inputs to the same deterministic window, then let the
     # existing AVTB/PTS-reset/nearest-framesync graph align the decoded frames.
     elif ! ffmpeg -hide_banner -v error -nostdin \
-        -ss "$start" -t "$length" -i "$input" \
-        -ss "$start" -t "$length" -i "$candidate" \
+        -ss "$reference_seek" -t "$length" -i "$input" \
+        -ss "$candidate_seek" -t "$length" -i "$candidate" \
         -filter_complex "$filter_graph" -an -f null - >/dev/null 2>&1; then
         return 1
     fi
@@ -68,7 +112,7 @@ hardcore_video_validate_completed_quality() {
     local candidate=$1 plan manifest result started elapsed rc=0 index=0
     local kind start length requested_seconds requested_percent coverage_seconds coverage_percent
     local mean minimum_window low_value low_percentile longest reasons status windows frames evidence_complete
-    local evidence_ffprobe=ffprobe
+    local evidence_ffprobe=ffprobe timeline_duration
 
     VIDEO_FINAL_QUALITY_RESULT=''
     VIDEO_FINAL_QUALITY_REASON=''
@@ -83,13 +127,23 @@ hardcore_video_validate_completed_quality() {
         return 1
     }
 
+    if [[ ${use_av1encode_dependency:-false} == true &&
+          -x ${HARDCORE_ARCHIVE_SYSTEM_FFPROBE:-} ]]; then
+        evidence_ffprobe=$HARDCORE_ARCHIVE_SYSTEM_FFPROBE
+    fi
+    timeline_duration=$(hardcore_video_stream_relative_duration "$input" "$evidence_ffprobe") || {
+        VIDEO_FINAL_QUALITY_REASON='video-timeline-duration-unavailable'
+        printf 'Completed-output quality could not determine the primary video timeline duration. Original will be preserved.\n'
+        return 1
+    }
+
     plan=$(mktemp "${TMPDIR:-/tmp}/hardcore-video-quality-plan.XXXXXX") || return 1
     manifest=$(mktemp "${TMPDIR:-/tmp}/hardcore-video-quality-measurements.XXXXXX") || { rm -f -- "$plan"; return 1; }
     preflight_files+=("$plan" "$manifest")
     : > "$manifest"
 
     if ! python3 "$HARDCORE_ARCHIVE_VIDEO_QUALITY_HELPER" plan \
-        --input "$candidate" --duration "$duration" --mode "$video_quality_validation" \
+        --input "$candidate" --duration "$timeline_duration" --mode "$video_quality_validation" \
         --sample-seconds "$video_quality_sample_seconds" \
         --interval-seconds "$video_quality_interval_seconds" \
         --min-samples "$video_quality_min_samples" \
@@ -125,12 +179,8 @@ hardcore_video_validate_completed_quality() {
         fi
     done < "$plan"
 
-    if [[ ${use_av1encode_dependency:-false} == true &&
-          -x ${HARDCORE_ARCHIVE_SYSTEM_FFPROBE:-} ]]; then
-        evidence_ffprobe=$HARDCORE_ARCHIVE_SYSTEM_FFPROBE
-    fi
     if result=$(python3 "$HARDCORE_ARCHIVE_VIDEO_QUALITY_HELPER" evaluate \
-        --manifest "$manifest" --duration "$duration" --threshold "$quality_vmaf_threshold" \
+        --manifest "$manifest" --duration "$timeline_duration" --threshold "$quality_vmaf_threshold" \
         --reference "$input" --candidate "$candidate" --ffprobe "$evidence_ffprobe" \
         --low-percentile "$video_quality_low_percentile" \
         --percentile-delta "$video_quality_percentile_delta" \
@@ -170,9 +220,9 @@ PYFINALQUALITY
     )
 
     printf 'Requested coverage: %ss/%ss (%s%% of timeline).\n' \
-        "$requested_seconds" "$duration" "$requested_percent"
+        "$requested_seconds" "$timeline_duration" "$requested_percent"
     printf 'Confirmed quality coverage: %ss/%ss (%s%% of timeline), %s VMAF frame score(s); validation time %ss.\n' \
-        "$coverage_seconds" "$duration" "$coverage_percent" "$frames" "$elapsed"
+        "$coverage_seconds" "$timeline_duration" "$coverage_percent" "$frames" "$elapsed"
     printf 'Scores: mean %s; worst window mean %s; p%s %s; longest sustained-low run %ss.\n' \
         "$mean" "$minimum_window" "$low_percentile" "$low_value" "$longest"
     if [[ $video_quality_validation == sampled ]]; then
@@ -239,4 +289,4 @@ hardcore_video_raise_quality() {
     return 0
 }
 
-export -f hardcore_video_measure_completed_segment hardcore_video_validate_completed_quality hardcore_video_raise_quality
+export -f hardcore_video_stream_relative_seek hardcore_video_stream_relative_duration hardcore_video_measure_completed_segment hardcore_video_validate_completed_quality hardcore_video_raise_quality

@@ -146,6 +146,8 @@ PY
 hardcore_av1encode_evaluate() {
     local requirements=$1 plan=$2 response parsed
     HARDCORE_AV1ENCODE_PLAN_ID=''
+    HARDCORE_AV1ENCODE_PLAN_STATE=''
+    HARDCORE_AV1ENCODE_PLAN_REASON=''
     hardcore_av1encode_negotiate || return 1
     if ! response=$("${HARDCORE_AV1ENCODE_COMMAND[@]}" --machine-evaluate "$requirements" --plan-json "$plan" 2>&1); then
         HARDCORE_AV1ENCODE_ERROR="AV1Encode evaluation failed: $response"
@@ -157,29 +159,37 @@ try:
     with open(sys.argv[1], encoding="utf-8") as handle:
         value=json.load(handle)
     assert value.get("schema")=="av1encode.plan" and value.get("protocol_version")==2
-    assert (value.get("execution") or {}).get("state")=="ready"
     plan_id=value.get("plan_id", "")
     selection=value.get("selection") or {}
     prediction=value.get("prediction") or {}
     quality=prediction.get("quality") or {}
     size=prediction.get("size") or {}
     speed=prediction.get("speed") or {}
+    execution=value.get("execution") or {}
+    state=execution.get("state", "")
+    reason=execution.get("reason") or ""
     assert plan_id.startswith("av1p_") and selection.get("class") in ("hardware", "software")
+    assert state in ("ready", "rejected")
     print("\x1f".join(map(str, (
         plan_id, selection.get("encoder", ""), selection.get("class", ""),
         size.get("predicted_output_bytes", ""), speed.get("predicted_encode_seconds", ""),
-        quality.get("predicted_score", ""),
+        quality.get("predicted_score", ""), state, reason,
     ))))
 except (AssertionError, OSError, TypeError, ValueError):
     raise SystemExit(1)
 PY
     ) || {
-        HARDCORE_AV1ENCODE_ERROR='AV1Encode did not produce a valid executable protocol-v2 plan.'
+        HARDCORE_AV1ENCODE_ERROR='AV1Encode did not produce a valid protocol-v2 plan.'
         return 1
     }
     IFS=$'\x1f' read -r HARDCORE_AV1ENCODE_PLAN_ID HARDCORE_AV1ENCODE_PLAN_ENCODER \
         HARDCORE_AV1ENCODE_PLAN_CLASS HARDCORE_AV1ENCODE_PREDICTED_BYTES \
-        HARDCORE_AV1ENCODE_PREDICTED_SECONDS HARDCORE_AV1ENCODE_PREDICTED_QUALITY <<< "$parsed"
+        HARDCORE_AV1ENCODE_PREDICTED_SECONDS HARDCORE_AV1ENCODE_PREDICTED_QUALITY \
+        HARDCORE_AV1ENCODE_PLAN_STATE HARDCORE_AV1ENCODE_PLAN_REASON <<< "$parsed"
+    if [[ $HARDCORE_AV1ENCODE_PLAN_STATE == rejected ]]; then
+        HARDCORE_AV1ENCODE_ERROR="AV1Encode rejected this transcode plan: ${HARDCORE_AV1ENCODE_PLAN_REASON:-quality policy not met}."
+        return 3
+    fi
 }
 
 hardcore_av1encode_execute() {

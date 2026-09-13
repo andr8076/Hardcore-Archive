@@ -20,6 +20,7 @@ import json
 import math
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable, Sequence
@@ -362,12 +363,18 @@ def _probe_frames_once(
         "-show_entries", "frame=pts_time,best_effort_timestamp_time,duration_time,pkt_duration_time",
         "-of", "compact=p=0:nk=0", path,
     ]
+    # Keep stderr out of a pipe while stdout is consumed incrementally. ffprobe
+    # can emit enough decoder diagnostics to fill a stderr pipe; waiting to read
+    # stderr until after stdout then deadlocks both processes. A temporary file
+    # preserves diagnostics without applying backpressure to ffprobe.
+    stderr_file = tempfile.TemporaryFile(mode="w+t", encoding="utf-8", errors="replace")
     try:
         process = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            command, stdout=subprocess.PIPE, stderr=stderr_file,
             text=True, encoding="utf-8", errors="replace",
         )
     except OSError as exc:
+        stderr_file.close()
         raise ValueError(f"ffprobe frame evidence unavailable: {exc}") from exc
 
     observations: list[FrameObservation] = []
@@ -402,10 +409,9 @@ def _probe_frames_once(
     except subprocess.TimeoutExpired:
         process.kill()
         returncode = process.wait()
-    stderr = ""
-    if process.stderr is not None:
-        stderr = process.stderr.read().strip()
-        process.stderr.close()
+    stderr_file.seek(0)
+    stderr = stderr_file.read().strip()
+    stderr_file.close()
     if not deliberately_stopped and returncode != 0:
         raise ValueError(f"ffprobe frame evidence failed: {stderr or returncode}")
     if not observations:
