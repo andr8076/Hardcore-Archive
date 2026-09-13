@@ -152,10 +152,10 @@ do_list_encoders() {
     printf "Probing system for working encoders (bounded synthetic encode test)...\n\n"
 
     printf "AV1 Encoders:\n"
-    probe_encoder_synthetic av1_vaapi -rc_mode CQP -global_quality:v 33 && printf "  av1_vaapi          (AMD/Mesa VA-API Linux Hardware)\n"
-    probe_encoder_synthetic av1_nvenc -cq:v 33 -preset:v p4 && printf "  av1_nvenc          (NVIDIA NVENC)\n"
-    probe_encoder_synthetic av1_qsv -global_quality:v 33 -preset:v balanced && printf "  av1_qsv            (Intel QSV)\n"
-    probe_encoder_synthetic libsvtav1 && printf "  libsvtav1          (Software SVT-AV1; manual only)\n"
+    hardcore_av1encode_probe av1_vaapi 2>/dev/null && printf "  av1_vaapi          (AMD/Mesa VA-API Linux Hardware; AV1Encode proven)\n"
+    hardcore_av1encode_probe av1_nvenc 2>/dev/null && printf "  av1_nvenc          (NVIDIA NVENC; AV1Encode proven)\n"
+    hardcore_av1encode_probe av1_qsv 2>/dev/null && printf "  av1_qsv            (Intel QSV; AV1Encode proven)\n"
+    hardcore_av1encode_probe libsvtav1 2>/dev/null && printf "  libsvtav1          (Software SVT-AV1; AV1Encode proven, manual only)\n"
 
     printf "\nHEVC / H.265 Encoders:\n"
     probe_encoder_synthetic hevc_videotoolbox -q:v 65 -pix_fmt nv12 && printf "  hevc_videotoolbox  (Apple VideoToolbox Hardware)\n"
@@ -173,11 +173,11 @@ apply_encoder() {
     local enc="$1"
     video_encoder="$enc"
     case "$enc" in
-        av1_vaapi)
-            expected_codec='av1'; output_suffix='av1'; video_codec_label='AV1 / VA-API (Hardware)'
-            # HARDCORE_VIDEO_CODEC_COMPETITION_V2
-            video_crf="CQP q_idx 128 (pre-calibration)"; video_preset='N/A'; video_pix_fmt='vaapi'
-            encoder_args=("-rc_mode" "CQP" "-global_quality:v" "128")
+        av1_vaapi|av1_nvenc|av1_qsv|libsvtav1)
+            expected_codec='av1'; output_suffix='av1'
+            video_codec_label="AV1 via AV1Encode ($enc)"
+            video_crf='AV1Encode-owned policy'; video_preset='AV1Encode-owned'; video_pix_fmt=''
+            encoder_args=()
             ;;
         hevc_videotoolbox)
             expected_codec='hevc'; output_suffix='hevc'; video_codec_label='H.265 / Apple VideoToolbox (Hardware)'
@@ -188,21 +188,6 @@ apply_encoder() {
             expected_codec='hevc'; output_suffix='hevc'; video_codec_label='H.265 / VA-API (Hardware)'
             video_crf="CQP QP 26 (pre-calibration)"; video_preset='N/A'; video_pix_fmt='vaapi'
             encoder_args=("-rc_mode" "CQP" "-global_quality:v" "26")
-            ;;
-        av1_nvenc)
-            expected_codec='av1'; output_suffix='av1'; video_codec_label='AV1 / NVIDIA NVENC (Hardware)'
-            video_crf="CQ ${AV1_CRF}"; video_preset='p4'; video_pix_fmt='p010le'
-            encoder_args=("-cq:v" "$AV1_CRF" "-preset:v" "p4")
-            ;;
-        av1_qsv)
-            expected_codec='av1'; output_suffix='av1'; video_codec_label='AV1 / Intel QSV (Hardware)'
-            video_crf="ICQ ${AV1_CRF}"; video_preset='balanced'; video_pix_fmt='p010le'
-            encoder_args=("-global_quality:v" "$AV1_CRF" "-preset:v" "balanced")
-            ;;
-        libsvtav1)
-            expected_codec='av1'; output_suffix='av1'; video_codec_label='AV1 / SVT-AV1 (Software)'
-            video_crf="CRF ${AV1_CRF}"; video_preset="$AV1_PRESET"; video_pix_fmt='yuv420p10le'
-            encoder_args=("-crf:v" "$AV1_CRF" "-preset:v" "$AV1_PRESET")
             ;;
         hevc_nvenc)
             expected_codec='hevc'; output_suffix='hevc'; video_codec_label='H.265 / NVIDIA NVENC (Hardware)'
@@ -317,11 +302,7 @@ determine_encoder() {
     else
         case "$codec_choice" in
             av1)
-                if test_real_encode av1_vaapi av1 -rc_mode CQP -global_quality:v "$AV1_CRF"; then apply_encoder av1_vaapi
-                elif test_real_encode av1_nvenc av1 -cq:v "$AV1_CRF" -preset:v p4; then apply_encoder av1_nvenc
-                elif test_real_encode av1_qsv av1 -global_quality:v "$AV1_CRF" -preset:v balanced; then apply_encoder av1_qsv
-                else die 'No compatible hardware AV1 encoder successfully processed the sample file.'
-                fi
+                die 'Internal routing error: AV1 capability selection must be delegated to AV1Encode.'
                 ;;
             hevc)
                 if test_real_encode hevc_videotoolbox hevc -q:v 65 -pix_fmt nv12; then apply_encoder hevc_videotoolbox
@@ -836,37 +817,31 @@ cleanup_orphaned_partials "$output_dir" false
 temporary="${output_dir}/.${output_name}.partial.$$.mkv"
 
 use_av1encode_dependency=false
-av1encode_dependency_reason=''
 AV1_DEPENDENCY_WORK=''
 AV1_DEPENDENCY_REQUIREMENTS=''
 AV1_DEPENDENCY_PLAN=''
 AV1_DEPENDENCY_RESULT=''
-if [[ $expected_codec == av1 ]]; then
-    if [[ $automatic_audio != false ]]; then
-        av1encode_dependency_reason='archive audio optimization is not yet expressible by AV1Encode protocol 2'
-    elif [[ $apply_scaling == true ]]; then
-        av1encode_dependency_reason='the selected archive scaling operation is not yet executable by AV1Encode protocol 2'
-    elif [[ $apply_denoise == true ]]; then
-        av1encode_dependency_reason='the selected archive denoise operation is not yet executable by AV1Encode protocol 2'
-    elif [[ $quality_check == off ]]; then
-        av1encode_dependency_reason='AV1Encode protocol 2 requires a semantic quality target'
-    elif [[ $(hardcore_video_encoder_class "$video_encoder" 2>/dev/null || true) == hardware &&
-            $video_encoder != "$HARDCORE_AV1ENCODE_AUTO_ENCODER" ]]; then
-        av1encode_dependency_reason='protocol 2 cannot express the locked non-default hardware encoder'
-    else
-        use_av1encode_dependency=true
-    fi
+if [[ $expected_codec == av1 && ${HARDCORE_ARCHIVE_VIDEO_CODEC_AUTO:-0} != 1 ]]; then
+    use_av1encode_dependency=true
 fi
 
 hardcore_prepare_av1encode_plan() {
-    local policy=auto_hardware_only
+    local policy=auto_hardware_only quality_mode=required quality_target="$quality_vmaf_threshold"
+    local maximum_height=null denoise=never audio_mode=copy_all
     [[ $(hardcore_video_encoder_class "$video_encoder" 2>/dev/null || true) != software ]] || policy=manual_software
+    [[ $quality_check != off ]] || { quality_mode=off; quality_target=0; }
+    [[ $apply_scaling != true ]] || maximum_height=$TARGET_HEIGHT
+    [[ $apply_denoise != true ]] || denoise=required
+    [[ $automatic_audio != true ]] || audio_mode=archive_optimize
+
+    if [[ -n ${AV1_DEPENDENCY_WORK:-} && -d ${AV1_DEPENDENCY_WORK:-} ]]; then
+        rm -rf --one-file-system -- "$AV1_DEPENDENCY_WORK" 2>/dev/null || true
+    fi
     AV1_DEPENDENCY_WORK=$(mktemp -d "${TMPDIR:-/tmp}/hardcore-av1encode-plan.XXXXXX") || return 1
     AV1_DEPENDENCY_REQUIREMENTS="$AV1_DEPENDENCY_WORK/requirements.json"
     AV1_DEPENDENCY_PLAN="$AV1_DEPENDENCY_WORK/plan.json"
     AV1_DEPENDENCY_RESULT="$AV1_DEPENDENCY_WORK/result.json"
-    if ! hardcore_av1encode_write_requirements "$AV1_DEPENDENCY_REQUIREMENTS" "$input" "$temporary" \
-        "$policy" "$quality_vmaf_threshold" null never 3; then
+    if ! hardcore_av1encode_write_requirements "$AV1_DEPENDENCY_REQUIREMENTS" "$input" "$temporary"         "$policy" "$quality_target" "$maximum_height" "$denoise" 3         "$audio_mode" "$video_encoder" "$quality_mode"; then
         HARDCORE_AV1ENCODE_ERROR='Could not create structured AV1Encode requirements.'
         return 1
     fi
@@ -874,7 +849,7 @@ hardcore_prepare_av1encode_plan() {
     local evaluate_rc=$?
     (( evaluate_rc == 0 )) || return "$evaluate_rc"
     if [[ $HARDCORE_AV1ENCODE_PLAN_ENCODER != "$video_encoder" ]]; then
-        HARDCORE_AV1ENCODE_ERROR="AV1Encode selected $HARDCORE_AV1ENCODE_PLAN_ENCODER, but Hardcore Archive locked $video_encoder during capability negotiation."
+        HARDCORE_AV1ENCODE_ERROR="AV1Encode selected $HARDCORE_AV1ENCODE_PLAN_ENCODER, but Hardcore Archive requested $video_encoder."
         return 1
     fi
     video_codec_label="AV1 via AV1Encode protocol 2 ($HARDCORE_AV1ENCODE_PLAN_ENCODER)"
@@ -1400,7 +1375,62 @@ evaluate_hardware_quality() {
 }
 
 calibrate_hardware_candidate() {
-    hardcore_timed video_calibration calibrate_hardware_candidate_accelerated "$@"
+    if [[ ${1:-} == av1 ]]; then
+        hardcore_timed video_calibration hardcore_calibrate_av1encode_candidate "${2:-}"
+    else
+        hardcore_timed video_calibration calibrate_hardware_candidate_accelerated "$@"
+    fi
+}
+
+hardcore_calibrate_av1encode_candidate() {
+    local encoder=$1 saved_encoder=$video_encoder plan_rc required_savings predicted
+    CAL_BEST_QUALITY=''
+    CAL_PREDICTED_SAVINGS=''
+    CAL_REQUIRED_SAVINGS=''
+    CAL_REASON=''
+    CAL_QUALITY_LABEL='AV1Encode sealed plan'
+    CAL_RESULT_VIDEO_BPS=''
+
+    video_encoder=$encoder
+    if hardcore_prepare_av1encode_plan; then
+        :
+    else
+        plan_rc=$?
+        video_encoder=$saved_encoder
+        if (( plan_rc == 3 )); then
+            CAL_REASON=${HARDCORE_AV1ENCODE_PLAN_REASON:-quality-floor-not-met}
+            return 2
+        fi
+        CAL_REASON='av1encode-evaluation-failed'
+        return 1
+    fi
+    video_encoder=$saved_encoder
+
+    CAL_BEST_QUALITY=$HARDCORE_AV1ENCODE_PLAN_ID
+    CAL_MIN_VMAF=$HARDCORE_AV1ENCODE_PREDICTED_QUALITY
+    predicted=$HARDCORE_AV1ENCODE_PREDICTED_BYTES
+    [[ $predicted =~ ^[0-9]+$ && $predicted -gt 0 ]] || {
+        CAL_REASON='av1encode-size-prediction-unavailable'
+        return 1
+    }
+    CAL_PREDICTED_SAVINGS=$(LC_NUMERIC=C awk -v original="$original_size" -v candidate="$predicted" 'BEGIN {
+        if(original<=0){print 0; exit} printf "%.3f",(original-candidate)*100/original
+    }')
+    required_savings=$min_savings_percent
+    if [[ $source_video_codec == av1 && $apply_scaling != true && $apply_denoise != true ]]; then
+        required_savings=$(LC_NUMERIC=C awk -v minimum="$min_savings_percent" 'BEGIN {
+            candidate=minimum+5; if(candidate<10) candidate=10; printf "%.3f",candidate
+        }')
+    fi
+    CAL_REQUIRED_SAVINGS=$required_savings
+    if ! LC_NUMERIC=C awk -v predicted="$CAL_PREDICTED_SAVINGS" -v required="$required_savings"         'BEGIN {exit !(predicted>=required)}'; then
+        CAL_REASON='minimum-saving-not-met'
+        return 3
+    fi
+    CAL_REASON='candidate-valid'
+    printf 'AV1Encode candidate: predicted saving %s%%; required %s%%; plan %s.
+'         "$CAL_PREDICTED_SAVINGS" "$required_savings" "$HARDCORE_AV1ENCODE_PLAN_ID"
+    return 0
 }
 
 calibrate_hardware_candidate_accelerated() {
@@ -1694,6 +1724,18 @@ calibrate_hardware_candidate_impl() {
 
 apply_calibrated_candidate() {
     local codec=$1 encoder=$2 quality=$3 label=$4
+    if [[ $codec == av1 ]]; then
+        video_encoder=$encoder
+        expected_codec=av1
+        output_suffix=av1
+        video_codec_label="AV1 via AV1Encode protocol 2 ($encoder)"
+        video_crf='AV1Encode-owned policy; sealed opaque plan'
+        CAL_SELECTED_VALIDATED=true
+        use_av1encode_dependency=true
+        printf 'Selected AV1 through sealed AV1Encode plan %s.
+' "$HARDCORE_AV1ENCODE_PLAN_ID"
+        return 0
+    fi
     local CAL_FILTER_CHAIN=''
     apply_encoder "$encoder"
     calibration_apply_quality "$encoder" "$quality" || return 1
@@ -1804,6 +1846,10 @@ calibrate_and_choose_video_codec() {
 }
 
 run_video_preflight() {
+    if [[ $use_av1encode_dependency == true ]]; then
+        printf "\nVideo preflight: AV1Encode protocol-2 evaluation already validated this AV1 plan.\n"
+        return 0
+    fi
     if [[ $CAL_SELECTED_VALIDATED == true && $quality_check != off ]]; then
         printf "\nVideo preflight: reusing this file's calibrated quality and size measurements.\n"
         return 0
@@ -2003,9 +2049,6 @@ if [[ $use_av1encode_dependency == true ]]; then
     printf 'Predicted time:     %ss\n' "$HARDCORE_AV1ENCODE_PREDICTED_SECONDS"
     printf 'Predicted VMAF:     %s\n' "$HARDCORE_AV1ENCODE_PREDICTED_QUALITY"
 else
-    if [[ $expected_codec == av1 && -n $av1encode_dependency_reason ]]; then
-        printf 'AV1 compatibility path retained for this job: %s.\n' "$av1encode_dependency_reason"
-    fi
     calibrate_and_choose_video_codec
     calibration_rc=$?
     if (( calibration_rc == 3 )); then
