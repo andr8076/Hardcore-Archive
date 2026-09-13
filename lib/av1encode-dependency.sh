@@ -20,6 +20,8 @@ HARDCORE_AV1ENCODE_PLAN_CLASS=''
 HARDCORE_AV1ENCODE_PREDICTED_BYTES=''
 HARDCORE_AV1ENCODE_PREDICTED_SECONDS=''
 HARDCORE_AV1ENCODE_PREDICTED_QUALITY=''
+HARDCORE_AV1ENCODE_PLAN_STATE=''
+HARDCORE_AV1ENCODE_PLAN_REASON=''
 
 hardcore_av1encode_resolve() {
     local root script path_prefix='' directory
@@ -32,10 +34,8 @@ hardcore_av1encode_resolve() {
         return 1
     fi
 
-    # The archive's managed FFmpeg is optimized for VMAF and may deliberately
-    # lack a host GPU decoder. AV1Encode must probe and execute with the saved
-    # host encoder runtime. Its own comparator still selects its verified VMAF
-    # runtime when required.
+    # AV1Encode owns its AV1 runtime and capability proof. Prefer the saved host
+    # FFmpeg/ffprobe paths when Hardcore Archive activated a VMAF-focused runtime.
     for directory in \
         "${HARDCORE_ARCHIVE_SYSTEM_FFMPEG:+$(dirname -- "$HARDCORE_ARCHIVE_SYSTEM_FFMPEG")}" \
         "${HARDCORE_ARCHIVE_SYSTEM_FFPROBE:+$(dirname -- "$HARDCORE_ARCHIVE_SYSTEM_FFPROBE")}"; do
@@ -110,21 +110,26 @@ except (AssertionError, TypeError, ValueError):
     fi
 }
 
+# Arguments 1..8 retain the original protocol-v2 adapter order. The later
+# semantic fields are additive so older focused tests/callers remain valid.
 hardcore_av1encode_write_requirements() {
     local destination=$1 input=$2 output=$3 hardware_policy=$4 quality_target=$5
     local maximum_height=$6 denoise=$7 sample_seconds=${8:-3}
+    local audio_mode=${9:-copy_all} requested_encoder=${10:-} quality_mode=${11:-required}
     python3 - "$destination" "$input" "$output" "$hardware_policy" "$quality_target" \
-        "$maximum_height" "$denoise" "$sample_seconds" <<'PY'
+        "$maximum_height" "$denoise" "$sample_seconds" "$audio_mode" "$requested_encoder" "$quality_mode" <<'PY'
 import json, sys
-path, source, output, hardware, target, maximum, denoise, seconds = sys.argv[1:]
-target = float(target)
+path, source, output, hardware, target, maximum, denoise, seconds, audio, requested, quality_mode = sys.argv[1:]
+target = float(target or 0)
 document = {
     "schema": "av1encode.requirements",
     "protocol_version": 2,
     "input": source,
     "output": output,
     "hardware_policy": hardware,
+    "requested_encoder": None if requested in ("", "auto") else requested,
     "quality": {
+        "mode": quality_mode,
         "metric": "vmaf",
         "target": target,
         "p10_minimum": max(0.0, target - 4.0),
@@ -134,7 +139,7 @@ document = {
     "optimization": {"primary": "smallest_output", "secondary": "fastest_encoding"},
     "video": {"maximum_height": None if maximum == "null" else int(maximum), "denoise": denoise},
     "preservation": {"streams": "all", "chapters": True, "metadata": True},
-    "audio": {"mode": "copy_all"},
+    "audio": {"mode": audio},
     "evaluation": {"sample_seconds": float(seconds)},
 }
 with open(path, "x", encoding="utf-8") as handle:
