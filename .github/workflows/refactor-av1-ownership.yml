@@ -1,0 +1,35 @@
+name: Apply AV1 ownership refactor
+
+on:
+  push:
+    branches: [refactor/av1-ownership]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refactor/av1-ownership
+          fetch-depth: 0
+      - name: Apply focused source refactor
+        run: |
+          set -Eeuo pipefail
+          python3 tools/apply-av1-ownership-refactor.py
+          bash -n lib/hardcore-archive-video-helper.sh
+          grep -Fq 'hardcore_calibrate_av1encode_candidate' lib/hardcore-archive-video-helper.sh
+          grep -Fq 'AV1 via AV1Encode protocol 2' lib/hardcore-archive-video-helper.sh
+          ! grep -Fq 'AV1 compatibility path retained for this job' lib/hardcore-archive-video-helper.sh
+      - name: Commit generated refactor
+        run: |
+          set -Eeuo pipefail
+          git rm tools/apply-av1-ownership-refactor.py .github/workflows/refactor-av1-ownership.yml
+          git add lib/hardcore-archive-video-helper.sh
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m 'Delegate all AV1 execution to AV1Encode'
+          git push origin HEAD:refactor/av1-ownership
