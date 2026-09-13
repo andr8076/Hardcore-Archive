@@ -33,14 +33,9 @@ text = text[:start] + '''        av1_vaapi|av1_nvenc|av1_qsv|libsvtav1)
             encoder_args=()
             ;;
 ''' + text[end:]
-# Delete the later duplicate AV1 cases now covered by the grouped semantic case.
-for begin, finish in [
-    ('        av1_nvenc)\n', '        hevc_nvenc)\n'),
-]:
-    start = text.index(begin, text.index('apply_encoder() {'))
-    # This range also contains av1_qsv/libsvtav1 and stops immediately before HEVC NVENC.
-    end = text.index(finish, start)
-    text = text[:start] + text[end:]
+start = text.index('        av1_nvenc)\n', text.index('apply_encoder() {'))
+end = text.index('        hevc_nvenc)\n', start)
+text = text[:start] + text[end:]
 
 # Any accidental fall-through into the legacy real-encode selector must fail
 # rather than silently recreate an AV1 FFmpeg recipe locally.
@@ -86,8 +81,8 @@ hardcore_prepare_av1encode_plan() {
     AV1_DEPENDENCY_REQUIREMENTS="$AV1_DEPENDENCY_WORK/requirements.json"
     AV1_DEPENDENCY_PLAN="$AV1_DEPENDENCY_WORK/plan.json"
     AV1_DEPENDENCY_RESULT="$AV1_DEPENDENCY_WORK/result.json"
-    if ! hardcore_av1encode_write_requirements "$AV1_DEPENDENCY_REQUIREMENTS" "$input" "$temporary" \\
-        "$policy" "$quality_target" "$maximum_height" "$denoise" 3 \\
+    if ! hardcore_av1encode_write_requirements "$AV1_DEPENDENCY_REQUIREMENTS" "$input" "$temporary" \
+        "$policy" "$quality_target" "$maximum_height" "$denoise" 3 \
         "$audio_mode" "$video_encoder" "$quality_mode"; then
         HARDCORE_AV1ENCODE_ERROR='Could not create structured AV1Encode requirements.'
         return 1
@@ -156,13 +151,13 @@ hardcore_calibrate_av1encode_candidate() {
         }')
     fi
     CAL_REQUIRED_SAVINGS=$required_savings
-    if ! LC_NUMERIC=C awk -v predicted="$CAL_PREDICTED_SAVINGS" -v required="$required_savings" \\
+    if ! LC_NUMERIC=C awk -v predicted="$CAL_PREDICTED_SAVINGS" -v required="$required_savings" \
         'BEGIN {exit !(predicted>=required)}'; then
         CAL_REASON='minimum-saving-not-met'
         return 3
     fi
     CAL_REASON='candidate-valid'
-    printf 'AV1Encode candidate: predicted saving %s%%; required %s%%; plan %s.\\n' \\
+    printf 'AV1Encode candidate: predicted saving %s%%; required %s%%; plan %s.\n' \
         "$CAL_PREDICTED_SAVINGS" "$required_savings" "$HARDCORE_AV1ENCODE_PLAN_ID"
     return 0
 }
@@ -176,7 +171,6 @@ end = text.index('calibrate_and_choose_video_codec() {\n', start)
 old = text[start:end]
 body_start = old.index('    local codec=$1 encoder=$2 quality=$3 label=$4\n') + len('    local codec=$1 encoder=$2 quality=$3 label=$4\n')
 legacy_body = old[body_start:]
-# Strip the function's final closing brace/newlines; rewrap below.
 if not legacy_body.endswith('}\n\n'):
     raise SystemExit('apply_calibrated_candidate layout changed unexpectedly')
 legacy_body = legacy_body[:-3]
@@ -190,7 +184,7 @@ replacement = '''apply_calibrated_candidate() {
         video_crf='AV1Encode-owned policy; sealed opaque plan'
         CAL_SELECTED_VALIDATED=true
         use_av1encode_dependency=true
-        printf 'Selected AV1 through sealed AV1Encode plan %s.\\n' "$HARDCORE_AV1ENCODE_PLAN_ID"
+        printf 'Selected AV1 through sealed AV1Encode plan %s.\n' "$HARDCORE_AV1ENCODE_PLAN_ID"
         return 0
     fi
 ''' + legacy_body + '}\n\n'
@@ -207,7 +201,20 @@ text = text.replace(needle, '''run_video_preflight() {
     fi
 ''', 1)
 
-# No production AV1 route may retain the old compatibility-path message.
+# Remove the final compatibility-path reporting branch now that every AV1
+# encode is either already delegated or is being evaluated for AUTO competition.
+compatibility = '''else
+    if [[ $expected_codec == av1 && -n $av1encode_dependency_reason ]]; then
+        printf 'AV1 compatibility path retained for this job: %s.\\n' "$av1encode_dependency_reason"
+    fi
+    calibrate_and_choose_video_codec
+'''
+if compatibility not in text:
+    raise SystemExit('final AV1 compatibility reporting block changed unexpectedly')
+text = text.replace(compatibility, '''else
+    calibrate_and_choose_video_codec
+''', 1)
+
 if 'AV1 compatibility path retained for this job' in text or 'av1encode_dependency_reason' in text:
     raise SystemExit('legacy AV1 compatibility routing remains after patch')
 
