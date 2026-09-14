@@ -134,11 +134,9 @@ printf 'FULL:'; printf '%q ' "${command[@]}"; printf '\n'
                 self.assertIn("-map_metadata", full)
                 self.assertIn("-map_chapters", full)
 
-    def test_software_encoders_use_cpu_pipeline_for_calibration_and_full_encode(self):
-        for encoder, codec, preset in (("libsvtav1", "av1", "10"),
-                                       ("libx265", "hevc", "ultrafast")):
-            with self.subTest(encoder=encoder):
-                output, _ = self.run_shell(r'''
+    def test_hevc_software_encoder_uses_internal_cpu_pipeline(self):
+        encoder, preset = "libx265", "ultrafast"
+        output, _ = self.run_shell(r'''
 hardcore_video_accel_prepare "$ENCODER"
 calibration_candidate_command "$ENCODER" 24 3 3 "$TEST_ROOT/sample.mkv"
 printf 'SAMPLE:'; printf '%q ' "${CAL_COMMAND[@]}"; printf '\n'
@@ -148,24 +146,24 @@ audio_args=(-c:a copy)
 temporary="$TEST_ROOT/output.mkv"
 hardcore_video_build_full_command
 printf 'FULL:'; printf '%q ' "${command[@]}"; printf '\n'
-''', ENCODER=encoder, PRESET=preset, AV1_PRESET=10, HEVC_PRESET="ultrafast",
-                                             SCALING="true", DENOISE="true")
-                sample = shlex.split(next(x[7:] for x in output.splitlines() if x.startswith("SAMPLE:")))
-                full = shlex.split(next(x[5:] for x in output.splitlines() if x.startswith("FULL:")))
-                for command in (sample, full):
-                    encoder_option = "-c:v" if command is sample else "-c:v:0"
-                    self.assertEqual(command[command.index(encoder_option) + 1], encoder)
-                    self.assertNotIn("-hwaccel", command)
-                    self.assertNotIn("-init_hw_device", command)
-                    self.assertNotIn("-gpu:v", command)
-                    graph_option = "-vf" if command is sample else "-filter:v:0"
-                    graph = command[command.index(graph_option) + 1]
-                    self.assertIn("hqdn3d", graph)
-                    self.assertIn("scale=-2:1080:flags=lanczos", graph)
-                for stream in ("0:0", "0:a?", "0:s?", "0:d?", "0:t?"):
-                    self.assertIn(stream, full)
-                self.assertIn("-map_metadata", full)
-                self.assertIn("-map_chapters", full)
+''', ENCODER=encoder, PRESET=preset, HEVC_PRESET="ultrafast",
+                                   SCALING="true", DENOISE="true")
+        sample = shlex.split(next(x[7:] for x in output.splitlines() if x.startswith("SAMPLE:")))
+        full = shlex.split(next(x[5:] for x in output.splitlines() if x.startswith("FULL:")))
+        for command in (sample, full):
+            encoder_option = "-c:v" if command is sample else "-c:v:0"
+            self.assertEqual(command[command.index(encoder_option) + 1], encoder)
+            self.assertNotIn("-hwaccel", command)
+            self.assertNotIn("-init_hw_device", command)
+            self.assertNotIn("-gpu:v", command)
+            graph_option = "-vf" if command is sample else "-filter:v:0"
+            graph = command[command.index(graph_option) + 1]
+            self.assertIn("hqdn3d", graph)
+            self.assertIn("scale=-2:1080:flags=lanczos", graph)
+        for stream in ("0:0", "0:a?", "0:s?", "0:d?", "0:t?"):
+            self.assertIn(stream, full)
+        self.assertIn("-map_metadata", full)
+        self.assertIn("-map_chapters", full)
 
     def test_gpu_scaler_failure_retries_hardware_decode_with_cpu_filters(self):
         output, commands = self.run_shell(FAIL_MODE="gpu")
@@ -378,7 +376,7 @@ hardcore_video_speed_probe hevc hevc_vaapi 18
         self.run_shell(setup, SCALING="true", SPEED_DURATION=0, expected=1)
         self.assertFalse(list(self.root.glob(".*.speed-*.mkv")))
 
-    def test_four_video_mixed_corpus_returns_to_eight_checks_on_repeat(self):
+    def test_four_video_hevc_corpus_returns_to_four_checks_on_repeat(self):
         paths = []
         for index in range(4):
             path = self.root / f"video-{index}.mov"
@@ -387,21 +385,21 @@ hardcore_video_speed_probe hevc hevc_vaapi 18
         for repeat in range(2):
             total = 0
             for index, path in enumerate(paths):
-                for codec in ("av1", "hevc"):
-                    rejected = index == 3 or (index in (1, 2) and codec == "av1")
-                    output, commands = self.run_shell(r'''
+                codec = "hevc"
+                rejected = index == 3
+                output, commands = self.run_shell(r'''
 rc=0
 calibrate_hardware_candidate "$CODEC" "${CODEC}_vaapi" || rc=$?
 printf 'RC:%s\n' "$rc"
 ''', CODEC=codec, INPUT_PATH=path, CURVE="flat" if rejected else "normal",
-                        SCALING="true" if index else "false", GPU_SIZE_PERCENT=200, CPU_NS=500000000)
-                    self.assertIn(f"RC:{2 if rejected else 0}", output)
-                    total += len(commands)
-                    if repeat:
-                        self.assertEqual(len(commands), 1)
-                        self.assertEqual((self.root / "speed-probes").read_text(), "")
+                    SCALING="true" if index else "false", GPU_SIZE_PERCENT=200, CPU_NS=500000000)
+                self.assertIn(f"RC:{2 if rejected else 0}", output)
+                total += len(commands)
+                if repeat:
+                    self.assertEqual(len(commands), 1)
+                    self.assertEqual((self.root / "speed-probes").read_text(), "")
             if repeat:
-                self.assertEqual(total, 8)
+                self.assertEqual(total, 4)
 
     def test_nvidia_selection_retains_nvenc_when_cpu_preprocessing_wins(self):
         args = dict(ENCODER="hevc_nvenc", SCALING="true", GPU_SIZE_PERCENT=200, CPU_NS=1)

@@ -841,7 +841,10 @@ hardcore_prepare_av1encode_plan() {
     AV1_DEPENDENCY_REQUIREMENTS="$AV1_DEPENDENCY_WORK/requirements.json"
     AV1_DEPENDENCY_PLAN="$AV1_DEPENDENCY_WORK/plan.json"
     AV1_DEPENDENCY_RESULT="$AV1_DEPENDENCY_WORK/result.json"
-    if ! hardcore_av1encode_write_requirements "$AV1_DEPENDENCY_REQUIREMENTS" "$input" "$temporary"         "$policy" "$quality_target" "$maximum_height" "$denoise" 3         "$audio_mode" "$video_encoder" "$quality_mode"; then
+    if ! hardcore_av1encode_write_requirements \
+        "$AV1_DEPENDENCY_REQUIREMENTS" "$input" "$temporary" \
+        "$policy" "$quality_target" "$maximum_height" "$denoise" 3 \
+        "$audio_mode" "$video_encoder" "$quality_mode"; then
         HARDCORE_AV1ENCODE_ERROR='Could not create structured AV1Encode requirements.'
         return 1
     fi
@@ -1232,18 +1235,16 @@ calibration_has_plateau() {
 
 calibration_encoder_supported() {
     case "$1" in
-        av1_vaapi|hevc_vaapi|av1_nvenc|hevc_nvenc|av1_qsv|hevc_qsv|hevc_qsv_legacy|libsvtav1|libx265) return 0 ;;
+        hevc_vaapi|hevc_nvenc|hevc_qsv|hevc_qsv_legacy|libx265) return 0 ;;
         *) return 1 ;;
     esac
 }
 
 calibration_quality_range() {
     case "$1" in
-        av1_vaapi) printf '1 255 q_idx' ;;
         hevc_vaapi) printf '1 51 QP' ;;
-        av1_nvenc|hevc_nvenc) printf '1 51 CQ' ;;
-        av1_qsv|hevc_qsv|hevc_qsv_legacy) printf '1 51 ICQ' ;;
-        libsvtav1) printf '1 63 CRF' ;;
+        hevc_nvenc) printf '1 51 CQ' ;;
+        hevc_qsv|hevc_qsv_legacy) printf '1 51 ICQ' ;;
         libx265) printf '1 51 CRF' ;;
         *) return 1 ;;
     esac
@@ -1252,16 +1253,14 @@ calibration_quality_range() {
 calibration_apply_quality() {
     local encoder=$1 quality=$2
     case "$encoder" in
-        av1_vaapi|hevc_vaapi)
+        hevc_vaapi)
             encoder_args=("-rc_mode" "CQP" "-global_quality:v" "$quality") ;;
-        av1_nvenc|hevc_nvenc)
+        hevc_nvenc)
             encoder_args=("-cq:v" "$quality" "-preset:v" "p4") ;;
-        av1_qsv|hevc_qsv)
+        hevc_qsv)
             encoder_args=("-global_quality:v" "$quality" "-preset:v" "balanced") ;;
         hevc_qsv_legacy)
             encoder_args=("-load_plugin" "hevc_hw" "-low_power" "0" "-global_quality:v" "$quality" "-preset:v" "medium") ;;
-        libsvtav1)
-            encoder_args=("-crf:v" "$quality" "-preset:v" "$AV1_PRESET") ;;
         libx265)
             encoder_args=("-crf:v" "$quality" "-preset:v" "$HEVC_PRESET") ;;
         *) return 1 ;;
@@ -1286,11 +1285,10 @@ calibration_candidate_command() {
         -c:v "$HARDCORE_VIDEO_FFMPEG_ENCODER"
     )
     case "$encoder" in
-        av1_vaapi|hevc_vaapi) CAL_COMMAND+=(-rc_mode CQP -global_quality:v "$quality") ;;
-        av1_nvenc|hevc_nvenc) CAL_COMMAND+=(-cq:v "$quality" -preset:v p4) ;;
-        av1_qsv|hevc_qsv) CAL_COMMAND+=(-global_quality:v "$quality" -preset:v balanced) ;;
+        hevc_vaapi) CAL_COMMAND+=(-rc_mode CQP -global_quality:v "$quality") ;;
+        hevc_nvenc) CAL_COMMAND+=(-cq:v "$quality" -preset:v p4) ;;
+        hevc_qsv) CAL_COMMAND+=(-global_quality:v "$quality" -preset:v balanced) ;;
         hevc_qsv_legacy) CAL_COMMAND+=(-load_plugin hevc_hw -low_power 0 -global_quality:v "$quality" -preset:v medium) ;;
-        libsvtav1) CAL_COMMAND+=(-crf:v "$quality" -preset:v "$AV1_PRESET") ;;
         libx265) CAL_COMMAND+=(-crf:v "$quality" -preset:v "$HEVC_PRESET") ;;
         *) return 1 ;;
     esac
@@ -1374,6 +1372,9 @@ evaluate_hardware_quality() {
     return 0
 }
 
+# HARDCORE_AV1ENCODE_CODEC_COMPETITION_V1
+# AV1 contributes a sealed semantic plan; the internal calibration machinery
+# remains HEVC-only.
 calibrate_hardware_candidate() {
     if [[ ${1:-} == av1 ]]; then
         hardcore_timed video_calibration hardcore_calibrate_av1encode_candidate "${2:-}"
@@ -1423,13 +1424,14 @@ hardcore_calibrate_av1encode_candidate() {
         }')
     fi
     CAL_REQUIRED_SAVINGS=$required_savings
-    if ! LC_NUMERIC=C awk -v predicted="$CAL_PREDICTED_SAVINGS" -v required="$required_savings"         'BEGIN {exit !(predicted>=required)}'; then
+    if ! LC_NUMERIC=C awk -v predicted="$CAL_PREDICTED_SAVINGS" -v required="$required_savings" \
+        'BEGIN {exit !(predicted>=required)}'; then
         CAL_REASON='minimum-saving-not-met'
         return 3
     fi
     CAL_REASON='candidate-valid'
-    printf 'AV1Encode candidate: predicted saving %s%%; required %s%%; plan %s.
-'         "$CAL_PREDICTED_SAVINGS" "$required_savings" "$HARDCORE_AV1ENCODE_PLAN_ID"
+    printf 'AV1Encode candidate: predicted saving %s%%; required %s%%; plan %s.\n' \
+        "$CAL_PREDICTED_SAVINGS" "$required_savings" "$HARDCORE_AV1ENCODE_PLAN_ID"
     return 0
 }
 
@@ -1725,6 +1727,10 @@ calibrate_hardware_candidate_impl() {
 apply_calibrated_candidate() {
     local codec=$1 encoder=$2 quality=$3 label=$4
     if [[ $codec == av1 ]]; then
+        if [[ $quality != "$HARDCORE_AV1ENCODE_PLAN_ID" || ! -s $AV1_DEPENDENCY_PLAN ]]; then
+            HARDCORE_AV1ENCODE_ERROR='The selected AV1 candidate no longer matches its sealed plan.'
+            return 1
+        fi
         video_encoder=$encoder
         expected_codec=av1
         output_suffix=av1
@@ -1732,8 +1738,8 @@ apply_calibrated_candidate() {
         video_crf='AV1Encode-owned policy; sealed opaque plan'
         CAL_SELECTED_VALIDATED=true
         use_av1encode_dependency=true
-        printf 'Selected AV1 through sealed AV1Encode plan %s.
-' "$HARDCORE_AV1ENCODE_PLAN_ID"
+        printf 'Selected AV1 through sealed AV1Encode plan %s.\n' \
+            "$HARDCORE_AV1ENCODE_PLAN_ID"
         return 0
     fi
     local CAL_FILTER_CHAIN=''
@@ -1743,11 +1749,10 @@ apply_calibrated_candidate() {
     filter_chain=$CAL_FILTER_CHAIN
     CAL_SELECTED_VALIDATED=true
     case "$encoder" in
-        av1_vaapi) video_crf="CQP q_idx ${quality} (calibrated)" ;;
         hevc_vaapi) video_crf="CQP QP ${quality} (calibrated)" ;;
-        av1_nvenc|hevc_nvenc) video_crf="CQ ${quality} (calibrated)" ;;
-        av1_qsv|hevc_qsv|hevc_qsv_legacy) video_crf="ICQ ${quality} (calibrated)" ;;
-        libsvtav1|libx265) video_crf="CRF ${quality} (calibrated)" ;;
+        hevc_nvenc) video_crf="CQ ${quality} (calibrated)" ;;
+        hevc_qsv|hevc_qsv_legacy) video_crf="ICQ ${quality} (calibrated)" ;;
+        libx265) video_crf="CRF ${quality} (calibrated)" ;;
     esac
     printf 'Selected %s via %s at %s %s.\n' "${codec^^}" "$encoder" "$label" "$quality"
 }
@@ -1846,7 +1851,7 @@ calibrate_and_choose_video_codec() {
 }
 
 run_video_preflight() {
-    if [[ $use_av1encode_dependency == true ]]; then
+    if [[ ${use_av1encode_dependency:-false} == true ]]; then
         printf "\nVideo preflight: AV1Encode protocol-2 evaluation already validated this AV1 plan.\n"
         return 0
     fi

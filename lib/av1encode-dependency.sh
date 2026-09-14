@@ -84,6 +84,14 @@ try:
     value=json.load(sys.stdin)
     assert value.get("schema")=="av1encode.capabilities"
     assert 2 in value.get("supported_protocol_versions", [])
+    features=value.get("features") or {}
+    required_features=(
+        "semantic_planning", "opaque_plan_id", "fingerprint_invalidation",
+        "sampled_predictions", "semantic_requested_encoder",
+        "semantic_quality_off", "semantic_scaling", "semantic_denoise",
+        "semantic_audio_optimize",
+    )
+    assert all(features.get(feature) is True for feature in required_features)
     name=value.get("auto_encoder") or ""
     records={item.get("name"): item for item in value.get("encoders", []) if isinstance(item, dict)}
     record=records.get(name, {})
