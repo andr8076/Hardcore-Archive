@@ -121,6 +121,19 @@ measure_preflight_quality() {
     return 0
 }
 apply_encoder() { video_encoder=$1; }
+hardcore_prepare_av1encode_plan() {
+    [[ ${MOCK_AV1_PLAN:-0} == 1 ]] || return 1
+    HARDCORE_AV1ENCODE_PLAN_REASON=${AV1_PLAN_REASON:-candidate-valid}
+    if [[ ${AV1_PLAN_RC:-0} != 0 ]]; then
+        return "$AV1_PLAN_RC"
+    fi
+    AV1_DEPENDENCY_PLAN="$TEST_ROOT/av1-plan.json"
+    printf '%s\n' '{"protocol_version":2,"plan_id":"test-av1-plan"}' > "$AV1_DEPENDENCY_PLAN"
+    HARDCORE_AV1ENCODE_PLAN_ID=test-av1-plan
+    HARDCORE_AV1ENCODE_PLAN_ENCODER=$video_encoder
+    HARDCORE_AV1ENCODE_PREDICTED_BYTES=${AV1_PLAN_BYTES:-200000}
+    HARDCORE_AV1ENCODE_PREDICTED_QUALITY=${AV1_PLAN_QUALITY:-95}
+}
 '''
 
 
@@ -288,11 +301,11 @@ printf 'RESULT:%s:%s:%s\n' "$rc" "$CAL_BEST_QUALITY" "$CAL_REASON"
         env = dict(INPUT_PATH=source, HARDCORE_ARCHIVE_VIDEO_CODEC_AUTO=1,
                    HARDCORE_ARCHIVE_AUTO_AV1_ENCODER="av1_vaapi",
                    HARDCORE_ARCHIVE_AUTO_HEVC_ENCODER="hevc_vaapi",
-                   HARDCORE_ARCHIVE_TIMING_FILE=timings)
+                   HARDCORE_ARCHIVE_TIMING_FILE=timings, MOCK_AV1_PLAN=1)
         self.run_calibration(body, **env)
         output, encodes, _ = self.run_calibration(body, **env)
-        self.assertEqual(output.count("Calibration cache source: video"), 2)
-        self.assertEqual(len(encodes), 2)
+        self.assertEqual(output.count("Calibration cache source: video"), 1)
+        self.assertEqual(len(encodes), 1)
         rows = [line.split("\t") for line in timings.read_text().splitlines()[1:]]
         self.assertEqual(len(rows), 4)
         self.assertTrue(all(phase == "video_calibration" and int(ns) > 0 and rc == "0"
@@ -495,13 +508,14 @@ calibrate_and_choose_video_codec
 run_video_preflight
 printf 'SELECTED:%s\n' "$video_encoder"
 '''
-        output, _, _ = self.run_calibration(body)
+        output, _, _ = self.run_calibration(body, MOCK_AV1_PLAN=1)
         self.assertIn("SELECTED:av1_vaapi", output)
-        self.assertEqual(len(list(self.cache.iterdir())), 2)
-        output, encodes, _ = self.run_calibration(body)
+        self.assertIn("Selected AV1 through sealed AV1Encode plan test-av1-plan", output)
+        self.assertEqual(len(list(self.cache.iterdir())), 1)
+        output, encodes, _ = self.run_calibration(body, MOCK_AV1_PLAN=1)
         self.assertIn("SELECTED:av1_vaapi", output)
-        self.assertEqual(len(encodes), 12)
-        output, _, _ = self.run_calibration(body, CURVE="av1-plateau")
+        self.assertEqual(len(encodes), 6)
+        output, _, _ = self.run_calibration(body, MOCK_AV1_PLAN=1, AV1_PLAN_BYTES=2000000)
         self.assertIn("SELECTED:hevc_vaapi", output)
 
     def test_quality_off_software_encoder_and_unsupported_paths(self):
@@ -659,13 +673,15 @@ calibrate_and_choose_video_codec
         source = self.root / "source.mov"
         source.write_bytes(b"source")
         body = "calibrate_and_choose_video_codec\nprintf 'SELECTED:%s\\n' \"$video_encoder\"\n"
-        changes = dict(INPUT_PATH=source, CURVE="av1-plateau", HARDCORE_ARCHIVE_VIDEO_CODEC_AUTO=1,
+        changes = dict(INPUT_PATH=source, HARDCORE_ARCHIVE_VIDEO_CODEC_AUTO=1,
                        HARDCORE_ARCHIVE_AUTO_AV1_ENCODER="av1_vaapi", HARDCORE_ARCHIVE_AUTO_HEVC_ENCODER="hevc_vaapi")
+        changes.update(MOCK_AV1_PLAN=1, AV1_PLAN_RC=3,
+                       AV1_PLAN_REASON="quality-floor-not-met")
         self.run_calibration(body, **changes)
         output, encodes, _ = self.run_calibration(body, **changes)
         self.assertIn("SELECTED:hevc_vaapi", output)
-        self.assertIn("cached-quality-rejection-confirmed", output)
-        self.assertEqual(len(encodes), 2)
+        self.assertIn("result=quality-floor-not-met", output)
+        self.assertEqual(len(encodes), 1)
 
     def test_config_values_export_to_children(self):
         functions = CORE.split("\ntrim_config_value() {", 1)[1].split("\nsafe_slug() {", 1)[0]

@@ -87,3 +87,18 @@ jobs:
       - name: Run complete policy suite
         shell: bash
         run: bash tests/frontend-policy.sh
+
+  av1encode-vendored-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install AV1 integration dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Run the real vendored protocol boundary
+        shell: bash
+        run: bash tests/av1encode-vendored-integration.sh

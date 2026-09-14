@@ -62,7 +62,7 @@ The old transformation scripts are retained only as development/migration histor
 
 ### AV1Encode dependency
 
-AV1 encoding is migrating behind the versioned
+AV1 encoding runs behind the versioned
 [`AV1Encode`](https://github.com/andr8076/AV1Encode) process interface. The
 repository pins AV1Encode as `vendor/AV1Encode`; portable releases include that
 pinned source automatically. Source checkouts should initialize it with:
@@ -80,11 +80,12 @@ Implementation, runtime, input, and requirement fingerprints make saved plans
 stale whenever AV1Encode policy or the execution environment changes.
 
 AUTO remains hardware-only. `libsvtav1` is accepted only after an explicit
-manual selection. Hardcore Archive still owns archive-wide decisions and final
-completed-output acceptance. During the migration, archive audio optimization,
-scaling, and denoising continue through the existing compatibility path because
-protocol 2 does not yet express those transformations; copied-audio AV1 jobs
-without scaling or denoising use the dependency end to end.
+manual selection. Hardcore Archive still owns archive-wide decisions, AV1/HEVC
+competition, and final completed-output acceptance. AV1Encode owns every AV1
+recipe and execution path, including archive audio optimization, scaling,
+denoising, explicit encoder requests, and quality-disabled jobs. During
+automatic codec competition, Hardcore Archive compares AV1Encode's sealed AV1
+prediction with its HEVC candidate and executes the winning plan unchanged.
 
 ## Configuration
 

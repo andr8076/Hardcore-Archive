@@ -22,7 +22,9 @@ case ${1:-} in
         if [[ ${FAKE_NO_HARDWARE:-0} == 1 ]]; then auto=null; usable=false
         else auto='"av1_vaapi"'; usable=true
         fi
-        printf '%s\n' "{\"schema\":\"av1encode.capabilities\",\"protocol_version\":2,\"supported_protocol_versions\":[1,2],\"tool\":{\"name\":\"AV1Encode\",\"version\":\"test-2\"},\"auto_encoder\":$auto,\"encoders\":[{\"name\":\"av1_vaapi\",\"class\":\"hardware\",\"auto_eligible\":true,\"usable\":$usable},{\"name\":\"libsvtav1\",\"class\":\"software\",\"auto_eligible\":false,\"usable\":true}]}"
+        semantic_audio=true
+        [[ ${FAKE_INCOMPLETE_SEMANTICS:-0} != 1 ]] || semantic_audio=false
+        printf '%s\n' "{\"schema\":\"av1encode.capabilities\",\"protocol_version\":2,\"supported_protocol_versions\":[1,2],\"tool\":{\"name\":\"AV1Encode\",\"version\":\"test-2\"},\"features\":{\"semantic_planning\":true,\"opaque_plan_id\":true,\"fingerprint_invalidation\":true,\"sampled_predictions\":true,\"semantic_requested_encoder\":true,\"semantic_quality_off\":true,\"semantic_scaling\":true,\"semantic_denoise\":true,\"semantic_audio_optimize\":$semantic_audio},\"auto_encoder\":$auto,\"encoders\":[{\"name\":\"av1_vaapi\",\"class\":\"hardware\",\"auto_eligible\":true,\"usable\":$usable},{\"name\":\"libsvtav1\",\"class\":\"software\",\"auto_eligible\":false,\"usable\":true}]}"
         ;;
     --machine-evaluate)
         python3 - "$2" "$4" <<'PY'
@@ -69,6 +71,11 @@ hardcore_av1encode_probe
 hardcore_av1encode_probe libsvtav1
 [[ $HARDCORE_AV1ENCODE_SELECTED_ENCODER == libsvtav1 ]]
 [[ $HARDCORE_AV1ENCODE_SELECTED_CLASS == software ]]
+if FAKE_INCOMPLETE_SEMANTICS=1 hardcore_av1encode_probe; then
+    printf 'Incomplete protocol-2 semantic support was accepted.\n' >&2
+    exit 1
+fi
+[[ $HARDCORE_AV1ENCODE_ERROR == *'invalid capability document'* ]]
 FAKE_NO_HARDWARE=1 hardcore_av1encode_probe libsvtav1
 [[ -z $HARDCORE_AV1ENCODE_AUTO_ENCODER ]]
 [[ $HARDCORE_AV1ENCODE_SELECTED_ENCODER == libsvtav1 ]]
@@ -86,12 +93,28 @@ assert value["schema"] == "av1encode.requirements"
 assert value["protocol_version"] == 2
 assert value["hardware_policy"] == "auto_hardware_only"
 assert value["quality"] == {
+    "mode":"required",
     "metric":"vmaf", "target":92.0, "p10_minimum":88.0,
     "sustained_floor":86.0, "maximum_sustained_seconds":1.0,
 }
 assert value["preservation"] == {"streams":"all", "chapters":True, "metadata":True}
 assert value["audio"] == {"mode":"copy_all"}
 assert value["video"] == {"maximum_height":None, "denoise":"never"}
+assert value["requested_encoder"] is None
+PY
+
+extended=$TMP/extended-requirements.json
+hardcore_av1encode_write_requirements "$extended" "$TMP/source.mkv" "$output" \
+    manual_software 0 144 required 1 archive_optimize libsvtav1 off
+python3 - "$extended" <<'PY'
+import json, sys
+value=json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["hardware_policy"] == "manual_software"
+assert value["requested_encoder"] == "libsvtav1"
+assert value["quality"]["mode"] == "off"
+assert value["video"] == {"maximum_height":144, "denoise":"required"}
+assert value["audio"] == {"mode":"archive_optimize"}
+assert value["evaluation"] == {"sample_seconds":1.0}
 PY
 
 hardcore_av1encode_evaluate "$requirements" "$plan"

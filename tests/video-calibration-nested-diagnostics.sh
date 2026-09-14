@@ -25,8 +25,10 @@ assert_lacks() {
     }
 }
 
-assert_has '# HARDCORE_VIDEO_CODEC_COMPETITION_V2'
-assert_has "av1_vaapi) printf '1 255 q_idx'"
+assert_has '# HARDCORE_AV1ENCODE_CODEC_COMPETITION_V1'
+assert_has 'hardcore_calibrate_av1encode_candidate()'
+assert_has 'AV1Encode candidate: predicted saving'
+assert_has 'Selected AV1 through sealed AV1Encode plan'
 assert_has "hevc_vaapi) printf '1 51 QP'"
 assert_has 'calibrate_hardware_candidate()'
 assert_has 'Automatic codec competition'
@@ -34,6 +36,9 @@ assert_has 'Winner: AV1, because its quality-valid candidate is predicted smalle
 assert_has 'Winner: HEVC, because its quality-valid candidate is predicted smaller.'
 assert_has 'HARDCORE_ARCHIVE_AUTO_AV1_ENCODER'
 assert_has 'HARDCORE_ARCHIVE_AUTO_HEVC_ENCODER'
+assert_lacks "av1_vaapi) printf '1 255 q_idx'"
+assert_lacks 'av1_nvenc|hevc_nvenc) CAL_COMMAND'
+assert_lacks 'libsvtav1) CAL_COMMAND'
 assert_has 'predicted<=-20'
 assert_has 'Preflight predicts severe expansion'
 assert_has 'in_range=auto:out_range=tv,setsar=1'
