@@ -1,3 +1,8 @@
 [submodule "vendor/AV1Encode"]
 	path = vendor/AV1Encode
 	url = https://github.com/andr8076/AV1Encode.git
+	branch = main
+[submodule "vendor/265Encode"]
+	path = vendor/265Encode
+	url = https://github.com/andr8076/265Encode.git
+	branch = main

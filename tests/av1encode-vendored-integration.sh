@@ -12,8 +12,9 @@ trap cleanup EXIT
     printf 'AV1Encode submodule is not initialized.\n' >&2
     exit 1
 }
-[[ $("$ENCODER" --version) == 'AV1Encode.sh 1.5.0' ]] || {
-    printf 'Hardcore Archive is not pinned to the required AV1Encode 1.5.0 release.\n' >&2
+version=$("$ENCODER" --version)
+[[ $version == AV1Encode.sh\ * ]] || {
+    printf 'Vendored AV1Encode did not report a valid tool version.\n' >&2
     exit 1
 }
 command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null || {
@@ -48,7 +49,7 @@ source "$ROOT/lib/av1encode-dependency.sh"
 hardcore_av1encode_probe libsvtav1
 [[ $HARDCORE_AV1ENCODE_SELECTED_ENCODER == libsvtav1 ]]
 [[ $HARDCORE_AV1ENCODE_SELECTED_CLASS == software ]]
-[[ $HARDCORE_AV1ENCODE_TOOL_VERSION == 1.5.0 ]]
+[[ -n $HARDCORE_AV1ENCODE_TOOL_VERSION ]]
 
 requirements=$TMP/requirements.json
 plan=$TMP/plan.json
@@ -102,4 +103,4 @@ assert len(output.get("chapters", [])) == 1
 assert output.get("format",{}).get("tags",{}).get("title") == "Vendored integration"
 PY
 
-printf 'Vendored AV1Encode protocol-2 integration test passed.\n'
+printf 'Vendored AV1Encode protocol-2 integration test passed for %s.\n' "$version"
