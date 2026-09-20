@@ -8,6 +8,28 @@ The benchmark suite has two complementary layers:
    routing, image, video, nested-container, verification, and resource-scheduler
    pipeline.
 
+For comparisons against more archive engines on an existing folder, use the
+Compression Judge:
+
+```bash
+python3 benchmarks/compression-judge.py "/path/to/work tools" \
+  --hardcore "$PWD" \
+  --output-dir "/path/to/benchmark-results"
+```
+
+It runs Hardcore Archive in both full transform-capable mode and strict
+byte-preserving mode, then compares those results with Base9, 7-Zip, Zstandard,
+XZ, gzip, bzip2, LZ4 and Brotli when installed. Generic stream compressors all
+receive the same canonical TAR. Every restored tree is checked against a
+SHA-256 manifest; a transformed Hardcore result is reported separately and
+cannot win the exact-lossless ranking.
+
+Long runs write `run-status.json` every minute. Check the latest run with:
+
+```bash
+python3 benchmarks/check-compression-judge.py "/path/to/benchmark-results"
+```
+
 ## Byte-preserving baseline
 
 The baseline corpus measures the five numbers needed to judge an archive
