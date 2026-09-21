@@ -756,7 +756,6 @@ def benchmark_hardcore(
     result.archive_path = str(archive)
     result.archive_bytes = archive.stat().st_size
 
-    restored_dir.mkdir(parents=True, exist_ok=True)
     cmd = [exe, "-y", "--restore", str(archive), str(restored_dir)]
     result.restore_command = quote_cmd(cmd)
     rc, elapsed = run_logged(cmd, log)

@@ -1808,6 +1808,14 @@ while (( $# > 0 )); do
             NESTED_REPACK=false
             shift
             ;;
+        --container-repack)
+            CONTAINER_REPACK=true
+            shift
+            ;;
+        --no-container-repack)
+            CONTAINER_REPACK=false
+            shift
+            ;;
         --nested-max-depth)
             (( $# >= 2 )) || die "--nested-max-depth requires a non-negative integer."
             NESTED_MAX_DEPTH=$2
@@ -5196,7 +5204,7 @@ prepare_and_add_nested_archives() {
 
 build_sparse_manifest() {
     mkdir -p -- "$METADATA_DIR"
-    printf 'path\tlogical_size\thole_start\thole_length\n' > "$SPARSE_MANIFEST"
+    printf 'path\tlogical_size\tstart\tlength\n' > "$SPARSE_MANIFEST"
     command -v python3 >/dev/null 2>&1 || return 0
     python3 - "$SOURCE_PARENT" "$INVENTORY_RAW" >> "$SPARSE_MANIFEST" <<'PYSPARSE'
 import os,sys

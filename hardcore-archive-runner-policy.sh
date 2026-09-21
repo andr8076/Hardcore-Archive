@@ -440,7 +440,12 @@ if [[ $VIDEO_ENABLED != true || $VIDEO_RELEVANT != true ]]; then
 fi
 if [[ $IMAGE_ENABLED != true || $IMAGE_RELEVANT != true ]]; then IMAGE_ENABLED=false; FORWARDED+=(--no-image-optimize); fi
 if [[ $NESTED_ENABLED != true || $NESTED_RELEVANT != true ]]; then NESTED_ENABLED=false; FORWARDED+=(--no-nested-repack); fi
-if [[ $CONTAINER_ENABLED != true || $CONTAINER_RELEVANT != true ]]; then CONTAINER_ENABLED=false; fi
+if [[ $CONTAINER_ENABLED != true || $CONTAINER_RELEVANT != true ]]; then
+    CONTAINER_ENABLED=false
+    FORWARDED+=(--no-container-repack)
+else
+    FORWARDED+=(--container-repack)
+fi
 
 # Preserve CLI opt-in precedence over an explicit false config value.
 TEMP_CONFIG=''

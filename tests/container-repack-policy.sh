@@ -26,6 +26,8 @@ grep -Fq 'NESTED_ENABLED=$(resolve_bool_state "$NESTED_STATE" "$NESTED_CONFIG" t
 grep -Fq 'CONTAINER_ENABLED=$(resolve_bool_state "$CONTAINER_STATE" "$CONTAINER_CONFIG" true)' "$POLICY"
 grep -Fq -- '--container-repack' "$POLICY"
 grep -Fq -- '--no-container-repack' "$POLICY"
+grep -Fq -- '--container-repack)' "$CORE"
+grep -Fq -- '--no-container-repack)' "$CORE"
 
 # Container orchestration is already part of the checked-in static engine.
 for expected in \

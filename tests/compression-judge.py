@@ -44,6 +44,36 @@ def main() -> int:
         assert differences == ["size changed: alpha.txt (600 -> 8)"]
         assert difference_report.read_text(encoding="utf-8") == "size changed: alpha.txt (600 -> 8)\n"
 
+        fake_hardcore = root / "fake-hardcore"
+        fake_hardcore.write_text(
+            """#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ ${1:-} == --version ]]; then printf 'fake hardcore 1.0\\n'; exit 0; fi
+if [[ " $* " == *" --restore "* ]]; then
+    archive=${@: -2:1}; destination=${@: -1}
+    [[ ! -e $destination ]] || { printf 'destination already exists\\n' >&2; exit 41; }
+    mkdir -p -- "$destination"
+    tar -xf "$archive" -C "$destination"
+else
+    source=${@: -2:1}; archive=${@: -1}
+    tar -cf "$archive" -C "$(dirname -- "$source")" "$(basename -- "$source")"
+fi
+""",
+            encoding="utf-8",
+        )
+        fake_hardcore.chmod(0o755)
+        hardcore_result = judge.benchmark_hardcore(
+            str(fake_hardcore),
+            source,
+            expected,
+            judge.payload_size(expected),
+            0,
+            root / "hardcore-results",
+            lossless=True,
+        )
+        assert hardcore_result.status == "PASS", hardcore_result
+        assert hardcore_result.exact_payload_roundtrip is True
+
         fake_bin = root / "bin"
         fake_bin.mkdir()
         fake_gzip = fake_bin / "gzip"

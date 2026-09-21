@@ -145,6 +145,7 @@ out=$(run_frontend --no-video-transcode --no-image-optimize --no-nested-repack -
 assert_has "$out" 'ARG=--no-video-transcode'
 assert_has "$out" 'ARG=--no-image-optimize'
 assert_has "$out" 'ARG=--no-nested-repack'
+assert_has "$out" 'ARG=--no-container-repack'
 assert_has "$out" 'DEP_APPROVED=1'
 for tool in ffmpeg ffprobe jpegtran djpeg oxipng setsid; do mv "$TMP/bin/$tool.off" "$TMP/bin/$tool"; done
 
