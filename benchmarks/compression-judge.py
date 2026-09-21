@@ -820,6 +820,14 @@ def skipped_result(name: str, why: str, payload: int, tar_bytes: int) -> Result:
     )
 
 
+def cleanup_method_restores(output: Path, method: str) -> None:
+    method_dir = output / method
+    for name in ("restored", "restored.tar", "unpack"):
+        path = method_dir / name
+        if path.exists():
+            remove_path(path)
+
+
 def compute_rankings(results: list[Result], weights: tuple[float, float, float]):
     eligible = [
         r for r in results
@@ -1195,7 +1203,9 @@ def main() -> int:
                 else:
                     result = benchmark_stream_method(
                         "zstd", exe, canonical_tar, initial_manifest, payload, output,
-                        lambda out: [exe, "-q", "--ultra", "-22", "-T0", "-f", str(canonical_tar), "-o", str(out)],
+                        # Level 22 allocates substantial memory per worker; a
+                        # single worker keeps Farm1's 8 GiB machine within RAM.
+                        lambda out: [exe, "-q", "--ultra", "-22", "-T1", "-f", str(canonical_tar), "-o", str(out)],
                         lambda arc: [exe, "-q", "-d", "-f", str(arc), "-o", str(output / "zstd" / "restored.tar")],
                         ".tar.zst",
                     )
@@ -1277,6 +1287,10 @@ def main() -> int:
             )
 
         results.append(result)
+        # A successful verification no longer needs unpacked copies. Keeping
+        # them until the end can fill the disk before later methods finish.
+        if not args.keep_restores:
+            cleanup_method_restores(output, method)
         if result.status == "PASS":
             print(
                 f"          PASS  {human_bytes(result.archive_bytes)}  "
@@ -1349,14 +1363,6 @@ def main() -> int:
         args.weights,
         source_stable,
     )
-
-    if not args.keep_restores:
-        for r in results:
-            method_dir = output / r.method
-            for name in ("restored", "restored.tar", "unpack"):
-                p = method_dir / name
-                if p.exists():
-                    remove_path(p)
 
     print_summary(results)
     print()

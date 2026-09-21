@@ -234,6 +234,82 @@ def capture_files(root: pathlib.Path, destination: pathlib.Path, stream) -> int:
     return count
 
 
+def remap_nested_metadata(metadata_dir: pathlib.Path, decisions: pathlib.Path) -> int:
+    """Point captured source metadata at the renamed, repacked archive members."""
+    mapping = {}
+    with decisions.open(encoding="utf-8", errors="surrogateescape") as handle:
+        for row in handle:
+            fields = row.rstrip("\n").split("\t")
+            if len(fields) != 7:
+                raise MetadataError("invalid nested archive decision")
+            action, original, archived = fields[:3]
+            if action == "repacked" and original != archived:
+                if original in mapping or not original or not archived:
+                    raise MetadataError("duplicate or invalid nested archive decision")
+                mapping[original] = archived
+    if not mapping:
+        return 0
+
+    files = metadata_dir / "files.tsv"
+    rows = files.read_text(encoding="utf-8", errors="surrogateescape").splitlines(keepends=True)
+    seen = set()
+    found = set()
+    for index, row in enumerate(rows[1:], 1):
+        fields = row.rstrip("\n").split("\t", 6)
+        if len(fields) != 7:
+            raise MetadataError("invalid files.tsv during nested remapping")
+        original = fields[5]
+        found.add(original)
+        fields[5] = mapping.get(original, original)
+        if fields[5] in seen:
+            raise MetadataError(f"nested archive path collides with metadata: {fields[5]!r}")
+        seen.add(fields[5])
+        rows[index] = "\t".join(fields) + "\n"
+    if set(mapping) - found:
+        raise MetadataError("repacked nested archive missing from captured metadata")
+
+    acl = metadata_dir / "acl.txt"
+    acl_text = acl.read_text(encoding="utf-8", errors="surrogateescape")
+    if acl_text.startswith(DARWIN_ACL_HEADER + "\n"):
+        acl_lines = acl_text.splitlines(keepends=True)
+        for index, line in enumerate(acl_lines[1:], 1):
+            record = json.loads(line)
+            if record.get("path") in mapping:
+                record["path"] = mapping[record["path"]]
+                acl_lines[index] = json.dumps(record, ensure_ascii=True) + "\n"
+        acl_text = "".join(acl_lines)
+    else:
+        acl_text = "".join(
+            "# file: " + mapping.get(line[8:-1], line[8:-1]) + "\n"
+            if line.startswith("# file: ") and line.endswith("\n") else line
+            for line in acl_text.splitlines(keepends=True)
+        )
+
+    xattrs = metadata_dir / "xattrs.txt"
+    xattr_lines = xattrs.read_text(encoding="utf-8", errors="surrogateescape").splitlines(keepends=True)
+    for index, line in enumerate(xattr_lines[1:], 1):
+        record = json.loads(line)
+        if record.get("path") in mapping:
+            record["path"] = mapping[record["path"]]
+            xattr_lines[index] = json.dumps(record, ensure_ascii=True) + "\n"
+
+    sparse = metadata_dir / "sparse.tsv"
+    sparse_lines = sparse.read_text(encoding="utf-8", errors="surrogateescape").splitlines(keepends=True)
+    kept_sparse = sparse_lines[:1]
+    for line in sparse_lines[1:]:
+        fields = line.rstrip("\n").split("\t", 3)
+        if len(fields) != 4:
+            raise MetadataError("invalid sparse metadata during nested remapping")
+        # The new compressed bytes cannot inherit the source archive's holes.
+        if fields[0] not in mapping:
+            kept_sparse.append(line)
+
+    for path, content in ((files, "".join(rows)), (acl, acl_text),
+                          (xattrs, "".join(xattr_lines)), (sparse, "".join(kept_sparse))):
+        path.write_text(content, encoding="utf-8", errors="surrogateescape")
+    return len(mapping)
+
+
 def capture_darwin_acl(root: pathlib.Path, metadata_dir: pathlib.Path) -> int:
     """Use the existing inventory, including its mount and symlink boundaries."""
     root = root.resolve()
@@ -655,6 +731,7 @@ def main() -> int:
     actions.add_argument("--capture-files", action="store_true",
                         help="Capture NUL-delimited relative paths from stdin into files.tsv")
     actions.add_argument("--capture-acl", action="store_true", help="Capture native macOS ACLs using files.tsv")
+    actions.add_argument("--remap-nested", metavar="DECISIONS", help="Remap metadata for renamed nested archives")
     actions.add_argument("--check-acl", metavar="PATH", help="Read-only native macOS ACL capability probe")
     args = parser.parse_args()
     if not args.check_acl and (not args.root or not args.metadata_dir):
@@ -666,10 +743,12 @@ def main() -> int:
             capture_darwin_acl(pathlib.Path(args.root), pathlib.Path(args.metadata_dir))
         elif args.capture_files:
             capture_files(pathlib.Path(args.root), pathlib.Path(args.metadata_dir) / "files.tsv", sys.stdin.buffer)
+        elif args.remap_nested:
+            remap_nested_metadata(pathlib.Path(args.metadata_dir), pathlib.Path(args.remap_nested))
         else:
             restore(pathlib.Path(args.root), pathlib.Path(args.metadata_dir))
     except (MetadataError, OSError, UnicodeError) as exc:
-        operation = "ACL probe" if args.check_acl else "capture" if args.capture_files or args.capture_acl else "restoration"
+        operation = "ACL probe" if args.check_acl else "capture" if args.capture_files or args.capture_acl or args.remap_nested else "restoration"
         print(f"Error: metadata {operation} failed: {exc}", file=sys.stderr)
         return 1
     return 0

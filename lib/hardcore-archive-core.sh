@@ -5315,6 +5315,12 @@ with open(output,'w',encoding='utf-8') as out:
                 out.write(json.dumps(record,ensure_ascii=True,separators=(',',':'))+'\n')
 PYXATTRSAVE
 
+    if [[ -s $NESTED_RESULT_MANIFEST ]]; then
+        python3 "$METADATA_HELPER" --remap-nested "$NESTED_RESULT_MANIFEST" \
+            --root "$SOURCE_PARENT" --metadata-dir "$METADATA_DIR" || \
+            die 'Could not map nested archive metadata to its stored path.'
+    fi
+
     cat > "$RESTORE_HELPER" <<'RESTORE_NOTES'
 Metadata in this directory is data only. Do not execute files from an archive.
 Use `hardcore-archive --restore ARCHIVE.7z` so the installed, trusted program

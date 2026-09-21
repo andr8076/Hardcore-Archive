@@ -94,6 +94,20 @@ fi
         fake_gzip.chmod(0o755)
 
         output = root / "results"
+        fake_bzip2 = fake_bin / "bzip2"
+        fake_bzip2.write_text(
+            f"""#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ ${{1:-}} == --version ]]; then printf 'fake bzip2 1.0\\n'; exit 0; fi
+if [[ -e '{output}/gzip/restored' || -e '{output}/gzip/restored.tar' ]]; then
+    printf 'previous method restore was not cleaned up\\n' >&2
+    exit 42
+fi
+cat -- "${{@: -1}}"
+""",
+            encoding="utf-8",
+        )
+        fake_bzip2.chmod(0o755)
         environment = {"PATH": f"{fake_bin}:/usr/bin:/bin"}
         completed = subprocess.run(
             [
@@ -101,7 +115,7 @@ fi
                 str(JUDGE),
                 str(source),
                 "--methods",
-                "gzip",
+                "gzip,bzip2",
                 "--output-dir",
                 str(output),
                 "--heartbeat-seconds",
@@ -117,6 +131,9 @@ fi
         results = json.loads((output / "results.json").read_text(encoding="utf-8"))
         assert results["source_stable"] is True
         assert results["results"][0]["exact_payload_roundtrip"] is True
+        assert results["results"][1]["status"] == "PASS"
+        assert not (output / "gzip" / "restored").exists()
+        assert not (output / "bzip2" / "restored").exists()
         subprocess.run([sys.executable, str(CHECK), str(output)], check=True)
 
     print("Compression Judge tests passed.")
