@@ -37,6 +37,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hardcore_transform_policy import (  # noqa: E402
+    TransformPolicyError,
+    check_transform_roundtrip,
+    declared_transforms,
+)
+
 
 DEFAULT_METHODS = (
     "hardcore",
@@ -409,8 +416,11 @@ def verify_restored(
     restored_root: Path,
     expected_manifest: dict,
     difference_report: Optional[Path] = None,
+    actual_manifest_out: Optional[dict] = None,
 ) -> tuple[bool, list[str], int]:
     actual = folder_manifest(restored_root)
+    if actual_manifest_out is not None:
+        actual_manifest_out.update(actual)
     all_diffs = list(manifest_diff_entries(expected_manifest, actual))
     if difference_report is not None:
         if all_diffs:
@@ -710,6 +720,7 @@ def benchmark_hardcore(
     canonical_tar_bytes: int,
     out_dir: Path,
     lossless: bool,
+    sevenzip: Optional[str] = None,
 ) -> Result:
     name = "hardcore-lossless" if lossless else "hardcore"
     category = "lossless" if lossless else "transform-capable"
@@ -770,8 +781,9 @@ def benchmark_hardcore(
     try:
         root = restored_root_flexible(restored_dir, source.name)
         difference_report = method_dir / "payload-differences.txt"
+        restored_manifest = {}
         exact, diffs, difference_count = verify_restored(
-            root, source_manifest, difference_report
+            root, source_manifest, difference_report, restored_manifest
         )
     except Exception as exc:
         result.status = "FAIL"
@@ -794,15 +806,30 @@ def benchmark_hardcore(
         result.verification = "payload-mismatch"
         result.note = "; ".join(diffs)
     else:
-        # A successful Hardcore create/restore may intentionally transform media
-        # or safe containers. Do not pretend this is byte-identical.
-        result.status = "TRANSFORMED"
-        result.verification = "hardcore-internal-validation + restore-success"
-        result.note = (
-            "Payload bytes changed by Hardcore's transform-capable policy; "
-            "excluded from exact-lossless ranking. Differences: "
-            + "; ".join(diffs)
-        )
+        # Compare one hashed restore manifest to the declared transform lanes.
+        # Every other path must match the original SHA-256 manifest exactly.
+        try:
+            sevenzip = sevenzip or resolve_executable(None, ["7zz", "7z", "7za"])
+            if not sevenzip:
+                raise TransformPolicyError("7z is needed to read Hardcore's decision manifests")
+            decisions = declared_transforms(archive, sevenzip, source.name)
+            issues = check_transform_roundtrip(source_manifest, restored_manifest, decisions)
+        except (TransformPolicyError, OSError, subprocess.TimeoutExpired) as exc:
+            issues = [str(exc)]
+        if issues:
+            policy_report = method_dir / "unexpected-transform-differences.txt"
+            policy_report.write_text("\n".join(issues) + "\n", encoding="utf-8")
+            result.status = "FAIL"
+            result.verification = "transform-policy-mismatch"
+            result.note = f"{len(issues)} undeclared or invalid changes; {policy_report}: " + "; ".join(issues[:3])
+        else:
+            result.status = "TRANSFORMED"
+            result.verification = "sha256-unchanged + declared-transform-sizes"
+            result.note = (
+                "Changed paths match Hardcore's declared transform decisions; "
+                "excluded from exact-lossless ranking. Differences: "
+                + "; ".join(diffs)
+            )
 
     archive_metrics(result)
     return result
@@ -1173,7 +1200,7 @@ def main() -> int:
                     result = skipped_result(method, "hardcore-archive executable not found; pass either the executable or its project directory with --hardcore PATH", payload, tar_bytes)
                 else:
                     result = benchmark_hardcore(
-                        hardcore, source, initial_manifest, payload, tar_bytes, output, lossless=False
+                        hardcore, source, initial_manifest, payload, tar_bytes, output, lossless=False, sevenzip=seven
                     )
 
             elif method == "hardcore-lossless":
