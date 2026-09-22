@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""Direct staging keeps source bytes intact and rejects unsafe lane decisions."""
+import importlib.util
+from pathlib import Path
+import sys
+import tempfile
+
+
+helper = Path(__file__).resolve().parents[1] / "lib/hardcore-direct-stage.py"
+spec = importlib.util.spec_from_file_location("hardcore_direct_stage", helper)
+assert spec and spec.loader
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+
+def rejects(source, output, lanes, contains):
+    try:
+        module.assemble(source, output, lanes)
+    except ValueError as error:
+        assert contains in str(error), str(error)
+    else:
+        raise AssertionError(f"accepted invalid decision: {contains}")
+    assert not output.exists()
+
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    source = root / "Work Tools"
+    (source / "docs").mkdir(parents=True)
+    (source / "docs" / "keep.txt").write_bytes(b"unchanged")
+    (source / "docs" / "nested.zip").write_bytes(b"zip contents")
+    (source / "docs" / "photo.png").write_bytes(b"original image")
+    (source / "docs" / "clip.mp4").write_bytes(b"original video")
+    (source / "docs" / "omit.mp4").write_bytes(b"omitted video")
+    image = root / "image-lane"
+    video = root / "video-lane"
+    nested = root / "nested-lane"
+    for directory in (image, video, nested):
+        (directory / source.name / "docs").mkdir(parents=True)
+    (image / source.name / "docs" / "photo.png").write_bytes(b"optimized image")
+    (video / source.name / "docs" / "clip.mkv").write_bytes(b"converted video")
+    (nested / source.name / "docs" / "nested.7z").write_bytes(b"converted zip")
+    image_manifest = root / "images.tsv"
+    video_manifest = root / "videos.tsv"
+    nested_manifest = root / "nested.tsv"
+    image_manifest.write_text(f"optimized\t{source.name}/docs/photo.png\t{source.name}/docs/photo.png\t14\t15\tpngquant\n")
+    video_manifest.write_text(
+        f"transcoded\t{source.name}/docs/clip.mp4\t{source.name}/docs/clip.mkv\t14\t15\n"
+        f"omitted\t{source.name}/docs/omit.mp4\t\t13\t0\n"
+    )
+    nested_manifest.write_text(f"repacked\t{source.name}/docs/nested.zip\t{source.name}/docs/nested.7z\t12\t13\t13\tsmaller\n")
+    lanes = [module.Lane("image", image_manifest, image),
+             module.Lane("video", video_manifest, video),
+             module.Lane("nested", nested_manifest, nested)]
+    # The archive target must be distinct from every source entry.
+    rejects(source, source / "stage", lanes, "stage must be separate")
+    (source / "docs" / "nested.7z").write_bytes(b"collision")
+    rejects(source, root / "collision", lanes, "collides with source")
+    (source / "docs" / "nested.7z").unlink()
+    stage = root / "stage"
+    assert module.assemble(source, stage, lanes) == 4
+    staged = stage / source.name / "docs"
+    assert (staged / "keep.txt").read_bytes() == b"unchanged"
+    assert (staged / "photo.png").read_bytes() == b"optimized image"
+    assert (staged / "clip.mkv").read_bytes() == b"converted video"
+    assert (staged / "nested.7z").read_bytes() == b"converted zip"
+    assert not (staged / "clip.mp4").exists()
+    assert not (staged / "nested.zip").exists()
+    assert not (staged / "omit.mp4").exists()
+    assert (source / "docs" / "clip.mp4").read_bytes() == b"original video"
+    assert (source / "docs" / "omit.mp4").read_bytes() == b"omitted video"
+
+    nested_manifest.write_text(f"repacked\t{source.name}/docs/nested.zip\t../outside\t12\t13\t13\tsmaller\n")
+    rejects(source, root / "traversal", lanes, "unsafe")
+    nested_manifest.write_text(f"repacked\t{source.name}/docs/nested.zip\t{source.name}/docs/nested.7z\t12\t13\t13\tsmaller\n")
+    (nested / source.name / "docs" / "nested.7z").unlink()
+    (nested / source.name / "docs" / "nested.7z").symlink_to(source / "docs" / "nested.zip")
+    rejects(source, root / "linked", lanes, "linked")
+    (nested / source.name / "docs" / "nested.7z").unlink()
+    (nested / source.name / "docs" / "nested.7z").write_bytes(b"converted zip")
+    (source / "docs" / "escape").symlink_to(root, target_is_directory=True)
+    (video / source.name / "docs" / "escape").mkdir()
+    (video / source.name / "docs" / "escape" / "clip.mkv").write_bytes(b"converted video")
+    video_manifest.write_text(
+        f"transcoded\t{source.name}/docs/clip.mp4\t{source.name}/docs/escape/clip.mkv\t14\t15\n"
+    )
+    rejects(source, root / "parent-link", lanes, "linked parent")
+
+print("Direct staging policy tests passed.")
