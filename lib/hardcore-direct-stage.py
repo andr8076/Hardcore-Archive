@@ -3,16 +3,30 @@
 
 This module does not change the production archive backend. The caller owns the
 stage directory and may build one archive from it after all lanes have joined.
-The staged payload alone is not a restorable Hardcore archive: the caller must
-also supply its metadata, manifests, and final archive verification.
+The caller supplies the existing metadata bundle and expected-path list. Final
+archive verification remains the responsibility of the production backend.
 """
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import os
 from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
+
+
+METADATA_FILES = frozenset({
+    "files.tsv", "acl.txt", "xattrs.txt", "RESTORE-NOTES.txt",
+    "sparse.tsv", "archive-info.txt",
+})
+OPTIONAL_MANIFESTS = frozenset({
+    ".hardcore-archive-video-manifest.txt",
+    ".hardcore-archive-image-manifest.txt",
+    ".hardcore-archive-container-manifest.txt",
+    ".hardcore-archive-nested-manifest.txt",
+    ".hardcore-archive-sha256.txt",
+})
 
 
 @dataclass(frozen=True)
@@ -132,12 +146,51 @@ def decisions(source: Path, lanes: list[Lane]) -> list[Replacement]:
     return replacements
 
 
-def assemble(source: Path, stage: Path, lanes: list[Lane]) -> int:
+def stage_manifests(manifest_root: Path, stage: Path) -> None:
+    """Bring in only the trusted metadata and decision files used by restore."""
+    metadata = manifest_root / ".hardcore-archive-metadata"
+    if not metadata.is_dir() or metadata.is_symlink():
+        raise ValueError("missing or linked metadata directory")
+    names = {path.name for path in metadata.iterdir()}
+    if names != METADATA_FILES or any(not regular_file(metadata / name, manifest_root) for name in names):
+        raise ValueError("metadata bundle has missing, unexpected, or linked files")
+    for item in manifest_root.iterdir():
+        if item.name != metadata.name and (item.name not in OPTIONAL_MANIFESTS or
+                                          not regular_file(item, manifest_root)):
+            raise ValueError(f"unexpected or linked internal manifest: {item.name}")
+        subprocess.run(["cp", "-a", "--reflink=auto", "--", str(item), str(stage)], check=True)
+
+
+def verify_staged_paths(stage: Path, expected: Path) -> None:
+    """Use the production expected-path contract before an expensive 7z pass."""
+    wanted = expected.read_text(encoding="utf-8", errors="surrogateescape").splitlines()
+    if not wanted or len(wanted) != len(set(wanted)) or any(
+        not path or path.startswith("/") or "\\" in path or
+        any(part in (".", "..") for part in path.split("/")) for path in wanted
+    ):
+        raise ValueError("invalid expected-path manifest")
+    present: set[str] = set()
+    for directory, dirs, files in os.walk(stage, followlinks=False):
+        parent = Path(directory)
+        for name in dirs + files:
+            present.add(str((parent / name).relative_to(stage)))
+    missing, extra = set(wanted) - present, present - set(wanted)
+    if missing or extra:
+        raise ValueError(f"staged paths differ: {len(missing)} missing, {len(extra)} unexpected"
+                         f"; first missing={next(iter(sorted(missing)), '-')}; first unexpected={next(iter(sorted(extra)), '-')}")
+
+
+def assemble(source: Path, stage: Path, lanes: list[Lane],
+             manifest_stage: Path | None = None, expected_paths: Path | None = None) -> int:
     if not source.is_dir() or source.is_symlink() or not source.name:
         raise ValueError("source must be a real directory")
+    if manifest_stage and source.name in OPTIONAL_MANIFESTS | {".hardcore-archive-metadata"}:
+        raise ValueError("source name collides with internal manifests")
     source = source.resolve()
     stage = stage.resolve(strict=False)
     roots = [source, *(lane.candidate_root.resolve() for lane in lanes)]
+    if manifest_stage:
+        roots.append(manifest_stage.resolve())
     if any(stage == root or stage.is_relative_to(root) or root.is_relative_to(stage) for root in roots):
         raise ValueError("stage must be separate from source and transform lanes")
     if stage.exists() or stage.is_symlink():
@@ -158,6 +211,10 @@ def assemble(source: Path, stage: Path, lanes: list[Lane]) -> int:
             subprocess.run(["cp", "-p", "--reflink=auto", "--", str(item.candidate), str(target)], check=True)
             if target.stat().st_size != item.size:
                 raise ValueError(f"candidate changed while staging: {item.archived}")
+        if manifest_stage:
+            stage_manifests(manifest_stage, stage)
+        if expected_paths:
+            verify_staged_paths(stage, expected_paths)
         return len(replacements)
     except BaseException:
         shutil.rmtree(stage)
@@ -168,6 +225,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--stage", type=Path, required=True)
+    parser.add_argument("--manifest-stage", type=Path,
+                        help="Existing validated metadata and decision manifests")
+    parser.add_argument("--expected-paths", type=Path,
+                        help="Production expected-path list, checked before 7z compression")
     for name in ("video", "image", "container", "nested"):
         parser.add_argument(f"--{name}-manifest", type=Path)
         parser.add_argument(f"--{name}-stage", type=Path)
@@ -180,7 +241,9 @@ def main() -> None:
             parser.error(f"--{name}-manifest and --{name}-stage must be supplied together")
         if manifest:
             lanes.append(Lane(name, manifest, root))
-    print(f"Staged {assemble(args.source, args.stage, lanes)} transformed or omitted entries")
+    if args.manifest_stage and not args.expected_paths:
+        parser.error("--manifest-stage requires --expected-paths")
+    print(f"Staged {assemble(args.source, args.stage, lanes, args.manifest_stage, args.expected_paths)} transformed or omitted entries")
 
 
 if __name__ == "__main__":
