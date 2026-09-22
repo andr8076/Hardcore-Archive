@@ -247,51 +247,109 @@ def remap_nested_metadata(metadata_dir: pathlib.Path, decisions: pathlib.Path) -
                 if original in mapping or not original or not archived:
                     raise MetadataError("duplicate or invalid nested archive decision")
                 mapping[original] = archived
-    if not mapping:
+    return remap_transformed_metadata(metadata_dir, mapping, set(), set(mapping))
+
+
+def remap_video_metadata(metadata_dir: pathlib.Path, decisions: pathlib.Path) -> int:
+    """Retarget transcoded videos and remove explicitly omitted video metadata."""
+    mapping: dict[str, str] = {}
+    omitted: set[str] = set()
+    changed: set[str] = set()
+    seen: set[str] = set()
+    with decisions.open(encoding="utf-8", errors="surrogateescape") as handle:
+        for row in handle:
+            fields = row.rstrip("\n").split("\t")
+            if len(fields) != 5:
+                raise MetadataError("invalid video decision")
+            action, original, archived = fields[:3]
+            if not original or original in seen:
+                raise MetadataError("duplicate or empty video source decision")
+            seen.add(original)
+            if action == "transcoded":
+                if not archived:
+                    raise MetadataError("transcoded video is missing its archived path")
+                changed.add(original)
+                if original != archived:
+                    mapping[original] = archived
+            elif action == "omitted":
+                if archived:
+                    raise MetadataError("omitted video unexpectedly has an archived path")
+                omitted.add(original)
+            elif action != "original" or archived != original:
+                raise MetadataError("invalid original video decision")
+    return remap_transformed_metadata(metadata_dir, mapping, omitted, changed | omitted)
+
+
+def remap_transformed_metadata(metadata_dir: pathlib.Path, mapping: dict[str, str],
+                               omitted: set[str], discard_sparse: set[str]) -> int:
+    """Apply archive path decisions consistently to files, ACLs, xattrs and holes."""
+    affected = set(mapping) | omitted
+    if not affected and not discard_sparse:
         return 0
 
     files = metadata_dir / "files.tsv"
     rows = files.read_text(encoding="utf-8", errors="surrogateescape").splitlines(keepends=True)
     seen = set()
     found = set()
-    for index, row in enumerate(rows[1:], 1):
+    kept_rows = rows[:1]
+    for row in rows[1:]:
         fields = row.rstrip("\n").split("\t", 6)
         if len(fields) != 7:
-            raise MetadataError("invalid files.tsv during nested remapping")
+            raise MetadataError("invalid files.tsv during transform remapping")
         original = fields[5]
         found.add(original)
+        if original in omitted:
+            continue
         fields[5] = mapping.get(original, original)
         if fields[5] in seen:
-            raise MetadataError(f"nested archive path collides with metadata: {fields[5]!r}")
+            raise MetadataError(f"transformed archive path collides with metadata: {fields[5]!r}")
         seen.add(fields[5])
-        rows[index] = "\t".join(fields) + "\n"
-    if set(mapping) - found:
-        raise MetadataError("repacked nested archive missing from captured metadata")
+        kept_rows.append("\t".join(fields) + "\n")
+    if (affected | discard_sparse) - found:
+        raise MetadataError("transformed entry missing from captured metadata")
 
     acl = metadata_dir / "acl.txt"
     acl_text = acl.read_text(encoding="utf-8", errors="surrogateescape")
     if acl_text.startswith(DARWIN_ACL_HEADER + "\n"):
         acl_lines = acl_text.splitlines(keepends=True)
-        for index, line in enumerate(acl_lines[1:], 1):
+        kept_acl = acl_lines[:1]
+        for line in acl_lines[1:]:
             record = json.loads(line)
+            if record.get("path") in omitted:
+                continue
             if record.get("path") in mapping:
                 record["path"] = mapping[record["path"]]
-                acl_lines[index] = json.dumps(record, ensure_ascii=True) + "\n"
-        acl_text = "".join(acl_lines)
+                line = json.dumps(record, ensure_ascii=True) + "\n"
+            kept_acl.append(line)
+        acl_text = "".join(kept_acl)
     else:
-        acl_text = "".join(
-            "# file: " + mapping.get(line[8:-1], line[8:-1]) + "\n"
-            if line.startswith("# file: ") and line.endswith("\n") else line
-            for line in acl_text.splitlines(keepends=True)
-        )
+        blocks: list[str] = []
+        block: list[str] = []
+        excluded = False
+        for line in acl_text.splitlines(keepends=True):
+            if line.startswith("# file: "):
+                if block and not excluded:
+                    blocks.extend(block)
+                path = line[8:].rstrip("\n")
+                excluded = path in omitted
+                block = ["# file: " + mapping.get(path, path) + "\n"]
+            else:
+                block.append(line)
+        if block and not excluded:
+            blocks.extend(block)
+        acl_text = "".join(blocks)
 
     xattrs = metadata_dir / "xattrs.txt"
     xattr_lines = xattrs.read_text(encoding="utf-8", errors="surrogateescape").splitlines(keepends=True)
-    for index, line in enumerate(xattr_lines[1:], 1):
+    kept_xattrs = xattr_lines[:1]
+    for line in xattr_lines[1:]:
         record = json.loads(line)
+        if record.get("path") in omitted:
+            continue
         if record.get("path") in mapping:
             record["path"] = mapping[record["path"]]
-            xattr_lines[index] = json.dumps(record, ensure_ascii=True) + "\n"
+            line = json.dumps(record, ensure_ascii=True) + "\n"
+        kept_xattrs.append(line)
 
     sparse = metadata_dir / "sparse.tsv"
     sparse_lines = sparse.read_text(encoding="utf-8", errors="surrogateescape").splitlines(keepends=True)
@@ -299,15 +357,15 @@ def remap_nested_metadata(metadata_dir: pathlib.Path, decisions: pathlib.Path) -
     for line in sparse_lines[1:]:
         fields = line.rstrip("\n").split("\t", 3)
         if len(fields) != 4:
-            raise MetadataError("invalid sparse metadata during nested remapping")
+            raise MetadataError("invalid sparse metadata during transform remapping")
         # The new compressed bytes cannot inherit the source archive's holes.
-        if fields[0] not in mapping:
+        if fields[0] not in discard_sparse:
             kept_sparse.append(line)
 
-    for path, content in ((files, "".join(rows)), (acl, acl_text),
-                          (xattrs, "".join(xattr_lines)), (sparse, "".join(kept_sparse))):
+    for path, content in ((files, "".join(kept_rows)), (acl, acl_text),
+                          (xattrs, "".join(kept_xattrs)), (sparse, "".join(kept_sparse))):
         path.write_text(content, encoding="utf-8", errors="surrogateescape")
-    return len(mapping)
+    return len(affected)
 
 
 def capture_darwin_acl(root: pathlib.Path, metadata_dir: pathlib.Path) -> int:
@@ -732,6 +790,7 @@ def main() -> int:
                         help="Capture NUL-delimited relative paths from stdin into files.tsv")
     actions.add_argument("--capture-acl", action="store_true", help="Capture native macOS ACLs using files.tsv")
     actions.add_argument("--remap-nested", metavar="DECISIONS", help="Remap metadata for renamed nested archives")
+    actions.add_argument("--remap-video", metavar="DECISIONS", help="Remap transcoded and omitted video metadata")
     actions.add_argument("--check-acl", metavar="PATH", help="Read-only native macOS ACL capability probe")
     args = parser.parse_args()
     if not args.check_acl and (not args.root or not args.metadata_dir):
@@ -745,10 +804,12 @@ def main() -> int:
             capture_files(pathlib.Path(args.root), pathlib.Path(args.metadata_dir) / "files.tsv", sys.stdin.buffer)
         elif args.remap_nested:
             remap_nested_metadata(pathlib.Path(args.metadata_dir), pathlib.Path(args.remap_nested))
+        elif args.remap_video:
+            remap_video_metadata(pathlib.Path(args.metadata_dir), pathlib.Path(args.remap_video))
         else:
             restore(pathlib.Path(args.root), pathlib.Path(args.metadata_dir))
     except (MetadataError, OSError, UnicodeError) as exc:
-        operation = "ACL probe" if args.check_acl else "capture" if args.capture_files or args.capture_acl or args.remap_nested else "restoration"
+        operation = "ACL probe" if args.check_acl else "capture" if args.capture_files or args.capture_acl or args.remap_nested or args.remap_video else "restoration"
         print(f"Error: metadata {operation} failed: {exc}", file=sys.stderr)
         return 1
     return 0

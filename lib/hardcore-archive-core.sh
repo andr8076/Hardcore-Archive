@@ -5320,6 +5320,11 @@ PYXATTRSAVE
             --root "$SOURCE_PARENT" --metadata-dir "$METADATA_DIR" || \
             die 'Could not map nested archive metadata to its stored path.'
     fi
+    if [[ -s $VIDEO_RESULT_MANIFEST ]]; then
+        python3 "$METADATA_HELPER" --remap-video "$VIDEO_RESULT_MANIFEST" \
+            --root "$SOURCE_PARENT" --metadata-dir "$METADATA_DIR" || \
+            die 'Could not reconcile transcoded or omitted video metadata with stored paths.'
+    fi
 
     cat > "$RESTORE_HELPER" <<'RESTORE_NOTES'
 Metadata in this directory is data only. Do not execute files from an archive.
