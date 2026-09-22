@@ -101,6 +101,7 @@ prepare_and_add_nested_archives() {
     [[ -n $VIDEO_ENCODER ]] && inherited+=(--video-encoder "$VIDEO_ENCODER")
     $IMAGE_OPTIMIZE || inherited+=(--no-image-optimize)
     inherited+=(--image-mode "$IMAGE_MODE" --verify "$VERIFY_MODE_EFFECTIVE" --effort "$EFFORT")
+    $SINGLE_PASS && inherited+=(--single-pass)
     $MC_AUTO && inherited+=(--mc-auto) || inherited+=(--no-mc-auto)
 
     local free_bytes disk_budget max_expanded
@@ -349,13 +350,13 @@ prepare_and_add_nested_archives() {
     (( NESTED_REPACKED_COUNT + NESTED_FALLBACK_COUNT == NESTED_COUNT )) || \
         die "Nested archive accounting mismatch: detected $NESTED_COUNT but accounted for $((NESTED_REPACKED_COUNT + NESTED_FALLBACK_COUNT))."
 
-    if [[ -s $NESTED_REPACKED_LIST ]]; then
+    if ! $SINGLE_PASS && [[ -s $NESTED_REPACKED_LIST ]]; then
         (cd -- "$NESTED_STAGE_PARENT" && \
             run_logged_stage "nested-archive replacement storage" "$SEVEN_ZIP_LOG" \
                 "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
                     -spd -scsUTF-8 -bsp1 -y "@${NESTED_REPACKED_LIST}")
     fi
-    if [[ -s $NESTED_FALLBACK_LIST ]]; then
+    if ! $SINGLE_PASS && [[ -s $NESTED_FALLBACK_LIST ]]; then
         (cd -- "$SOURCE_PARENT" && \
             run_logged_stage "nested-archive original fallback storage" "$SEVEN_ZIP_LOG" \
                 "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
