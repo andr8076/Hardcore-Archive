@@ -74,6 +74,20 @@ fi
         assert hardcore_result.status == "PASS", hardcore_result
         assert hardcore_result.exact_payload_roundtrip is True
 
+        single_pass_result = judge.benchmark_hardcore(
+            str(fake_hardcore),
+            source,
+            expected,
+            judge.payload_size(expected),
+            0,
+            root / "hardcore-single-pass-results",
+            lossless=False,
+            single_pass=True,
+        )
+        assert single_pass_result.status == "PASS", single_pass_result
+        assert single_pass_result.method == "hardcore-single-pass"
+        assert "--single-pass" in single_pass_result.command
+
         fake_bin = root / "bin"
         fake_bin.mkdir()
         fake_gzip = fake_bin / "gzip"
