@@ -10,7 +10,7 @@ DOCTOR_REPORT=${DOCTOR_REPORT:-/tmp/hardcore-archive-doctor-report.sh}
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/hardcore-archive-test.XXXXXX")
 cleanup() { rm -rf -- "$TMP"; }
 trap cleanup EXIT
-mkdir -p "$TMP/app/lib" "$TMP/home/.config/hardcore-archive" "$TMP/bin" "$TMP/source" "$TMP/docs" "$TMP/png"
+mkdir -p "$TMP/app/lib" "$TMP/home/.config/hardcore-archive" "$TMP/bin" "$TMP/source" "$TMP/docs" "$TMP/png" "$TMP/mixed-images"
 cp "$FRONTEND" "$TMP/app/hardcore-archive.sh"
 cp "$DOCTOR_LOADER" "$TMP/app/lib/hardcore-archive-doctor.sh"
 cp "$DOCTOR_BASE" "$TMP/app/lib/hardcore-archive-doctor-base.sh"
@@ -126,6 +126,8 @@ cp "$TMP/bin/ffmpeg" "$TMP/bin/system-ffmpeg"
 : > "$TMP/source/stuff.zip"
 : > "$TMP/docs/readme.txt"
 : > "$TMP/png/image.png"
+: > "$TMP/mixed-images/photo.jpg"
+: > "$TMP/mixed-images/image.png"
 
 run_frontend() {
     HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/home/.config" PATH="$TMP/bin:$PATH" \
@@ -217,7 +219,24 @@ assert_contains "$out" 'Suggested package names (informational only; verify for 
 assert_contains "$out" 'Package family detected: pacman'
 assert_contains "$out" 'oxipng'
 assert_lacks "$out" 'sudo '
+
+# Missing one format-specific optimizer does not discard useful work on a mixed
+# corpus. The unsupported format is preserved exactly and the available format
+# remains enabled; the same source with no usable image optimizer still fails.
+out=$(run_frontend --image-optimize "$TMP/mixed-images" 2>&1)
+assert_contains "$out" 'Self-check: READY for this source'
+assert_contains "$out" 'PNG originals will be preserved byte-for-byte while JPEG optimization remains enabled.'
+assert_has "$out" 'DEP_APPROVED=1'
 mv "$TMP/bin/oxipng.off" "$TMP/bin/oxipng"
+
+mv "$TMP/bin/jpegtran" "$TMP/bin/jpegtran.off"
+mv "$TMP/bin/djpeg" "$TMP/bin/djpeg.off"
+out=$(run_frontend --image-optimize "$TMP/mixed-images" 2>&1)
+assert_contains "$out" 'Self-check: READY for this source'
+assert_contains "$out" 'JPEG originals will be preserved byte-for-byte while PNG optimization remains enabled.'
+assert_has "$out" 'DEP_APPROVED=1'
+mv "$TMP/bin/jpegtran.off" "$TMP/bin/jpegtran"
+mv "$TMP/bin/djpeg.off" "$TMP/bin/djpeg"
 
 # Installed FFmpeg without required libvmaf is UNSUPPORTED, not silently downgraded to SSIM.
 set +e

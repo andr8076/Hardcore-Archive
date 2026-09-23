@@ -53,7 +53,9 @@ Default policy
   used only when its own validation policy passes and it is smaller where that
   feature requires a size win. Source deletion remains explicit/opt-in. Before
   create work starts, Hardcore Archive scans the source and checks only required
-  capabilities. There are no dependency fallbacks.
+  capabilities. On mixed JPEG/PNG corpora, a missing format-specific optimizer
+  preserves that format byte-for-byte while supported formats remain optimized;
+  a source with no usable relevant optimizer still fails closed.
 
 Doctor / dependencies:
   --doctor                  Scan SOURCE and print the exact capabilities needed.

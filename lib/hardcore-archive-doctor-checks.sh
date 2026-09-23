@@ -122,19 +122,60 @@ check_video_capability() {
 
 check_image_capabilities() {
     [[ $IMAGE_ENABLED == true && $IMAGE_RELEVANT == true ]] || return 0
-    if (( JPEG_COUNT > 0 || NESTED_JPEG_COUNT > 0 || NESTED_DEEP_ARCHIVE_COUNT > 0 )); then
-        local ok=true
-        check_version_command jpegtran jpegtran jpeg 'JPEG optimization requires jpegtran.' -version || ok=false
-        check_version_command djpeg djpeg jpeg 'JPEG verification requires djpeg.' -version || ok=false
-        $ok && add_ready 'JPEG lossless optimizer + verifier'
-    fi
-    if (( PNG_COUNT > 0 || NESTED_PNG_COUNT > 0 || NESTED_DEEP_ARCHIVE_COUNT > 0 )); then
-        if command -v oxipng >/dev/null 2>&1; then
-            if oxipng --version >/dev/null 2>&1; then add_ready 'PNG optimizer: oxipng'; else add_failure BROKEN OxiPNG 'oxipng is installed but its self-test/version command fails.' oxipng; fi
-        elif command -v optipng >/dev/null 2>&1; then
-            if optipng -version >/dev/null 2>&1; then add_ready 'PNG optimizer: optipng'; else add_failure BROKEN OptiPNG 'optipng is installed but its self-test/version command fails.' optipng; fi
+
+    local jpeg_needed=false png_needed=false
+    local jpeg_ready=false png_ready=false
+    local jpeg_missing=false png_missing=false
+    (( JPEG_COUNT > 0 || NESTED_JPEG_COUNT > 0 || NESTED_DEEP_ARCHIVE_COUNT > 0 )) && jpeg_needed=true
+    (( PNG_COUNT > 0 || NESTED_PNG_COUNT > 0 || NESTED_DEEP_ARCHIVE_COUNT > 0 )) && png_needed=true
+
+    if $jpeg_needed; then
+        if ! command -v jpegtran >/dev/null 2>&1 || ! command -v djpeg >/dev/null 2>&1; then
+            jpeg_missing=true
+        elif ! jpegtran -version >/dev/null 2>&1 || ! djpeg -version >/dev/null 2>&1; then
+            add_failure BROKEN 'JPEG optimizer/verifier' 'jpegtran and djpeg are installed, but a version/self-test command failed.' jpeg
         else
-            add_failure MISSING 'PNG optimizer' 'PNG optimization is enabled for this source, but no supported PNG optimizer is installed. Original-file fallback is forbidden.' oxipng
+            jpeg_ready=true
+            add_ready 'JPEG lossless optimizer + verifier'
+        fi
+    fi
+
+    if $png_needed; then
+        if command -v oxipng >/dev/null 2>&1; then
+            if oxipng --version >/dev/null 2>&1; then
+                png_ready=true
+                add_ready 'PNG optimizer: oxipng'
+            else
+                add_failure BROKEN OxiPNG 'oxipng is installed but its self-test/version command fails.' oxipng
+            fi
+        elif command -v optipng >/dev/null 2>&1; then
+            if optipng -version >/dev/null 2>&1; then
+                png_ready=true
+                add_ready 'PNG optimizer: optipng'
+            else
+                add_failure BROKEN OptiPNG 'optipng is installed but its self-test/version command fails.' optipng
+            fi
+        else
+            png_missing=true
+        fi
+    fi
+
+    # A mixed corpus can still use the proven optimizer for one format while the
+    # unsupported format is preserved byte-for-byte and recorded as original in
+    # the image result manifest. If no relevant image transform is usable, fail
+    # closed so --image-optimize never degenerates into a no-op.
+    if $jpeg_missing; then
+        if $png_ready; then
+            add_info 'JPEG tools unavailable; JPEG originals will be preserved byte-for-byte while PNG optimization remains enabled.'
+        else
+            add_failure MISSING 'JPEG optimizer/verifier' 'JPEG optimization is enabled for this source, but jpegtran and djpeg are unavailable and no other relevant image optimizer can do useful work.' jpeg
+        fi
+    fi
+    if $png_missing; then
+        if $jpeg_ready; then
+            add_info 'PNG optimizer unavailable; PNG originals will be preserved byte-for-byte while JPEG optimization remains enabled.'
+        else
+            add_failure MISSING 'PNG optimizer' 'PNG optimization is enabled for this source, but no supported PNG optimizer is installed and no other relevant image optimizer can do useful work.' oxipng
         fi
     fi
 }
