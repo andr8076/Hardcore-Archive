@@ -3,11 +3,17 @@
 
 # --------------------------- strict doctor ---------------------------------
 declare -a FAIL_TYPES=() FAIL_CAPS=() FAIL_DETAILS=() FAIL_REPAIR_KEYS=()
-declare -a READY_LINES=() INFO_LINES=()
-declare -A REPAIR_KEY_SEEN=()
+declare -a READY_LINES=() INFO_LINES=() INSTALL_HINT_KEYS=()
+declare -A REPAIR_KEY_SEEN=() INSTALL_HINT_SEEN=()
 
 add_ready() { READY_LINES+=("$1"); }
 add_info() { INFO_LINES+=("$1"); }
+add_install_hint() {
+    local key=$1
+    [[ -n $key && -z ${INSTALL_HINT_SEEN[$key]:-} ]] || return 0
+    INSTALL_HINT_SEEN["$key"]=1
+    INSTALL_HINT_KEYS+=("$key")
+}
 add_failure() {
     FAIL_TYPES+=("$1"); FAIL_CAPS+=("$2"); FAIL_DETAILS+=("$3"); FAIL_REPAIR_KEYS+=("${4:-}")
     [[ -n ${4:-} ]] && REPAIR_KEY_SEEN["$4"]=1

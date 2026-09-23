@@ -64,7 +64,10 @@ Doctor / dependencies:
   Missing capability        Required executable/package is not installed.
   Unsupported capability    Tool exists but lacks a required encoder/filter/API.
   Broken capability         Capability is advertised but a real probe fails.
-  Repair commands are printed only; Hardcore Archive never installs software.
+  Missing packages          In an interactive terminal, the doctor can offer
+                            its exact missing-capability plan to the separate
+                            install-dependencies.sh script. Approval is required.
+  Broken/unsupported items  Are diagnosed only and never sent to the installer.
 
 Transformations (enabled by default):
   --video-transcode         Enable validated hardware video transcoding.
@@ -423,10 +426,12 @@ check_strict_runtime_capabilities
 
 if (( ${#FAIL_TYPES[@]} > 0 )); then
     print_doctor_report || true
+    offer_missing_dependency_install || true
     exit 3
 fi
 if $DOCTOR_MODE; then
     print_doctor_report
+    offer_missing_dependency_install || true
     exit 0
 fi
 

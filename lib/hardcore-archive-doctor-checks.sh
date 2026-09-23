@@ -167,6 +167,7 @@ check_image_capabilities() {
     if $jpeg_missing; then
         if $png_ready; then
             add_info 'JPEG tools unavailable; JPEG originals will be preserved byte-for-byte while PNG optimization remains enabled.'
+            add_install_hint jpeg
         else
             add_failure MISSING 'JPEG optimizer/verifier' 'JPEG optimization is enabled for this source, but jpegtran and djpeg are unavailable and no other relevant image optimizer can do useful work.' jpeg
         fi
@@ -174,6 +175,7 @@ check_image_capabilities() {
     if $png_missing; then
         if $jpeg_ready; then
             add_info 'PNG optimizer unavailable; PNG originals will be preserved byte-for-byte while JPEG optimization remains enabled.'
+            add_install_hint oxipng
         else
             add_failure MISSING 'PNG optimizer' 'PNG optimization is enabled for this source, but no supported PNG optimizer is installed and no other relevant image optimizer can do useful work.' oxipng
         fi

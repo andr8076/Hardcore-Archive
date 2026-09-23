@@ -77,7 +77,61 @@ print_repair_guidance() {
         printf '  BROKEN/UNSUPPORTED components were detected, so package installation is not assumed to be the fix. Use the failure details above to check runtime, hardware, driver, permission, service, or compatibility state.\n'
     fi
 
-    printf '\nDoctor guidance is informational only; it does not generate repair or installation commands.\n'
+    printf '\nDoctor guidance diagnoses capabilities first; only MISSING packages and explicitly reported optional format optimizers are eligible for the separate installer.\n'
+}
+
+collect_missing_install_keys() {
+    DOCTOR_INSTALL_KEYS=()
+    local i key
+    declare -A seen=()
+    for i in "${!FAIL_TYPES[@]}"; do
+        [[ ${FAIL_TYPES[i]} == MISSING ]] || continue
+        key=${FAIL_REPAIR_KEYS[i]}
+        [[ -n $key && -z ${seen[$key]:-} ]] || continue
+        seen["$key"]=1
+        DOCTOR_INSTALL_KEYS+=("$key")
+    done
+    for key in "${INSTALL_HINT_KEYS[@]}"; do
+        [[ -n $key && -z ${seen[$key]:-} ]] || continue
+        seen["$key"]=1
+        DOCTOR_INSTALL_KEYS+=("$key")
+    done
+    (( ${#DOCTOR_INSTALL_KEYS[@]} > 0 ))
+}
+
+offer_missing_dependency_install() {
+    collect_missing_install_keys || return 1
+    local installer=${HARDCORE_ARCHIVE_DEPENDENCY_INSTALLER:-"$SCRIPT_DIR/install-dependencies.sh"}
+    local answer key
+
+    if [[ ! -x $installer ]]; then
+        printf '\nDependency installer is unavailable or not executable: %s\n' "$installer" >&2
+        return 1
+    fi
+
+    printf '\nInstallable capability keys selected by the doctor:'
+    for key in "${DOCTOR_INSTALL_KEYS[@]}"; do printf ' %s' "$key"; done
+    printf '\n'
+    printf 'BROKEN and UNSUPPORTED capabilities are never sent to the package installer.\n'
+
+    if [[ ! -t 0 || ! -t 1 ]]; then
+        printf 'Run the doctor from an interactive terminal to review and approve installation.\n'
+        return 1
+    fi
+
+    printf 'Open the dependency installer with this exact doctor-selected plan? [y/N] '
+    IFS= read -r answer
+    case $answer in
+        y|Y|yes|YES|Yes)
+            "$installer" --yes --keys "${DOCTOR_INSTALL_KEYS[@]}"
+            printf 'Installation finished. Rerun the doctor so every capability is probed again.\n'
+            return 0
+            ;;
+        *)
+            printf 'Installation not requested. No package-manager command was run.\n'
+            return 1
+            ;;
+    esac
 }
 
 print_doctor_report() {

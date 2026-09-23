@@ -26,6 +26,26 @@ transcoding also needs the machine's GPU driver and device access because those
 components belong to the operating system. The doctor probes them before work
 begins and fails clearly when they are unavailable.
 
+### Source-checkout dependency installer
+
+Source checkouts can install the complete runtime dependency set explicitly:
+
+```bash
+./install-dependencies.sh
+```
+
+The installer detects apt, dnf, yum, pacman, zypper, apk, or macOS Homebrew,
+prints the exact logical requirements and package plan, and asks before invoking
+the package manager. `--dry-run` only prints the plan. The strict doctor can
+also offer the installer an exact set of MISSING capability keys—and optional
+format optimizers that were explicitly reported as unavailable—after showing
+its report. It never sends BROKEN or UNSUPPORTED hardware/runtime failures to
+the package installer. Non-interactive doctor runs never install anything.
+
+Portable releases normally do not need this script because their pinned runtime
+already contains application-level tools. GPU drivers, hardware permissions,
+and unsupported FFmpeg capabilities remain system-specific and diagnostic-only.
+
 ## Architecture
 
 The shell application is now organized by responsibility:
@@ -34,6 +54,7 @@ The shell application is now organized by responsibility:
 hardcore-archive              thin public entrypoint
 hardcore-archive.sh           compatibility shim
 hardcore-archive-runner.sh    thin runtime shim
+install-dependencies.sh        confirmed cross-platform package installer
 
 lib/
     common.sh                 shared shell helpers
