@@ -1625,23 +1625,23 @@ is_already_compressed_path() {
 }
 
 archive_replacement_path() {
-    local path=$1 base
-    case "${path,,}" in
-        *.tar.gz) base=${path:0:${#path}-7} ;;
-        *.tar.xz|*.tar.zst|*.tar.bz2) base=${path:0:${#path}-7} ;;
-        *.tgz|*.txz|*.tzst|*.tbz2) base=${path%.*} ;;
-        *) base=${path%.*} ;;
-    esac
-    printf '%s.7z' "$base"
+    # Preserve the full source suffix so distinct inputs such as name.tar.gz
+    # and name.zip never race to write the same staged candidate.
+    printf '%s.7z' "$1"
 }
 
 
 validate_transformed_path_collisions() {
-    python3 - "$INVENTORY_RAW" "$VIDEO_LIST" "$NESTED_LIST" <<'PYCOLLIDE'
+    python3 - "$SNAPSHOT_BEFORE" "$VIDEO_LIST" "$NESTED_LIST" <<'PYCOLLIDE'
 import os,sys
-raw,video_list,nested_list=sys.argv[1:]
-data=open(raw,'rb').read().split(b'\0')
-original={os.fsdecode(data[i+1]) for i in range(0,len(data)-1,2) if data[i+1]}
+snapshot,video_list,nested_list=sys.argv[1:]
+original=set()
+for record in open(snapshot,'rb').read().split(b'\0'):
+    if not record:
+        continue
+    fields=record.split(b'\t',4)
+    if len(fields)==5:
+        original.add(os.fsdecode(fields[4]))
 transforms=[]
 def lines(path):
     try:
@@ -1652,12 +1652,7 @@ for src in lines(video_list):
     dst=src if src.lower().endswith('.mkv') else os.path.splitext(src)[0]+'.mkv'
     transforms.append((src,dst,'video'))
 for src in lines(nested_list):
-    low=src.lower()
-    for suffix in ('.tar.gz','.tar.xz','.tar.zst','.tar.bz2'):
-        if low.endswith(suffix):
-            dst=src[:-len(suffix)]+'.7z'; break
-    else:
-        dst=os.path.splitext(src)[0]+'.7z'
+    dst=src+'.7z'
     transforms.append((src,dst,'nested archive'))
 seen={}
 errors=[]
@@ -1666,7 +1661,7 @@ for src,dst,kind in transforms:
     if dst in seen and seen[dst]!=src:
         errors.append(f"{kind} outputs collide: {seen[dst]!r} and {src!r} -> {dst!r}")
     seen[dst]=src
-    if dst in original and dst!=src and dst not in transform_sources:
+    if dst in original and dst!=src:
         errors.append(f"{kind} output would overwrite an existing archived path: {src!r} -> {dst!r}")
 if errors:
     print('Transformed-path collisions detected:',file=sys.stderr)
@@ -3312,6 +3307,10 @@ while IFS= read -r -d '' file_size && IFS= read -r -d '' relative_path; do
         printf '%s\0%s\0' "$file_size" "$relative_path" >> "$COMPRESSIBILITY_CANDIDATES"
     fi
 done < "$INVENTORY_RAW"
+
+# Fail before sampling or transforming payloads if two lanes target the same
+# output, or any transformed path would shadow an existing source entry.
+validate_transformed_path_collisions || die "Transformed paths collide with each other or with the source tree."
 
 : > "$COMPRESSIBILITY_RESULT_MANIFEST"
 if (( GENERIC_CANDIDATE_COUNT > 0 )); then

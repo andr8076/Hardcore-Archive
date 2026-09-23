@@ -472,6 +472,7 @@ def safe_existing_path(
     relative: str,
     *,
     allow_leaf_symlink: bool = True,
+    allow_missing_leaf: bool = False,
     reject_parent_symlinks: bool = False,
 ) -> pathlib.Path:
     parts = _metadata_parts(relative)
@@ -491,18 +492,26 @@ def safe_existing_path(
         resolved_parent.relative_to(root)
     except ValueError as exc:
         raise MetadataError(f"metadata path leaves restore root: {relative!r}") from exc
-    if not os.path.lexists(candidate):
+    if not os.path.lexists(candidate) and not allow_missing_leaf:
         raise MetadataError(f"metadata path does not exist in restored tree: {relative!r}")
     if not allow_leaf_symlink and candidate.is_symlink():
         raise MetadataError(f"ACL path is a symlink leaf: {relative!r}")
     return candidate
 
 
-def restore_file_metadata(root: pathlib.Path, metadata_dir: pathlib.Path) -> int:
+def restore_file_metadata(
+    root: pathlib.Path,
+    metadata_dir: pathlib.Path,
+    *,
+    symlink_counts: list[int] | None = None,
+) -> int:
     manifest = metadata_dir / "files.tsv"
     if not manifest.is_file():
+        if symlink_counts is not None:
+            symlink_counts.append(0)
         return 0
     rows: list[tuple[pathlib.Path, str, int, int, int, int]] = []
+    missing_symlinks: list[tuple[pathlib.Path, str, int]] = []
     seen: set[pathlib.Path] = set()
     with manifest.open("r", encoding="utf-8", errors="surrogateescape") as handle:
         header = next(handle, "").rstrip("\n")
@@ -513,7 +522,12 @@ def restore_file_metadata(root: pathlib.Path, metadata_dir: pathlib.Path) -> int
             if len(parts) != 7:
                 raise MetadataError(f"invalid files.tsv row {line_number}")
             kind, mode_text, uid_text, gid_text, mtime_text, relative, target = parts
-            path = safe_existing_path(root, relative, reject_parent_symlinks=True)
+            path = safe_existing_path(
+                root,
+                relative,
+                allow_missing_leaf=kind == "symbolic link",
+                reject_parent_symlinks=True,
+            )
             if path in seen:
                 raise MetadataError(f"duplicate files.tsv path on row {line_number}: {relative!r}")
             seen.add(path)
@@ -526,7 +540,6 @@ def restore_file_metadata(root: pathlib.Path, metadata_dir: pathlib.Path) -> int
             if not re.fullmatch(r"-?[0-9]+", mtime_text, flags=re.ASCII):
                 raise MetadataError(f"invalid mtime on files.tsv row {line_number}")
 
-            info = path.lstat()
             expected_kinds = {
                 "regular file": stat.S_ISREG,
                 "regular empty file": stat.S_ISREG,
@@ -539,17 +552,38 @@ def restore_file_metadata(root: pathlib.Path, metadata_dir: pathlib.Path) -> int
                 "character special file": stat.S_ISCHR,
             }
             matcher = expected_kinds.get(kind)
-            if matcher is None or not matcher(info.st_mode):
-                raise MetadataError(
-                    f"restored object type does not match files.tsv row {line_number}"
-                )
-            if kind == "regular empty file" and info.st_size != 0:
-                raise MetadataError(f"restored file is not empty on files.tsv row {line_number}")
-            if kind == "symbolic link":
-                if os.readlink(path) != target:
-                    raise MetadataError(f"symlink target does not match files.tsv row {line_number}")
-            elif target:
-                raise MetadataError(f"unexpected link target on files.tsv row {line_number}")
+            if matcher is None:
+                raise MetadataError(f"unknown object type on files.tsv row {line_number}")
+
+            if not os.path.lexists(path):
+                if kind != "symbolic link" or not target:
+                    raise MetadataError(
+                        f"metadata path does not exist in restored tree: {relative!r}"
+                    )
+                if not path.parent.is_dir() or path.parent.is_symlink():
+                    raise MetadataError(
+                        f"missing symlink parent is not a real directory on files.tsv row {line_number}"
+                    )
+                missing_symlinks.append((path, target, line_number))
+            else:
+                info = path.lstat()
+                if not matcher(info.st_mode):
+                    raise MetadataError(
+                        f"restored object type does not match files.tsv row {line_number}"
+                    )
+                if kind == "regular empty file" and info.st_size != 0:
+                    raise MetadataError(
+                        f"restored file is not empty on files.tsv row {line_number}"
+                    )
+                if kind == "symbolic link":
+                    if os.readlink(path) != target:
+                        raise MetadataError(
+                            f"symlink target does not match files.tsv row {line_number}"
+                        )
+                elif target:
+                    raise MetadataError(
+                        f"unexpected link target on files.tsv row {line_number}"
+                    )
             rows.append(
                 (
                     path,
@@ -560,6 +594,40 @@ def restore_file_metadata(root: pathlib.Path, metadata_dir: pathlib.Path) -> int
                     int(mtime_text),
                 )
             )
+
+    # Validate the full manifest before creating a symlink skipped by 7-Zip.
+    # Its parent must already exist as a real directory, and no archive payload
+    # is extracted after these links are materialized.
+    restore_root = pathlib.Path(os.path.abspath(root))
+    for path, target, line_number in missing_symlinks:
+        if not target or "\x00" in target:
+            raise MetadataError(
+                f"invalid symbolic link target on files.tsv row {line_number}"
+            )
+        target_path = pathlib.Path(os.path.abspath(os.path.join(path.parent, target)))
+        try:
+            target_path.relative_to(restore_root)
+        except ValueError as exc:
+            raise MetadataError(
+                f"symbolic link target escapes restore root on files.tsv row {line_number}"
+            ) from exc
+        if os.path.lexists(path):
+            raise MetadataError(
+                f"missing symlink path appeared during restoration on files.tsv row {line_number}"
+            )
+        if not path.parent.is_dir() or path.parent.is_symlink():
+            raise MetadataError(
+                f"missing symlink parent changed during restoration on files.tsv row {line_number}"
+            )
+        try:
+            os.symlink(target, path)
+        except OSError as exc:
+            raise MetadataError(
+                f"could not recreate symbolic link on files.tsv row {line_number}: {exc}"
+            ) from exc
+
+    if symlink_counts is not None:
+        symlink_counts.append(len(missing_symlinks))
 
     # Restore children before directories so each directory timestamp is the
     # final operation affecting it. Validate every row before mutating anything.
@@ -771,13 +839,15 @@ def restore(root: pathlib.Path, metadata_dir: pathlib.Path) -> None:
         metadata_dir.relative_to(root)
     except ValueError as exc:
         raise MetadataError("metadata directory is outside the restore root") from exc
-    files = restore_file_metadata(root, metadata_dir)
+    symlink_counts: list[int] = []
+    files = restore_file_metadata(root, metadata_dir, symlink_counts=symlink_counts)
+    symlinks_recreated = symlink_counts[0]
     xattrs, flags = load_xattrs(root, metadata_dir)
     acls = restore_acl(root, metadata_dir)
     flag_count = restore_flags(flags)
     print(
-        f"Metadata restored: files={files} xattrs={xattrs} "
-        f"acl_paths={acls} flags={flag_count}"
+        f"Metadata restored: files={files} symlinks_recreated={symlinks_recreated} "
+        f"xattrs={xattrs} acl_paths={acls} flags={flag_count}"
     )
 
 

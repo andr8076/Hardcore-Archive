@@ -67,6 +67,7 @@ dependency_preflight_restore() {
     dependency_require_command sha256sum 'Verifies restored file contents against the embedded hash manifest.'
     dependency_require_command mv 'Builds the final restore layout only inside private staging.'
     dependency_require_command rm 'Removes only temporary restore data after completion or failure.'
+    dependency_require_command tee 'Streams and records 7-Zip extraction output for safe error classification.'
     dependency_require_command rmdir 'Reuses a verified single-directory tree as the prepared commit root.'
     dependency_require_command mkdir 'Creates the restore destination parent and staging directories.'
     dependency_require_command flock 'Protects the restore workflow from conflicting archive operations.'
@@ -268,7 +269,8 @@ remove_hardcore_archive_internal_entries() {
 
 restore_existing_archive() {
     local archive_input=${POSITIONAL[0]} destination_input=${POSITIONAL[1]:-} archive stem destination destination_request parent temp hashfile ready
-    local listed_size free required lockfile
+    local listed_size free required lockfile extraction_log extraction_rc ignored_link_count
+    local other_extraction_errors reported_item_errors reported_archive_errors metadata_output recreated_link_count
     [[ -f $archive_input ]] || die "Archive does not exist: $archive_input"
     archive=$(realpath -e -- "$archive_input")
     stem=$(basename -- "$archive")
@@ -343,8 +345,30 @@ print(size)
     temp=$(mktemp -d "$parent/.${stem}.restore.XXXXXX")
     RESTORE_TEMP=$temp
     RESTORE_COMMITTED=false
+    extraction_log="$temp/.hardcore-archive-extraction.log"
     printf 'Extracting into temporary destination...\n'
-    "$SEVEN_ZIP" x -y -spd -o"$temp" "$archive" || die "Archive extraction failed."
+    extraction_rc=0
+    set +e
+    "$SEVEN_ZIP" x -y -spd -o"$temp" "$archive" 2>&1 | tee "$extraction_log"
+    extraction_rc=${PIPESTATUS[0]}
+    set -e
+    ignored_link_count=0
+    if (( extraction_rc != 0 )); then
+        ignored_link_count=$(grep -c '^ERROR: Dangerous symbolic link path was ignored : ' "$extraction_log" || true)
+        other_extraction_errors=$(grep -E '^(ERROR:|Error:|Sub items Errors:|Archives with Errors:)' "$extraction_log" |
+            grep -vE '^ERROR: Dangerous symbolic link path was ignored : |^Error: Archive extraction failed\.$|^Sub items Errors: [0-9]+$|^Archives with Errors: [0-9]+$' || true)
+        reported_item_errors=$(awk '/^Sub items Errors: [0-9]+$/ {count=$4} END {print count+0}' "$extraction_log")
+        reported_archive_errors=$(awk '/^Archives with Errors: [0-9]+$/ {count=$4} END {print count+0}' "$extraction_log")
+        # 7-Zip releases differ here: the same ignored-link-only result can
+        # return 1 or 2. The exact error and summary counts below gate both.
+        if (( extraction_rc < 1 || extraction_rc > 2 || ignored_link_count < 1 )) ||
+           [[ -n $other_extraction_errors ]] ||
+           grep -Eq '^(WARNING:|WARN:|Warning:)' "$extraction_log" ||
+           (( reported_item_errors != ignored_link_count || reported_archive_errors != 1 )); then
+            die "Archive extraction failed: 7-Zip exit=$extraction_rc, ignored-links=$ignored_link_count, item-errors=$reported_item_errors, archive-errors=$reported_archive_errors, extra-errors=${other_extraction_errors:-none}."
+        fi
+        printf '7-Zip skipped only %s symbolic link(s); trusted metadata will recreate and verify them.\n' "$ignored_link_count"
+    fi
 
     hashfile="$temp/.hardcore-archive-sha256.txt"
     if [[ -s $hashfile ]]; then
@@ -358,16 +382,30 @@ print(size)
     # before setfacl sees them; no code or path from the archive is trusted.
     [[ -n $METADATA_HELPER && -f $METADATA_HELPER ]] || \
         die "Trusted metadata restore helper is missing: ${METADATA_HELPER:-unset}"
-    python3 "$METADATA_HELPER" \
+    if ! metadata_output=$(python3 "$METADATA_HELPER" \
         --root "$temp" \
-        --metadata-dir "$temp/.hardcore-archive-metadata" || \
+        --metadata-dir "$temp/.hardcore-archive-metadata" 2>&1); then
+        printf '%s\n' "$metadata_output" >&2
         die "Safe metadata restoration failed. Nothing was committed."
+    fi
+    printf '%s\n' "$metadata_output"
+
+    if (( extraction_rc != 0 )); then
+        recreated_link_count=$(printf '%s\n' "$metadata_output" |
+            sed -n 's/.*symlinks_recreated=\([0-9][0-9]*\).*/\1/p' | tail -n 1)
+        [[ $recreated_link_count =~ ^[0-9]+$ ]] || die "Metadata did not report recreated symlinks."
+        (( recreated_link_count == ignored_link_count )) || \
+            die "The metadata did not recreate exactly the symbolic links skipped by 7-Zip."
+    fi
 
     # Sparse reconstruction changes allocation only, not content; verify again.
     if [[ -s $hashfile ]]; then
         printf 'Verifying hashes after sparse and metadata restoration...\n'
         (cd -- "$temp" && sha256sum -c --quiet '.hardcore-archive-sha256.txt') || die "Final restored content verification failed."
     fi
+
+    # Do not expose the private extraction log as part of the restored tree.
+    rm -f -- "$extraction_log"
 
     # Remove only the exact private entries created by Hardcore Archive. A
     # blanket prefix filter would silently discard legitimate user content such

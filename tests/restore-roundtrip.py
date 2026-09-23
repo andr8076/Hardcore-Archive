@@ -31,8 +31,16 @@ if command == 'l':
     print((root / 'listing').read_text(), end='')
     sys.exit(int(os.environ.get('TEST_LIST_RC', '0')))
 if command == 'x':
-    destination = next(arg[2:] for arg in sys.argv[2:] if arg.startswith('-o'))
-    shutil.copytree(root / 'payload', destination, dirs_exist_ok=True)
+    destination = pathlib.Path(next(arg[2:] for arg in sys.argv[2:] if arg.startswith('-o')))
+    shutil.copytree(root / 'payload', destination, dirs_exist_ok=True, symlinks=True)
+    ignored_link = os.environ.get('TEST_IGNORED_SYMLINK')
+    if ignored_link:
+        (destination / ignored_link).unlink()
+        print(f'ERROR: Dangerous symbolic link path was ignored : {ignored_link} : ../../01-text/repeated-logs.log')
+        print('Sub items Errors: 1')
+        print('Archives with Errors: 1')
+        print('Error: Archive extraction failed.')
+        sys.exit(1)
     if os.environ.get('TEST_SIGNAL'):
         os.kill(os.getppid(), signal.SIGTERM)
     sys.exit(int(os.environ.get('TEST_EXTRACT_RC', '0')))
@@ -129,6 +137,30 @@ restore_existing_archive
             hashlib.sha256(self.content).hexdigest() + f"  source/{self.name}\n"
         )
 
+    def add_dangerous_relative_symlink(self):
+        target_directory = self.tree / "01-text"
+        target_directory.mkdir()
+        target = target_directory / "repeated-logs.log"
+        target.write_text("symlink target payload\n")
+        link_directory = self.tree / "06-paths-and-metadata" / "links"
+        link_directory.mkdir(parents=True)
+        link = link_directory / "relative-link-to-text"
+        link_target = "../../01-text/repeated-logs.log"
+        link.symlink_to(link_target)
+        relative_link = "source/06-paths-and-metadata/links/relative-link-to-text"
+        relative_target = "source/01-text/repeated-logs.log"
+        owner = f"{os.getuid()}\t{os.getgid()}\t1700000000"
+        with (self.meta / "files.tsv").open("a") as manifest:
+            manifest.write(f"directory\t755\t{owner}\tsource/01-text\t\n")
+            manifest.write(f"regular file\t644\t{owner}\t{relative_target}\t\n")
+            manifest.write(f"directory\t755\t{owner}\tsource/06-paths-and-metadata\t\n")
+            manifest.write(f"directory\t755\t{owner}\t{link_directory.relative_to(self.payload)}\t\n")
+            manifest.write(f"symbolic link\t777\t{owner}\t{relative_link}\t{link_target}\n")
+        with self.listing.open("a") as listing:
+            listing.write(f"Path = {relative_target}\nSize = {target.stat().st_size}\n\n")
+            listing.write(f"Path = {relative_link}\nSize = {len(link_target)}\n\n")
+        return relative_link, link_target
+
     def rename_source_root(self, name):
         old_tree = self.tree
         self.tree = self.payload / name
@@ -150,6 +182,29 @@ restore_existing_archive
 
     def test_public_launcher_failed_extraction_cleans_up(self):
         self.assert_failed(self.run_restore(frontend=True, TEST_EXTRACT_RC="2"), before_extraction=False)
+
+    def test_ignored_dangerous_symlink_is_recreated_from_metadata(self):
+        relative_link, link_target = self.add_dangerous_relative_symlink()
+        result = self.run_restore(TEST_IGNORED_SYMLINK=relative_link)
+        self.assert_restored(result)
+        restored_link = self.destination / relative_link.removeprefix("source/")
+        self.assertTrue(restored_link.is_symlink())
+        self.assertEqual(os.readlink(restored_link), link_target)
+        self.assertEqual(restored_link.read_text(), "symlink target payload\n")
+        self.assertIn("symlinks_recreated=1", result.stdout)
+        self.assertIn("skipped only 1 symbolic link", result.stdout)
+
+    def test_ignored_symlink_escaping_restore_root_is_rejected(self):
+        relative_link, _ = self.add_dangerous_relative_symlink()
+        manifest = self.meta / "files.tsv"
+        metadata = manifest.read_text()
+        self.assertIn("../../01-text/repeated-logs.log", metadata)
+        manifest.write_text(metadata.replace(
+            "../../01-text/repeated-logs.log", "../../../../outside.txt"
+        ))
+        result = self.run_restore(TEST_IGNORED_SYMLINK=relative_link)
+        self.assert_failed(result, before_extraction=False)
+        self.assertIn("symbolic link target escapes restore root", result.stderr)
 
     def test_embedded_hashes_verified_before_and_after_metadata(self):
         self.add_hashes()
@@ -268,6 +323,22 @@ restore_existing_archive
         result = self.run_restore()
         self.assert_failed(result, before_extraction=False)
         self.assertIn("invalid sparse metadata", result.stderr)
+
+    @unittest.skipUnless(SEVEN_ZIP, "7-Zip is not installed; controlled-backend restore tests still run")
+    def test_real_7zip_dangerous_relative_symlink_roundtrip(self):
+        relative_link, link_target = self.add_dangerous_relative_symlink()
+        self.archive.unlink()
+        created = subprocess.run(
+            [SEVEN_ZIP, "a", "-t7z", "-mx=0", "-snl", str(self.archive), "."],
+            cwd=self.payload, text=True, capture_output=True, timeout=30,
+        )
+        self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
+        result = self.run_restore(real=True)
+        self.assert_restored(result)
+        restored_link = self.destination / relative_link.removeprefix("source/")
+        self.assertTrue(restored_link.is_symlink(), result.stdout + result.stderr)
+        self.assertEqual(os.readlink(restored_link), link_target)
+        self.assertEqual(restored_link.read_text(), "symlink target payload\n")
 
     @unittest.skipUnless(SEVEN_ZIP, "7-Zip is not installed; controlled-backend restore tests still run")
     def test_real_7zip_metadata_and_hash_roundtrip(self):

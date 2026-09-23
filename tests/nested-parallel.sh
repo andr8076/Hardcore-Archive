@@ -86,6 +86,7 @@ NESTED_COUNT=2
 NESTED_BYTES=200000
 NESTED_REPACK=true
 NESTED_MAX_DEPTH=3
+SINGLE_PASS=false
 NESTED_LIST="$TMP/nested.list"
 NESTED_RESULT_MANIFEST="$TMP/nested-results.tsv"
 NESTED_REPACKED_LIST="$TMP/nested-repacked.list"
@@ -151,7 +152,7 @@ PY
     command stat "$@"
 }
 choose_nested_work_root() { NESTED_WORK_ROOT="$TMP/work"; }
-archive_replacement_path() { printf '%s.7z' "${1%.*}"; }
+archive_replacement_path() { printf '%s.7z' "$1"; }
 resolve_current_script() { printf '%s/fake-core.sh\n' "$TMP"; }
 safe_slug() { printf '%s' "${1//\//-}"; }
 hardcore_calibration_identity() { printf 'fixture-id\n'; }
@@ -173,10 +174,10 @@ grep -Fq $'start\tsource/b.zip\t2\t832' "$EVENT_DIR/events"
 # follows source order because workers never append to it directly.
 mapfile -t rows < "$NESTED_RESULT_MANIFEST"
 [[ ${#rows[@]} == 2 ]]
-[[ ${rows[0]} == $'repacked\tsource/a.zip\tsource/a.7z\t100000\t50000\t50000\tcandidate-smaller' ]]
-[[ ${rows[1]} == $'repacked\tsource/b.zip\tsource/b.7z\t100000\t50000\t50000\tcandidate-smaller' ]]
+[[ ${rows[0]} == $'repacked\tsource/a.zip\tsource/a.zip.7z\t100000\t50000\t50000\tcandidate-smaller' ]]
+[[ ${rows[1]} == $'repacked\tsource/b.zip\tsource/b.zip.7z\t100000\t50000\t50000\tcandidate-smaller' ]]
 [[ $NESTED_REPACKED_COUNT == 2 && $NESTED_FALLBACK_COUNT == 0 && $NESTED_SAVED_BYTES == 100000 ]]
-[[ $(cat "$NESTED_REPACKED_LIST") == $'source/a.7z\nsource/b.7z' ]]
+[[ $(cat "$NESTED_REPACKED_LIST") == $'source/a.zip.7z\nsource/b.zip.7z' ]]
 [[ ! -s $NESTED_FALLBACK_LIST ]]
 
 # Static integration: recursive children must clamp the legacy core to their

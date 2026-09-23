@@ -32,6 +32,8 @@ jobs:
             python3 tests/restore-destination-race.py
           "$BASH_BIN" tests/resource-pool.sh
           "$BASH_BIN" tests/nested-parallel.sh
+          "$BASH_BIN" tests/nested-output-paths.sh
+          python3 tests/restore-roundtrip.py
           "$BASH_BIN" tests/bundled-runtime.sh
           "$BASH_BIN" tests/portable-runtime.sh
           "$BASH_BIN" tests/runtime-bootstrap.sh
