@@ -97,6 +97,13 @@ class MediaPolicyTests(unittest.TestCase):
         with mock.patch.object(MEDIA, "probe", side_effect=[source, output]):
             self.assertEqual(MEDIA.validate("source", "output"), 0)
 
+    def test_undetermined_video_language_matches_missing_tag(self):
+        source, output = self.fixtures()
+        source["streams"][0]["tags"]["language"] = "und"
+        output["streams"][0]["tags"].pop("language", None)
+        with mock.patch.object(MEDIA, "probe", side_effect=[source, output]):
+            self.assertEqual(MEDIA.validate("source", "output"), 0)
+
     def test_semantic_round_trip_rejects_lost_streams_and_metadata(self):
         source, output = self.fixtures()
         output["streams"] = [item for item in output["streams"] if item["codec_type"] != "subtitle"]

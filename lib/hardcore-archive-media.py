@@ -164,11 +164,18 @@ MEANINGFUL_TAGS = {
 
 
 def normalized_tags(value: dict[str, Any]) -> dict[str, str]:
-    return {
-        str(key).lower(): str(item)
-        for key, item in value.get("tags", {}).items()
-        if str(key).lower() in MEANINGFUL_TAGS
-    }
+    normalized: dict[str, str] = {}
+    for key, item in value.get("tags", {}).items():
+        name = str(key).lower()
+        if name not in MEANINGFUL_TAGS:
+            continue
+        text = str(item)
+        # RFC 5646 defines "und" as undetermined and prefers omitting the
+        # language tag when a container does not support/retain it.
+        if name == "language" and text.strip().lower() in {"", "und"}:
+            continue
+        normalized[name] = text
+    return normalized
 
 
 def normalized_disposition(stream: dict[str, Any]) -> dict[str, int]:

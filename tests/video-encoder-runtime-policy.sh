@@ -6,6 +6,7 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 MENU="$ROOT/lib/hardcore-archive-doctor-encoder-menu.sh"
 RUNTIME="$ROOT/lib/hardcore-archive-doctor-encoder-runtime.sh"
 CAPABILITIES="$ROOT/lib/video-encoder-capabilities.sh"
+VIDEO_HELPER="$ROOT/lib/hardcore-archive-video-helper.sh"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/hardcore-encoder-runtime.XXXXXX")
 cleanup() { rm -rf -- "$TMP"; }
 trap cleanup EXIT
@@ -20,6 +21,10 @@ for required in "$MENU" "$RUNTIME"; do
 done
 bash -n "$MENU"
 bash -n "$RUNTIME"
+bash -n "$VIDEO_HELPER"
+grep -Fq 'case "$codec_choice" in' "$VIDEO_HELPER"
+grep -Fq 'av1) child_args+=(--av1) ;;' "$VIDEO_HELPER"
+grep -Fq 'hevc) child_args+=(--hevc) ;;' "$VIDEO_HELPER"
 grep -Fq 'HARDCORE_VIDEO_PROBE_SIZE=${HARDCORE_VIDEO_PROBE_SIZE:-640x360}' "$CAPABILITIES"
 grep -Fq -- '-preset:v medium' "$CAPABILITIES"
 grep -Fq 'hardcore_encoder_has_controlling_tty' "$RUNTIME"

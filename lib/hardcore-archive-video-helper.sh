@@ -529,6 +529,11 @@ run_batch() {
     fi
 
     child_args+=(--yes)
+    case "$codec_choice" in
+        av1) child_args+=(--av1) ;;
+        hevc) child_args+=(--hevc) ;;
+        *) die "Unsupported batch codec selection: $codec_choice" ;;
+    esac
     child_args+=(--encoder "$video_encoder")
     [[ "$replace_original" == true ]] && child_args+=(--replace)
     [[ "$keep_larger" == true ]] && child_args+=(--keep-larger)
