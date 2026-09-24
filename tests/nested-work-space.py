@@ -179,7 +179,7 @@ exit "$CHILD_RC"
         child_diagnostic = diagnostic / "nested/depth-1/000000-source-photos.zip"
         self.assertEqual((diagnostic / "video.log").read_text(), "parent calibration\n")
         self.assertEqual((child_diagnostic / "video.log").read_text(), "child calibration\n")
-        self.assertIn(f"Exit status: {rc}\n", (child_diagnostic / "run.log").read_text())
+        self.assertIn(f"Recursive child exit status: {rc}\n", (child_diagnostic / "run.log").read_text())
         return output
 
     def test_space_failure_is_reported_and_original_preserved(self):
