@@ -92,11 +92,11 @@ SEVEN_ZIP=true
 format_duration() { printf '%ss' "$1"; }
 die() { printf '%s\n' "$*" >&2; exit 1; }
 verify_archive_completeness() { [[ $VERIFY_MODE_EFFECTIVE != integrity ]] || return "$FAIL_RC"; }
-verify_archive_hashes_single_pass() {
-    run_logged_stage 'single-pass hash extraction' "$TEST_ROOT/hash.log" true || return $?
+verify_archive_hashes() {
+    run_logged_stage 'hash extraction' "$TEST_ROOT/hash.log" true || return $?
     return "$FAIL_RC"
 }
-verify_archive_by_extraction() { verify_archive_hashes_single_pass; }
+verify_archive_by_extraction() { verify_archive_hashes; }
 ''' + verify
                     self.shell(body, expected=int(failed != 0), VERIFY_MODE_EFFECTIVE=mode, FAIL_RC=str(failed))
                     rows = self.rows()

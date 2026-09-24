@@ -514,4 +514,4 @@ Run:
 bash tests/frontend-policy.sh
 ```
 
-The suite includes default integrity/no-content-hash policy checks, explicit single-pass hash verification checks, metadata round trips and hostile ACL paths, unusual-media decisions and stream/metadata preservation audits, deterministic corpus generation, static-module wiring, and the existing compression/video/container policies.
+The suite includes default integrity/no-content-hash policy checks, explicit hash verification checks, metadata round trips and hostile ACL paths, unusual-media decisions and stream/metadata preservation audits, deterministic corpus generation, static-module wiring, and the existing compression/video/container policies.

@@ -31,7 +31,7 @@ assert "if [[ $VERIFY_MODE_EFFECTIVE == integrity ]]; then" in core
 # sha256sum -c is transparently split into concurrent workers only on storage
 # that is positively identified as non-rotational.
 assert re.search(r"if \[\[ \$VERIFY_MODE == auto \]\]; then\s+VERIFY_MODE_EFFECTIVE=hashes", core)
-start = core.index("verify_archive_hashes_single_pass() {")
+start = core.index("verify_archive_hashes() {")
 end = core.index("\n}\n\nverify_archive_by_extraction", start) + 2
 body = core[start:end]
 assert body.count('"$SEVEN_ZIP" x ') == 1, "explicit hash verification must extract once"

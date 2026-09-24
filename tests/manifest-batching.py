@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CORE = (ROOT / "lib/hardcore-archive-core.sh").read_text()
 FUNCTIONS = "build_expected_paths_and_hashes() {" + CORE.split(
     "build_expected_paths_and_hashes() {", 1
-)[1].split("\nverify_archive_hashes_single_pass() {", 1)[0]
+)[1].split("\nverify_archive_hashes() {", 1)[0]
 for name, following in [("add_image_results_to_archive", "classify_video_stage_results"),
                         ("add_video_results_to_archive", "choose_nested_work_root")]:
     FUNCTIONS += "\n" + name + "() {" + CORE.split(name + "() {", 1)[1].split(

@@ -110,8 +110,6 @@ PROGRESS_INTERVAL=15
 POSITIONAL=()
 BATCH_MODE=false
 TEMP_ARCHIVE=""
-SINGLE_PASS=false
-DIRECT_STAGE_PARENT=""
 FAILURE_CONTEXT="archive-build"
 FAILED_ARCHIVE_PATH=""
 FAILED_LOG_PATH=""
@@ -326,8 +324,6 @@ Core options:
   --remove-source          Remove each source only after strong hash verification.
   --analyze-only           Show the plan without creating archives.
   --force                  Atomically replace an existing validated output.
-  --single-pass            Join validated transform lanes, then build one solid
-                           7z archive instead of incrementally appending lanes.
   --dictionary SIZE        Override the automatic dictionary, such as 2g.
   --threads N              Override LZMA2 thread count; above 2 may reduce ratio.
   --effort MODE            practical, extreme, or insane. Default: extreme.
@@ -1367,7 +1363,7 @@ run_logged_stage() {
     set -e
 
     # Strong verification is timed around extraction plus hashing as a whole.
-    if [[ $stage != 'single-pass hash extraction' ]]; then
+    if [[ $stage != 'hash extraction' ]]; then
         hardcore_timing_record "$timing_phase" "$timing_started" "$rc"
     fi
     printf '\n%s finished after %s.\n' "$stage" "$(format_duration "$((SECONDS - started))")"
@@ -1841,10 +1837,6 @@ while (( $# > 0 )); do
             FORCE=true
             shift
             ;;
-        --single-pass)
-            SINGLE_PASS=true
-            shift
-            ;;
         -y|--yes)
             ASSUME_YES=true
             shift
@@ -2298,7 +2290,6 @@ build_batch_child_arguments() {
     $ALLOW_SLEEP && BATCH_CHILD_ARGS+=(--allow-sleep)
     $ANALYZE_ONLY && BATCH_CHILD_ARGS+=(--analyze-only)
     $FORCE && BATCH_CHILD_ARGS+=(--force)
-    $SINGLE_PASS && BATCH_CHILD_ARGS+=(--single-pass)
     $ASSUME_YES && BATCH_CHILD_ARGS+=(--yes)
 
     [[ -n $DICTIONARY_OVERRIDE ]] && BATCH_CHILD_ARGS+=(--dictionary "$DICTIONARY_OVERRIDE")
@@ -3147,9 +3138,6 @@ cleanup() {
     if [[ -n ${NESTED_STAGE_PARENT:-} && -d $NESTED_STAGE_PARENT ]]; then
         rm -rf --one-file-system -- "$NESTED_STAGE_PARENT"
     fi
-    if [[ -n ${DIRECT_STAGE_PARENT:-} && -d $DIRECT_STAGE_PARENT ]]; then
-        rm -rf --one-file-system -- "$DIRECT_STAGE_PARENT"
-    fi
     if [[ -n ${MC_SAMPLE_DIR:-} && -d $MC_SAMPLE_DIR ]]; then
         rm -rf --one-file-system -- "$MC_SAMPLE_DIR"
     fi
@@ -3953,11 +3941,6 @@ FREE_DESTINATION_BYTES=$(df -PB1 -- "$ARCHIVE_PARENT" | awk 'NR==2 {print $4}')
 FREE_WORK_BYTES=$(df -PB1 -- "$JOB_WORK_DIR" | awk 'NR==2 {print $4}')
 DESTINATION_REQUIRED_BYTES=$((TOTAL_BYTES - VIDEO_OMITTED_BYTES + 128 * MIB))
 WORK_REQUIRED_BYTES=$((256 * MIB))
-if $SINGLE_PASS; then
-    # cp --reflink=auto is cheap on CoW filesystems, but size for the safe
-    # fallback where the complete joined tree must be copied.
-    WORK_REQUIRED_BYTES=$((WORK_REQUIRED_BYTES + TOTAL_BYTES - VIDEO_OMITTED_BYTES + 128 * MIB))
-fi
 if $VIDEO_TRANSCODE && (( VIDEO_TRANSCODE_COUNT > 0 )); then
     WORK_REQUIRED_BYTES=$((WORK_REQUIRED_BYTES + VIDEO_TRANSCODE_BYTES + LARGEST_TRANSCODE_VIDEO_BYTES))
 fi
@@ -3989,7 +3972,6 @@ printf 'Platform:                %s\n' "$(platform_os_version)"
 printf 'Dependency preflight:    %s\n' "$DEPENDENCY_PREFLIGHT_SUMMARY"
 printf 'Source:                  %s\n' "$SOURCE"
 printf 'Output:                  %s%s\n' "$ARCHIVE" "$($OUTPUT_WAS_AUTOMATIC && printf ' (automatic)' || true)"
-printf 'Archive assembly:        %s\n' "$($SINGLE_PASS && printf 'Single solid pass after parallel transforms' || printf 'Incremental lanes')"
 printf '7-Zip executable:        %s\n' "$SEVEN_ZIP"
 printf '7-Zip version:           %s\n' "${SEVEN_ZIP_VERSION:-Unknown}"
 printf 'CPU:                     %s\n' "$CPU_MODEL"
@@ -4435,13 +4417,13 @@ process_format_preserving_containers() {
     (( accounted == CONTAINER_COUNT )) || \
         die "Container repack accounted for $accounted of $CONTAINER_COUNT candidate files."
 
-    if ! $SINGLE_PASS && [[ -s $CONTAINER_REPACKED_LIST ]]; then
+    if [[ -s $CONTAINER_REPACKED_LIST ]]; then
         ( cd -- "$CONTAINER_STAGE_PARENT" && \
             run_logged_stage "repacked-container storage" "$SEVEN_ZIP_LOG" \
                 "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
                     -snl -snh -spd -scsUTF-8 -bsp1 -y "@${CONTAINER_REPACKED_LIST}" )
     fi
-    if ! $SINGLE_PASS && [[ -s $CONTAINER_FALLBACK_LIST ]]; then
+    if [[ -s $CONTAINER_FALLBACK_LIST ]]; then
         ( cd -- "$SOURCE_PARENT" && \
             run_logged_stage "original-container storage" "$SEVEN_ZIP_LOG" \
                 "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
@@ -4460,10 +4442,6 @@ process_format_preserving_containers() {
 
 add_copy_lane_to_archive() {
     (( COPY_COUNT > 0 )) || return 0
-    if $SINGLE_PASS; then
-        printf '\nStage 6/8: Copy-lane files are ready for the final single-pass archive.\n'
-        return 0
-    fi
     FAILURE_CONTEXT="copy-lane-storage"
     printf '\nStage 6/8: Storing content-confirmed incompressible files with Copy mode...\n'
     printf 'Copy lane: %s files / %s\n\n' "$COPY_COUNT" "$(human_bytes "$COPY_BYTES")"
@@ -4884,7 +4862,7 @@ add_image_results_to_archive() {
     printf 'Optimized images: %s files / %s\n' "$IMAGE_OPTIMIZED_COUNT" "$(human_bytes "$IMAGE_OPTIMIZED_BYTES")"
     printf 'Original fallbacks: %s files / %s\n\n' "$IMAGE_FALLBACK_COUNT" "$(human_bytes "$IMAGE_FALLBACK_BYTES")"
 
-    if ! $SINGLE_PASS && [[ -s $IMAGE_OPTIMIZED_LIST ]]; then
+    if [[ -s $IMAGE_OPTIMIZED_LIST ]]; then
         (
             cd -- "$IMAGE_STAGE_PARENT"
             run_logged_stage "optimized-image storage" "$SEVEN_ZIP_LOG" \
@@ -4892,7 +4870,7 @@ add_image_results_to_archive() {
                     -snl -snh -spd -scsUTF-8 -bsp1 -y "@${IMAGE_OPTIMIZED_LIST}"
         )
     fi
-    if ! $SINGLE_PASS && [[ -s $IMAGE_FALLBACK_LIST ]]; then
+    if [[ -s $IMAGE_FALLBACK_LIST ]]; then
         (
             cd -- "$SOURCE_PARENT"
             run_logged_stage "original-image fallback storage" "$SEVEN_ZIP_LOG" \
@@ -5028,7 +5006,7 @@ add_video_results_to_archive() {
             "${VIDEO_OMITTED_COUNT:-0}" "$(human_bytes "${VIDEO_OMITTED_BYTES:-0}")"
     fi
 
-    if ! $SINGLE_PASS && [[ -s $VIDEO_COMPRESSED_LIST ]]; then
+    if [[ -s $VIDEO_COMPRESSED_LIST ]]; then
         (
             cd -- "$VIDEO_STAGE_PARENT"
             run_logged_stage "compressed-video storage" "$SEVEN_ZIP_LOG" \
@@ -5039,7 +5017,7 @@ add_video_results_to_archive() {
         )
     fi
 
-    if ! $SINGLE_PASS && [[ -s $VIDEO_FALLBACK_LIST ]]; then
+    if [[ -s $VIDEO_FALLBACK_LIST ]]; then
         (
             cd -- "$SOURCE_PARENT"
             run_logged_stage "original-video fallback storage" "$SEVEN_ZIP_LOG" \
@@ -5116,7 +5094,6 @@ prepare_and_add_nested_archives() {
     [[ -n $VIDEO_ENCODER ]] && inherited+=(--video-encoder "$VIDEO_ENCODER")
     $IMAGE_OPTIMIZE || inherited+=(--no-image-optimize)
     inherited+=(--image-mode "$IMAGE_MODE" --verify "$VERIFY_MODE_EFFECTIVE" --effort "$EFFORT")
-    $SINGLE_PASS && inherited+=(--single-pass)
     $MC_AUTO && inherited+=(--mc-auto) || inherited+=(--no-mc-auto)
 
     while IFS= read -r relative; do
@@ -5218,10 +5195,10 @@ prepare_and_add_nested_archives() {
             "$([[ $reason == candidate-smaller ]] && printf 'REPACKED' || printf 'PRESERVED')" "$reason"
         rm -rf --one-file-system -- "$extracted" "$normalized"; rm -f -- "$child_archive"
     done < "$NESTED_LIST"
-    if ! $SINGLE_PASS && [[ -s $NESTED_REPACKED_LIST ]]; then
+    if [[ -s $NESTED_REPACKED_LIST ]]; then
         (cd -- "$NESTED_STAGE_PARENT" && run_logged_stage "nested-archive replacement storage" "$SEVEN_ZIP_LOG" "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 -spd -scsUTF-8 -bsp1 -y "@${NESTED_REPACKED_LIST}")
     fi
-    if ! $SINGLE_PASS && [[ -s $NESTED_FALLBACK_LIST ]]; then
+    if [[ -s $NESTED_FALLBACK_LIST ]]; then
         (cd -- "$SOURCE_PARENT" && run_logged_stage "nested-archive original fallback storage" "$SEVEN_ZIP_LOG" "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 -spd -scsUTF-8 -bsp1 -y "@${NESTED_FALLBACK_LIST}")
     fi
     if [[ -s $NESTED_RESULT_MANIFEST ]]; then
@@ -5457,17 +5434,9 @@ build_expected_paths_and_hashes() {
     LC_ALL=C sort -u -o "$EXPECTED_PATHS" "$EXPECTED_PATHS"
 }
 
-prepare_safety_manifests() {
+add_safety_manifests_to_archive() {
     build_metadata_bundle
     build_expected_paths_and_hashes
-}
-
-add_safety_manifests_to_archive() {
-    prepare_safety_manifests
-    if $SINGLE_PASS; then
-        hardcore_archive_build_single_pass
-        return
-    fi
     local -a manifest_items=(.hardcore-archive-metadata)
     # All lanes have finished writing their manifests. Store them together so
     # each tiny manifest does not trigger another copy of the existing archive.
@@ -5512,22 +5481,22 @@ verify_archive_completeness() {
     printf 'Archive completeness check passed: expected and archived entries match exactly.\n'
 }
 
-verify_archive_hashes_single_pass() {
+verify_archive_hashes() {
     local extract_dir="$JOB_WORK_DIR/hash-verification"
     : > "$HASH_VERIFY_LOG"
     rm -rf --one-file-system -- "$extract_dir"
     mkdir -p -- "$extract_dir"
-    run_logged_stage "single-pass hash extraction" "$HASH_VERIFY_LOG" \
+    run_logged_stage "hash extraction" "$HASH_VERIFY_LOG" \
         "$SEVEN_ZIP" x -y -spd -o"$extract_dir" "$TEMP_ARCHIVE" || return 1
     if [[ -s $HASH_MANIFEST ]]; then
         (cd -- "$extract_dir" && sha256sum -c --quiet "$HASH_MANIFEST") >>"$HASH_VERIFY_LOG" 2>&1 || return 1
     fi
     rm -rf --one-file-system -- "$extract_dir"
-    printf 'Single-pass extraction and SHA-256 content verification passed.\n'
+    printf 'Archive extraction and SHA-256 content verification passed.\n'
 }
 
 verify_archive_by_extraction() {
-    verify_archive_hashes_single_pass
+    verify_archive_hashes
 }
 
 write_success_report() {
@@ -5643,11 +5612,6 @@ resource_pool_release_lzma_reservation() {
 }
 
 compress_nonvideo_with_resources() {
-    if $SINGLE_PASS; then
-        printf '\nStage 4/8: Deferring LZMA2 until validated transform lanes join.\n'
-        resource_pool_release_lzma_reservation
-        return 0
-    fi
     compress_nonvideo_with_fallback "$@"
     resource_pool_release_lzma_reservation
 }
@@ -5760,7 +5724,7 @@ hardcore_timed archive_verification verify_archive_completeness || \
 case "$VERIFY_MODE_EFFECTIVE" in
     hashes)
         FAILURE_CONTEXT="hash-verification"
-        hardcore_timed archive_verification verify_archive_hashes_single_pass || \
+        hardcore_timed archive_verification verify_archive_hashes || \
             die "Archive hash verification failed. The failed archive and diagnostic log will be preserved."
         ;;
     extract)

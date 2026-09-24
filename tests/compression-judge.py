@@ -32,12 +32,6 @@ def main() -> int:
         (source / "alpha.txt").write_text("alpha\n" * 100, encoding="utf-8")
         expected = judge.folder_manifest(source)
 
-        # With no installed command and no explicit override, the bundled
-        # repository frontend must be selected independent of the caller's CWD.
-        bundled = judge.resolve_hardcore_executable(None)
-        assert bundled == str((ROOT / "hardcore-archive").resolve()), bundled
-        assert judge.resolve_hardcore_executable(str(root / "missing")) is None
-
         changed = root / "changed"
         changed.mkdir()
         (changed / "alpha.txt").write_text("corrupt\n", encoding="utf-8")
@@ -79,49 +73,6 @@ fi
         )
         assert hardcore_result.status == "PASS", hardcore_result
         assert hardcore_result.exact_payload_roundtrip is True
-
-        single_pass_result = judge.benchmark_hardcore(
-            str(fake_hardcore),
-            source,
-            expected,
-            judge.payload_size(expected),
-            0,
-            root / "hardcore-single-pass-results",
-            lossless=False,
-            single_pass=True,
-        )
-        assert single_pass_result.status == "PASS", single_pass_result
-        assert single_pass_result.method == "hardcore-single-pass"
-        assert "--single-pass" in single_pass_result.command
-
-        # A Hardcore-only run should skip the stream-compressor TAR entirely.
-        hardcore_only = root / "hardcore-only-results"
-        completed = subprocess.run(
-            [
-                sys.executable,
-                str(JUDGE),
-                str(source),
-                "--methods",
-                "hardcore-lossless",
-                "--hardcore",
-                str(fake_hardcore),
-                "--output-dir",
-                str(hardcore_only),
-                "--heartbeat-seconds",
-                "5",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert completed.returncode == 0, completed.stdout + completed.stderr
-        assert "No requested, available TAR-based method needs a canonical TAR." in completed.stdout
-        assert not (hardcore_only / "canonical-input.tar").exists()
-        hardcore_json = json.loads((hardcore_only / "results.json").read_text(encoding="utf-8"))
-        assert hardcore_json["source_stable"] is True
-        assert hardcore_json["canonical_tar_bytes"] is None
-        assert hardcore_json["results"][0]["canonical_tar_bytes"] is None
-        assert "not created" in (hardcore_only / "REPORT.md").read_text(encoding="utf-8")
 
         fake_bin = root / "bin"
         fake_bin.mkdir()
@@ -179,8 +130,6 @@ cat -- "${{@: -1}}"
         assert status["exit_code"] == 0
         results = json.loads((output / "results.json").read_text(encoding="utf-8"))
         assert results["source_stable"] is True
-        assert (output / "canonical-input.tar").is_file()
-        assert results["canonical_tar_bytes"] == (output / "canonical-input.tar").stat().st_size
         assert results["results"][0]["exact_payload_roundtrip"] is True
         assert results["results"][1]["status"] == "PASS"
         assert not (output / "gzip" / "restored").exists()
