@@ -29,13 +29,13 @@ STORAGE_STAGE_PARENT="$TMP/work/stage"
 STORAGE_BATCH_LIST="$STORAGE_STAGE_PARENT/list.txt"
 STORAGE_BATCH_COUNT=0
 : > "$STORAGE_BATCH_LIST"
-source_ctime_before=$(stat -c "%C@" "$TMP/source/fallback/file.bin")
+source_ctime_before=$(stat -c "%Z" "$TMP/source/fallback/file.bin")
 
 hardcore_storage_stage_add_list "$TMP/source" "$TMP/fallback.list" fallback true
 hardcore_storage_stage_add_list "$TMP/transformed" "$TMP/optimized.list" optimized
 [[ $STORAGE_BATCH_COUNT == 2 ]]
 [[ $(cat -- "$STORAGE_STAGE_PARENT/fallback/file.bin") == original ]]
-[[ $(stat -c "%C@" "$TMP/source/fallback/file.bin") == "$source_ctime_before" ]]
+[[ $(stat -c "%Z" "$TMP/source/fallback/file.bin") == "$source_ctime_before" ]]
 [[ $(cat -- "$STORAGE_STAGE_PARENT/optimized/file.bin") == transformed ]]
 [[ $(cat -- "$STORAGE_BATCH_LIST") == $'fallback/file.bin\noptimized/file.bin' ]]
 
