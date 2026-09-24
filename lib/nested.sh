@@ -7,6 +7,39 @@ HARDCORE_NESTED_SH_LOADED=1
 
 hardcore_nested_runtime_ready() { return 0; }
 
+choose_nested_work_root() {
+    # Nested work can hold an extraction, staged media, and a child archive at
+    # once. The ordinary work-root probe only reserves a small staging minimum.
+    # Compare free space again here, after the parent media work has finished.
+    local candidate free fs probe best_free=-1
+    local -a candidates=("$WORK_ROOT")
+    NESTED_WORK_ROOT=""
+    [[ -n $WORK_DIR_OVERRIDE ]] || candidates+=("$ARCHIVE_PARENT/.hardcore-archive-work")
+    for candidate in "${candidates[@]}"; do
+        candidate=$(realpath -m -- "$candidate")
+        if [[ $candidate == "$SOURCE" || $candidate == "$SOURCE/"* || $SOURCE == "$candidate/"* ]]; then
+            continue
+        fi
+        (umask 077; mkdir -p -- "$candidate") 2>/dev/null || continue
+        fs=$(filesystem_type "$candidate")
+        case $fs in
+            ext2|ext3|ext4|btrfs|xfs|f2fs|zfs|tmpfs|overlay|reiserfs|jfs|apfs|hfs|hfsplus) ;;
+            *) [[ -n $WORK_DIR_OVERRIDE ]] || continue ;;
+        esac
+        free=$(df -PB1 -- "$candidate" 2>/dev/null | awk 'NR==2 {print $4}') || continue
+        [[ $free =~ ^[0-9]+$ ]] || continue
+        (( free > best_free )) || continue
+        # Test actual writability, including ACLs, before selecting the path.
+        probe=$(mktemp -d -p "$candidate" .nested-probe.XXXXXX) 2>/dev/null || continue
+        rmdir -- "$probe"
+        NESTED_WORK_ROOT=$candidate
+        best_free=$free
+    done
+    [[ -n $NESTED_WORK_ROOT ]] || die "No suitable nested working directory is writable. Use --work-dir PATH."
+    printf 'Nested working directory: %s | free %s\n' "$NESTED_WORK_ROOT" "$(human_bytes "$best_free")"
+}
+
+
 prepare_and_add_nested_archives() {
     (( NESTED_COUNT > 0 )) || return 0
     $NESTED_REPACK || return 0
