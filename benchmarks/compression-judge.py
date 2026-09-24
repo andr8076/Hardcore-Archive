@@ -62,6 +62,12 @@ DEFAULT_METHODS = (
     "brotli",
 )
 
+TAR_METHODS = frozenset({"base9", "7z", "zstd", "xz", "gzip", "bzip2", "lz4", "brotli"})
+
+
+def needs_canonical_tar(requested: Iterable[str], available: dict[str, Optional[str]]) -> bool:
+    return any(method in TAR_METHODS and available.get(method) for method in requested)
+
 
 @dataclass
 class Result:
@@ -73,7 +79,7 @@ class Result:
     archive_path: str = ""
     archive_bytes: Optional[int] = None
     payload_bytes: int = 0
-    canonical_tar_bytes: int = 0
+    canonical_tar_bytes: Optional[int] = None
     ratio_percent: Optional[float] = None
     saving_percent: Optional[float] = None
     compress_seconds: Optional[float] = None
@@ -733,7 +739,7 @@ def benchmark_hardcore(
     source: Path,
     source_manifest: dict,
     payload_bytes_value: int,
-    canonical_tar_bytes: int,
+    canonical_tar_bytes: Optional[int],
     out_dir: Path,
     lossless: bool,
     sevenzip: Optional[str] = None,
@@ -859,7 +865,7 @@ def benchmark_hardcore(
     return result
 
 
-def skipped_result(name: str, why: str, payload: int, tar_bytes: int) -> Result:
+def skipped_result(name: str, why: str, payload: int, tar_bytes: Optional[int]) -> Result:
     return Result(
         method=name,
         status="SKIP",
@@ -951,7 +957,7 @@ def write_markdown_report(
     path: Path,
     source: Path,
     source_manifest: dict,
-    tar_path: Path,
+    tar_path: Optional[Path],
     weights: tuple[float, float, float],
     source_stable: bool,
 ):
@@ -959,12 +965,17 @@ def write_markdown_report(
     exact = [r for r in results if r.status == "PASS" and r.exact_payload_roundtrip is True]
     transformed = [r for r in results if r.status == "TRANSFORMED"]
 
+    tar_description = (
+        f"`{tar_path}` ({human_bytes(tar_path.stat().st_size)})"
+        if tar_path is not None
+        else "not created; no requested, available TAR-based compressor needed it"
+    )
     lines = [
         "# Compression Judge report",
         "",
         f"- Source: `{source}`",
         f"- Payload bytes: {payload} ({human_bytes(payload)})",
-        f"- Canonical TAR: `{tar_path}` ({human_bytes(tar_path.stat().st_size)})",
+        f"- Canonical TAR: {tar_description}",
         f"- Source unchanged during benchmark: **{'yes' if source_stable else 'NO — RESULTS INVALID'}**",
         f"- Score weights: size {weights[0]:.0%}, compression time {weights[1]:.0%}, restore time {weights[2]:.0%}",
         "",
@@ -1008,7 +1019,7 @@ def write_markdown_report(
         "",
         "## Notes",
         "",
-        "- Generic compressors and BaseCompresser compressed the exact same canonical TAR bytes.",
+        "- A shared canonical TAR is created only when a requested, available TAR-based compressor needs it; all such methods receive identical bytes.",
         "- Hardcore-Archive compressed the source folder directly so its file-aware logic remained available.",
         "- `hardcore-single-pass` joins validated parallel transform lanes before one solid 7z compression pass.",
         "- `hardcore-lossless` disables video, image, nested-archive, and application-container transformations.",
@@ -1172,22 +1183,6 @@ def main() -> int:
     )
     print(f"      Payload: {human_bytes(payload)} across {len(initial_manifest)} entries")
 
-    print("[2/4] Creating one canonical TAR for stream compressors...")
-    status.update(state="creating-canonical-tar")
-    canonical_tar = output / "canonical-input.tar"
-    if canonical_tar.exists():
-        canonical_tar.unlink()
-    create_canonical_tar(source, canonical_tar)
-    tar_bytes = canonical_tar.stat().st_size
-    print(f"      TAR: {human_bytes(tar_bytes)}")
-
-    free = shutil.disk_usage(output).free
-    if payload and free < payload * 2:
-        eprint(
-            f"Warning: only {human_bytes(free)} free in result filesystem; "
-            "large benchmark outputs/restores may run out of space."
-        )
-
     hardcore = resolve_hardcore_executable(args.hardcore)
     base9 = resolve_executable(
         args.basecompresser,
@@ -1203,6 +1198,35 @@ def main() -> int:
         "lz4": resolve_executable(None, ["lz4"]),
         "brotli": resolve_executable(None, ["brotli"]),
     }
+    tar_executables = {"base9": base9, "7z": seven, **tools}
+    tar_methods = [
+        method for method in requested
+        if method in TAR_METHODS and tar_executables.get(method)
+    ]
+
+    print("[2/4] Preparing shared input for stream compressors...")
+    tar_path = output / "canonical-input.tar"
+    if tar_path.exists():
+        tar_path.unlink()
+    canonical_tar: Optional[Path] = None
+    tar_bytes: Optional[int] = None
+
+    free = shutil.disk_usage(output).free
+    if payload and free < payload * 2:
+        eprint(
+            f"Warning: only {human_bytes(free)} free in result filesystem; "
+            "large benchmark outputs/restores may run out of space."
+        )
+
+    if needs_canonical_tar(requested, tar_executables):
+        status.update(state="creating-canonical-tar")
+        canonical_tar = tar_path
+        create_canonical_tar(source, canonical_tar)
+        tar_bytes = canonical_tar.stat().st_size
+        print(f"      TAR: {human_bytes(tar_bytes)} for {', '.join(tar_methods)}")
+    else:
+        status.update(state="preparing-methods")
+        print("      No requested, available TAR-based method needs a canonical TAR.")
 
     results: list[Result] = []
     print("[3/4] Running competitors sequentially...")
@@ -1216,6 +1240,9 @@ def main() -> int:
         )
         print(f"      [{index}/{len(requested)}] {method} ...", flush=True)
         try:
+            if method in tar_methods:
+                assert canonical_tar is not None
+
             if method == "hardcore-single-pass":
                 if not hardcore:
                     result = skipped_result(method, "hardcore-archive executable not found; pass either the executable or its project directory with --hardcore PATH", payload, tar_bytes)
