@@ -39,6 +39,7 @@ df() {
 human_bytes() { printf '%s bytes' "$1"; }
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 warn() { printf '%s\n' "$*" >&2; }
+safe_slug() { local value=$1; value=${value//[^A-Za-z0-9._-]/-}; value=${value#-}; value=${value%-}; [[ -n $value ]] || value=archive; printf '%s' "$value"; }
 RESOURCE_POOL_RUNNER="$HARDCORE_ARCHIVE_REPO_ROOT/lib/hardcore-archive-resource-run.py"
 RESOURCE_POOL_DIR="$TEST_ROOT/pool"
 RESOURCE_POOL_ENABLED=false
