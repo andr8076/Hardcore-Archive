@@ -8,13 +8,10 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-CORE = (ROOT / "lib/hardcore-archive-core.sh").read_text()
 FUNCTIONS = (
     f'source {shlex.quote(str(ROOT / "lib/calibration-identity.sh"))}\n'
     f'source {shlex.quote(str(ROOT / "lib/restore.sh"))}\n'
-    + "choose_nested_work_root() {" + CORE.split(
-        "choose_nested_work_root() {", 1
-    )[1].split("\nbuild_sparse_manifest() {", 1)[0]
+    f'source {shlex.quote(str(ROOT / "lib/nested.sh"))}\n'
 )
 
 FIXTURE = r'''
