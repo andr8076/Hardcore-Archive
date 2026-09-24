@@ -33,6 +33,7 @@ jobs:
           "$BASH_BIN" tests/resource-pool.sh
           "$BASH_BIN" tests/nested-parallel.sh
           "$BASH_BIN" tests/nested-output-paths.sh
+          "$BASH_BIN" tests/archive-dictionary-policy.sh
           python3 tests/restore-roundtrip.py
           "$BASH_BIN" tests/bundled-runtime.sh
           "$BASH_BIN" tests/portable-runtime.sh

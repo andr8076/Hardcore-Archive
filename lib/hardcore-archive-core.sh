@@ -4308,8 +4308,12 @@ compress_nonvideo_with_fallback() {
     fi
 
     for candidate in "${attempts[@]}"; do
-        (( candidate <= MAX_FORMAT_DICTIONARY_MIB )) || continue
-        (( candidate <= NONVIDEO_MIB )) || continue
+        # Parent-assigned nested dictionaries are explicit after the child
+        # receives its resource grant; only auto-sized candidates are capped by
+        # the LZMA lane's input size.
+        hardcore_archive_lzma_dictionary_candidate_allowed \
+            "$candidate" "$NONVIDEO_MIB" "$MAX_FORMAT_DICTIONARY_MIB" \
+            "$DICTIONARY_WAS_OVERRIDDEN" || continue
 
         rm -f -- "$TEMP_ARCHIVE"
         : > "$SEVEN_ZIP_LOG"
