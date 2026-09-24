@@ -4,7 +4,7 @@ IFS=$'\n\t'
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 
 required=(
-    common platform config doctor inventory planner scheduler archive video images resource-pool timing calibration-identity video-acceleration video-quality-final media-policy runtime
+    common platform config doctor inventory planner scheduler archive video images resource-pool storage timing calibration-identity video-acceleration video-quality-final media-policy runtime
     containers nested verify restore reporting visual inspect
 )
 for module in "${required[@]}"; do
@@ -17,6 +17,7 @@ bash -n "$ROOT/hardcore-archive-runner.sh"
 bash -n "$ROOT/hardcore-archive-runner-policy.sh"
 bash -n "$ROOT/install-dependencies.sh"
 bash -n "$ROOT/lib/hardcore-archive-core.sh"
+bash -n "$ROOT/lib/storage.sh"
 bash -n "$ROOT/lib/hardcore-archive-image-helper.sh"
 bash -n "$ROOT/lib/hardcore-archive-video-helper.sh"
 bash -n "$ROOT/lib/av1encode-dependency.sh"
@@ -74,6 +75,8 @@ grep -Fq 'hardcore-archive-image-helper.sh' "$ROOT/lib/hardcore-archive-core.sh"
 grep -Fq 'hardcore_images_choose_cpu_schedule' "$ROOT/lib/hardcore-archive-core.sh"
 grep -Fq 'HARDCORE_ARCHIVE_IMAGE_SCHEDULER_CACHE_DIR' "$ROOT/lib/hardcore-archive-core.sh"
 grep -Fq 'source "$(dirname -- "${BASH_SOURCE[0]}")/resource-pool.sh"' "$ROOT/lib/hardcore-archive-core.sh"
+grep -Fq 'source "$(dirname -- "${BASH_SOURCE[0]}")/storage.sh"' "$ROOT/lib/hardcore-archive-core.sh"
+grep -Fq 'hardcore_storage_stage_commit' "$ROOT/lib/storage.sh"
 grep -Fq 'choose_nested_work_root()' "$ROOT/lib/nested.sh"
 ! grep -Fq 'prepare_and_add_nested_archives() {' "$ROOT/lib/hardcore-archive-core.sh"
 grep -Fq 'hardcore_resource_pool_init' "$ROOT/lib/hardcore-archive-core.sh"

@@ -382,17 +382,20 @@ prepare_and_add_nested_archives() {
     (( NESTED_REPACKED_COUNT + NESTED_FALLBACK_COUNT == NESTED_COUNT )) || \
         die "Nested archive accounting mismatch: detected $NESTED_COUNT but accounted for $((NESTED_REPACKED_COUNT + NESTED_FALLBACK_COUNT))."
 
-    if [[ -s $NESTED_REPACKED_LIST ]]; then
-        (cd -- "$NESTED_STAGE_PARENT" && \
-            run_logged_stage "nested-archive replacement storage" "$SEVEN_ZIP_LOG" \
-                "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
-                    -spd -scsUTF-8 -bsp1 -y "@${NESTED_REPACKED_LIST}")
-    fi
-    if [[ -s $NESTED_FALLBACK_LIST ]]; then
-        (cd -- "$SOURCE_PARENT" && \
-            run_logged_stage "nested-archive original fallback storage" "$SEVEN_ZIP_LOG" \
-                "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
-                    -spd -scsUTF-8 -bsp1 -y "@${NESTED_FALLBACK_LIST}")
+    if [[ ${STORAGE_BATCH_ENABLED:-false} != true ]]; then
+        if [[ -s $NESTED_REPACKED_LIST ]]; then
+            (cd -- "$NESTED_STAGE_PARENT" && \
+                run_logged_stage "nested-archive replacement storage" "$SEVEN_ZIP_LOG" \
+                    "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
+                        -spd -scsUTF-8 -bsp1 -y "@${NESTED_REPACKED_LIST}")
+        fi
+        if [[ -s $NESTED_FALLBACK_LIST ]]; then
+            (cd -- "$SOURCE_PARENT" && \
+                run_logged_stage "nested-archive original fallback storage" "$SEVEN_ZIP_LOG" \
+                    "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
+                        -spd -scsUTF-8 -bsp1 -y "@${NESTED_FALLBACK_LIST}")
+        fi
+    
     fi
     if [[ -s $NESTED_RESULT_MANIFEST ]]; then
         {

@@ -77,6 +77,7 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/media-policy.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/images.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/video.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/resource-pool.sh"
+source "$(dirname -- "${BASH_SOURCE[0]}")/storage.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/restore.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/archive.sh"
 hardcore_timing_init
@@ -109,6 +110,10 @@ MC_AUTO_RESULT="not run"
 PROGRESS_INTERVAL=15
 POSITIONAL=()
 BATCH_MODE=false
+STORAGE_BATCH_ENABLED=false
+STORAGE_STAGE_PARENT=""
+STORAGE_BATCH_LIST=""
+STORAGE_BATCH_COUNT=0
 TEMP_ARCHIVE=""
 FAILURE_CONTEXT="archive-build"
 FAILED_ARCHIVE_PATH=""
@@ -3138,6 +3143,9 @@ cleanup() {
     if [[ -n ${NESTED_STAGE_PARENT:-} && -d $NESTED_STAGE_PARENT ]]; then
         rm -rf --one-file-system -- "$NESTED_STAGE_PARENT"
     fi
+    if [[ -n ${STORAGE_STAGE_PARENT:-} && -d $STORAGE_STAGE_PARENT ]]; then
+        rm -rf --one-file-system -- "$STORAGE_STAGE_PARENT"
+    fi
     if [[ -n ${MC_SAMPLE_DIR:-} && -d $MC_SAMPLE_DIR ]]; then
         rm -rf --one-file-system -- "$MC_SAMPLE_DIR"
     fi
@@ -4417,18 +4425,21 @@ process_format_preserving_containers() {
     (( accounted == CONTAINER_COUNT )) || \
         die "Container repack accounted for $accounted of $CONTAINER_COUNT candidate files."
 
-    if [[ -s $CONTAINER_REPACKED_LIST ]]; then
-        ( cd -- "$CONTAINER_STAGE_PARENT" && \
-            run_logged_stage "repacked-container storage" "$SEVEN_ZIP_LOG" \
-                "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
-                    -snl -snh -spd -scsUTF-8 -bsp1 -y "@${CONTAINER_REPACKED_LIST}" )
-    fi
-    if [[ -s $CONTAINER_FALLBACK_LIST ]]; then
-        ( cd -- "$SOURCE_PARENT" && \
-            run_logged_stage "original-container storage" "$SEVEN_ZIP_LOG" \
-                "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
-                    -snl -snh -spd -scsUTF-8 -bsp1 -y "@${CONTAINER_FALLBACK_LIST}" )
-    fi
+    if ! $STORAGE_BATCH_ENABLED; then
+        if [[ -s $CONTAINER_REPACKED_LIST ]]; then
+            ( cd -- "$CONTAINER_STAGE_PARENT" && \
+                run_logged_stage "repacked-container storage" "$SEVEN_ZIP_LOG" \
+                    "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
+                        -snl -snh -spd -scsUTF-8 -bsp1 -y "@${CONTAINER_REPACKED_LIST}" )
+        fi
+        if [[ -s $CONTAINER_FALLBACK_LIST ]]; then
+            ( cd -- "$SOURCE_PARENT" && \
+                run_logged_stage "original-container storage" "$SEVEN_ZIP_LOG" \
+                    "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
+                        -snl -snh -spd -scsUTF-8 -bsp1 -y "@${CONTAINER_FALLBACK_LIST}" )
+        fi
+    
+        fi
 
     {
         printf 'Hardcore Archive format-preserving container manifest\n'
@@ -4445,14 +4456,17 @@ add_copy_lane_to_archive() {
     FAILURE_CONTEXT="copy-lane-storage"
     printf '\nStage 6/8: Storing content-confirmed incompressible files with Copy mode...\n'
     printf 'Copy lane: %s files / %s\n\n' "$COPY_COUNT" "$(human_bytes "$COPY_BYTES")"
-    (
-        cd -- "$SOURCE_PARENT"
-        run_logged_stage "content-incompressible Copy storage" "$SEVEN_ZIP_LOG" \
-            "$SEVEN_ZIP" a "$TEMP_ARCHIVE" \
-                -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
-                -snl -snh -spd -scsUTF-8 -bsp1 -y \
-                "@${COPY_LIST}"
-    )
+    if ! $STORAGE_BATCH_ENABLED; then
+        (
+            cd -- "$SOURCE_PARENT"
+            run_logged_stage "content-incompressible Copy storage" "$SEVEN_ZIP_LOG" \
+                "$SEVEN_ZIP" a "$TEMP_ARCHIVE" \
+                    -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
+                    -snl -snh -spd -scsUTF-8 -bsp1 -y \
+                    "@${COPY_LIST}"
+        )    fi
+
+
 }
 
 video_archived_relative() {
@@ -4862,22 +4876,25 @@ add_image_results_to_archive() {
     printf 'Optimized images: %s files / %s\n' "$IMAGE_OPTIMIZED_COUNT" "$(human_bytes "$IMAGE_OPTIMIZED_BYTES")"
     printf 'Original fallbacks: %s files / %s\n\n' "$IMAGE_FALLBACK_COUNT" "$(human_bytes "$IMAGE_FALLBACK_BYTES")"
 
-    if [[ -s $IMAGE_OPTIMIZED_LIST ]]; then
-        (
-            cd -- "$IMAGE_STAGE_PARENT"
-            run_logged_stage "optimized-image storage" "$SEVEN_ZIP_LOG" \
-                "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
-                    -snl -snh -spd -scsUTF-8 -bsp1 -y "@${IMAGE_OPTIMIZED_LIST}"
-        )
-    fi
-    if [[ -s $IMAGE_FALLBACK_LIST ]]; then
-        (
-            cd -- "$SOURCE_PARENT"
-            run_logged_stage "original-image fallback storage" "$SEVEN_ZIP_LOG" \
-                "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
-                    -snl -snh -spd -scsUTF-8 -bsp1 -y "@${IMAGE_FALLBACK_LIST}"
-        )
-    fi
+    if ! $STORAGE_BATCH_ENABLED; then
+        if [[ -s $IMAGE_OPTIMIZED_LIST ]]; then
+            (
+                cd -- "$IMAGE_STAGE_PARENT"
+                run_logged_stage "optimized-image storage" "$SEVEN_ZIP_LOG" \
+                    "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
+                        -snl -snh -spd -scsUTF-8 -bsp1 -y "@${IMAGE_OPTIMIZED_LIST}"
+            )
+        fi
+        if [[ -s $IMAGE_FALLBACK_LIST ]]; then
+            (
+                cd -- "$SOURCE_PARENT"
+                run_logged_stage "original-image fallback storage" "$SEVEN_ZIP_LOG" \
+                    "$SEVEN_ZIP" a "$TEMP_ARCHIVE" -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
+                        -snl -snh -spd -scsUTF-8 -bsp1 -y "@${IMAGE_FALLBACK_LIST}"
+            )
+        fi
+        fi
+
     write_image_manifest
 }
 
@@ -5006,28 +5023,31 @@ add_video_results_to_archive() {
             "${VIDEO_OMITTED_COUNT:-0}" "$(human_bytes "${VIDEO_OMITTED_BYTES:-0}")"
     fi
 
-    if [[ -s $VIDEO_COMPRESSED_LIST ]]; then
-        (
-            cd -- "$VIDEO_STAGE_PARENT"
-            run_logged_stage "compressed-video storage" "$SEVEN_ZIP_LOG" \
-                "$SEVEN_ZIP" a "$TEMP_ARCHIVE" \
-                    -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
-                    -snl -snh -spd -scsUTF-8 -bsp1 -y \
-                    "@${VIDEO_COMPRESSED_LIST}"
-        )
-    fi
-
-    if [[ -s $VIDEO_FALLBACK_LIST ]]; then
-        (
-            cd -- "$SOURCE_PARENT"
-            run_logged_stage "original-video fallback storage" "$SEVEN_ZIP_LOG" \
-                "$SEVEN_ZIP" a "$TEMP_ARCHIVE" \
-                    -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
-                    -snl -snh -spd -scsUTF-8 -bsp1 -y \
-                    "@${VIDEO_FALLBACK_LIST}"
-        )
-    fi
-
+    if ! $STORAGE_BATCH_ENABLED; then
+        if [[ -s $VIDEO_COMPRESSED_LIST ]]; then
+            (
+                cd -- "$VIDEO_STAGE_PARENT"
+                run_logged_stage "compressed-video storage" "$SEVEN_ZIP_LOG" \
+                    "$SEVEN_ZIP" a "$TEMP_ARCHIVE" \
+                        -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
+                        -snl -snh -spd -scsUTF-8 -bsp1 -y \
+                        "@${VIDEO_COMPRESSED_LIST}"
+            )
+        fi
+    
+        if [[ -s $VIDEO_FALLBACK_LIST ]]; then
+            (
+                cd -- "$SOURCE_PARENT"
+                run_logged_stage "original-video fallback storage" "$SEVEN_ZIP_LOG" \
+                    "$SEVEN_ZIP" a "$TEMP_ARCHIVE" \
+                        -t7z -mx=0 -m0=Copy -ms=off -mmt=1 \
+                        -snl -snh -spd -scsUTF-8 -bsp1 -y \
+                        "@${VIDEO_FALLBACK_LIST}"
+            )
+        fi
+    
+    
+        fi
 
     write_video_manifest
 }
@@ -5444,6 +5464,8 @@ compress_nonvideo_with_resources() {
 }
 
 cd -- "$SOURCE_PARENT"
+hardcore_storage_prepare_policy
+hardcore_storage_stage_init
 
 if (( VIDEO_COUNT > 0 )) && $VIDEO_TRANSCODE; then
     if $VIDEO_PARALLEL; then
@@ -5525,6 +5547,7 @@ NESTED_TIMING_STARTED=$(hardcore_timing_now 2>/dev/null) || NESTED_TIMING_STARTE
 prepare_and_add_nested_archives
 hardcore_timing_record nested_processing "$NESTED_TIMING_STARTED" 0
 NESTED_TIMING_STARTED=''
+hardcore_storage_stage_commit
 
 printf '\nAdding completeness, hash, and Linux metadata manifests...\n'
 add_safety_manifests_to_archive
