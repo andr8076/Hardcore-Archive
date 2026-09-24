@@ -32,6 +32,12 @@ def main() -> int:
         (source / "alpha.txt").write_text("alpha\n" * 100, encoding="utf-8")
         expected = judge.folder_manifest(source)
 
+        # With no installed command and no explicit override, the bundled
+        # repository frontend must be selected independent of the caller's CWD.
+        bundled = judge.resolve_hardcore_executable(None)
+        assert bundled == str((ROOT / "hardcore-archive").resolve()), bundled
+        assert judge.resolve_hardcore_executable(str(root / "missing")) is None
+
         changed = root / "changed"
         changed.mkdir()
         (changed / "alpha.txt").write_text("corrupt\n", encoding="utf-8")

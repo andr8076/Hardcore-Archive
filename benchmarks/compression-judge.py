@@ -45,6 +45,9 @@ from hardcore_transform_policy import (  # noqa: E402
 )
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
 DEFAULT_METHODS = (
     "hardcore-single-pass",
     "hardcore",
@@ -341,6 +344,18 @@ def resolve_executable(
         if found:
             return found
     return None
+
+
+def resolve_hardcore_executable(explicit: Optional[str]) -> Optional[str]:
+    candidates = ["hardcore-archive", "hardcore-archive.sh"]
+    resolved = resolve_executable(explicit, candidates, candidates)
+    if resolved is not None or explicit is not None:
+        return resolved
+
+    # The judge ships inside the Hardcore-Archive repository. Prefer its own
+    # frontend when no installed command exists, regardless of the caller's
+    # current working directory.
+    return resolve_executable(str(PROJECT_ROOT), candidates, candidates)
 
 
 def first_version_line(exe: str, candidates: list[list[str]]) -> str:
@@ -1173,11 +1188,7 @@ def main() -> int:
             "large benchmark outputs/restores may run out of space."
         )
 
-    hardcore = resolve_executable(
-        args.hardcore,
-        ["hardcore-archive", "hardcore-archive.sh"],
-        ["hardcore-archive", "hardcore-archive.sh"],
-    )
+    hardcore = resolve_hardcore_executable(args.hardcore)
     base9 = resolve_executable(
         args.basecompresser,
         ["basecompresser"],
