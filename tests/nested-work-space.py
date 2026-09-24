@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FUNCTIONS = (
     f'source {shlex.quote(str(ROOT / "lib/calibration-identity.sh"))}\n'
     f'source {shlex.quote(str(ROOT / "lib/restore.sh"))}\n'
+    f'source {shlex.quote(str(ROOT / "lib/resource-pool.sh"))}\n'
     f'source {shlex.quote(str(ROOT / "lib/nested.sh"))}\n'
 )
 
@@ -38,6 +39,15 @@ df() {
 human_bytes() { printf '%s bytes' "$1"; }
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 warn() { printf '%s\n' "$*" >&2; }
+RESOURCE_POOL_RUNNER="$HARDCORE_ARCHIVE_REPO_ROOT/lib/hardcore-archive-resource-run.py"
+RESOURCE_POOL_DIR="$TEST_ROOT/pool"
+RESOURCE_POOL_ENABLED=false
+RESOURCE_POOL_EXPANDED=false
+RESOURCE_POOL_MODE=inactive
+RESOURCE_POOL_MAX_RAM_MIB=2048
+CPU_THREADS=2
+MAX_FORMAT_DICTIONARY_MIB=4096
+HARDCORE_ARCHIVE_NESTED_DEPTH=0
 '''
 
 PIPELINE = r'''
@@ -69,7 +79,21 @@ NESTED_REPACKED_LIST="$TEST_ROOT/repacked"
 NESTED_FALLBACK_LIST="$TEST_ROOT/fallback"
 NESTED_LIST="$TEST_ROOT/list"
 SEVEN_ZIP_LOG="$TEST_ROOT/7zip.log"
-SEVEN_ZIP=fake_7z
+SEVEN_ZIP="$TEST_ROOT/fake-7z"
+cat > "$SEVEN_ZIP" <<'SH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+case ${1:-} in
+    l)
+        printf 'Path = photos.zip\nPath = photo.jpg\nSize = 16\nEncrypted = -\n'
+        ;;
+    x) : ;;
+    a) printf 'smaller' > "$2" ;;
+    t) : ;;
+    *) exit 1 ;;
+esac
+SH
+chmod +x "$SEVEN_ZIP"
 TEMP_ARCHIVE="$TEST_ROOT/final.7z"
 printf 'source/photos.zip\n' > "$NESTED_LIST"
 printf 'original payload' > "$SOURCE/photos.zip"
@@ -77,15 +101,6 @@ archive_replacement_path() { printf '%s.7z' "${1%.zip}"; }
 hardcore_visual_open_log() { :; }
 resolve_current_script() { printf '%s/child.sh' "$TEST_ROOT"; }
 run_logged_stage() { :; }
-fake_7z() {
-    case $1 in
-        l) printf 'Path = photos.zip\nPath = photo.jpg\nSize = 16\nEncrypted = -\n' ;;
-        x) return 0 ;;
-        a) printf 'smaller' > "$2" ;;
-        t) return 0 ;;
-        *) return 1 ;;
-    esac
-}
 prepare_and_add_nested_archives
 printf 'RESULT_ROOT=%s\n' "$NESTED_STAGE_PARENT"
 cat "$NESTED_RESULT_MANIFEST"
@@ -101,7 +116,7 @@ class NestedWorkTests(unittest.TestCase):
     def run_shell(self, script, **env):
         result = subprocess.run(
             ["bash", "-c", "set -Eeuo pipefail\n" + FUNCTIONS + FIXTURE + script],
-            env=dict(os.environ, TEST_ROOT=str(self.root), **env),
+            env=dict(os.environ, TEST_ROOT=str(self.root), HARDCORE_ARCHIVE_REPO_ROOT=str(ROOT), **env),
             text=True, capture_output=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
