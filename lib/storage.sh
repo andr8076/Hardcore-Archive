@@ -37,7 +37,7 @@ hardcore_storage_stage_init() {
 
 hardcore_storage_stage_add_list() {
     [[ ${STORAGE_BATCH_ENABLED:-false} == true ]] || return 0
-    local source_root=$1 list_file=$2 label=${3:-storage}
+    local source_root=$1 list_file=$2 label=${3:-storage} preserve_source=${4:-false}
     [[ -s $list_file ]] || return 0
     local source_real relative source_path destination
     source_real=$(realpath -e -- "$source_root") || die "Storage source root disappeared: $label"
@@ -58,7 +58,12 @@ hardcore_storage_stage_add_list() {
             die "Batched storage path collision: $relative"
         fi
         mkdir -p -- "$(dirname -- "$destination")"
-        if ! ln -- "$source_path" "$destination" 2>/dev/null; then
+        if [[ $preserve_source == true ]]; then
+            # Hard-linking a source file changes its ctime and would make the
+            # source-stability snapshot fail. Copy source-root candidates.
+            cp -p -- "$source_path" "$destination" || \
+                die "Could not stage source candidate: $relative"
+        elif ! ln -- "$source_path" "$destination" 2>/dev/null; then
             cp -p -- "$source_path" "$destination" || \
                 die "Could not stage storage candidate: $relative"
         fi
@@ -70,14 +75,14 @@ hardcore_storage_stage_add_list() {
 hardcore_storage_stage_commit() {
     [[ ${STORAGE_BATCH_ENABLED:-false} == true ]] || return 0
     hardcore_storage_stage_add_list "${CONTAINER_STAGE_PARENT:-}" "${CONTAINER_REPACKED_LIST:-}" container-repacked
-    hardcore_storage_stage_add_list "${SOURCE_PARENT:-}" "${CONTAINER_FALLBACK_LIST:-}" container-fallback
-    hardcore_storage_stage_add_list "${SOURCE_PARENT:-}" "${COPY_LIST:-}" copy
+    hardcore_storage_stage_add_list "${SOURCE_PARENT:-}" "${CONTAINER_FALLBACK_LIST:-}" container-fallback true
+    hardcore_storage_stage_add_list "${SOURCE_PARENT:-}" "${COPY_LIST:-}" copy true
     hardcore_storage_stage_add_list "${VIDEO_STAGE_PARENT:-}" "${VIDEO_COMPRESSED_LIST:-}" video-transcoded
-    hardcore_storage_stage_add_list "${SOURCE_PARENT:-}" "${VIDEO_FALLBACK_LIST:-}" video-fallback
+    hardcore_storage_stage_add_list "${SOURCE_PARENT:-}" "${VIDEO_FALLBACK_LIST:-}" video-fallback true
     hardcore_storage_stage_add_list "${IMAGE_STAGE_PARENT:-}" "${IMAGE_OPTIMIZED_LIST:-}" image-optimized
-    hardcore_storage_stage_add_list "${SOURCE_PARENT:-}" "${IMAGE_FALLBACK_LIST:-}" image-fallback
+    hardcore_storage_stage_add_list "${SOURCE_PARENT:-}" "${IMAGE_FALLBACK_LIST:-}" image-fallback true
     hardcore_storage_stage_add_list "${NESTED_STAGE_PARENT:-}" "${NESTED_REPACKED_LIST:-}" nested-repacked
-    hardcore_storage_stage_add_list "${SOURCE_PARENT:-}" "${NESTED_FALLBACK_LIST:-}" nested-fallback
+    hardcore_storage_stage_add_list "${SOURCE_PARENT:-}" "${NESTED_FALLBACK_LIST:-}" nested-fallback true
     (( STORAGE_BATCH_COUNT > 0 )) || return 0
     (
         cd -- "$STORAGE_STAGE_PARENT"
