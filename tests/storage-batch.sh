@@ -6,6 +6,7 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 # storage.sh is intentionally tested in isolation: production policy and the
 # archive call are exercised separately from the transform workers.
 source "$ROOT/lib/storage.sh"
+die() { printf "storage test failure: %s\n" "$*" >&2; exit 1; }
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/hardcore-storage-batch.XXXXXX")
 trap 'rm -rf -- "$TMP"' EXIT
