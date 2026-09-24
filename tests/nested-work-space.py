@@ -170,7 +170,7 @@ exit "$CHILD_RC"
         output = self.run_shell(PIPELINE, CHILD_ERROR=error, CHILD_RC=str(rc))
         args = (self.root / "child-args").read_text().splitlines()
         work = Path(args[args.index("--work-dir") + 1])
-        self.assertEqual(work.parent.parent, self.root / "destination/.hardcore-archive-work")
+        self.assertEqual(work.parents[3], self.root / "destination/.hardcore-archive-work")
         self.assertEqual(work.name, "child-work")
         self.assertEqual(args[args.index("--verify") + 1], "integrity")
         self.assertEqual((self.root / "source/photos.zip").read_text(), "original payload")
