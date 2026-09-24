@@ -150,7 +150,6 @@ PY
     fi
     command stat "$@"
 }
-choose_nested_work_root() { NESTED_WORK_ROOT="$TMP/work"; }
 archive_replacement_path() { printf '%s.7z' "$1"; }
 resolve_current_script() { printf '%s/fake-core.sh\n' "$TMP"; }
 safe_slug() { printf '%s' "${1//\//-}"; }
@@ -160,6 +159,7 @@ hardcore_visual_open_log() { :; }
 run_logged_stage() { shift 2; "$@"; }
 
 source "$NESTED"
+choose_nested_work_root() { NESTED_WORK_ROOT="$TMP/work"; }
 prepare_and_add_nested_archives
 
 # Both jobs must really have overlapped through the shared pool. A 1 MiB
