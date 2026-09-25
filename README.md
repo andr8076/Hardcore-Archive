@@ -189,30 +189,21 @@ Archive each direct child folder:
 Batch and nested jobs inherit the parent policy. Use `--no-resume` when you deliberately want to rebuild completed work.
 ## Benchmarking
 
-Generate a deterministic corpus:
+The repository keeps a small deterministic benchmark for development:
 
 ```bash
 python3 benchmarks/generate-corpus.py benchmarks/corpus --size-mib 64
 bash benchmarks/run.sh benchmarks/corpus
 ```
 
-Compare an existing folder with other compressors:
+It measures archive size, create time, verification time, extraction time, and
+peak memory for Hardcore Archive and the 7-Zip baseline. See
+[`benchmarks/README.md`](benchmarks/README.md) for workload profiles and
+regression comparisons.
 
-```bash
-python3 benchmarks/compression-judge.py "/data/Work Tools" \
-  --hardcore "$PWD" \
-  --output-dir "/data/judge-results"
-```
-
-Check a long-running judge:
-
-```bash
-python3 benchmarks/check-compression-judge.py "/data/judge-results"
-```
-
-The judge records size, ratio, compression time, restore time, exact round-trip status, transformations, and errors. See [`benchmarks/README.md`](benchmarks/README.md) for the full benchmark guide.
-
-Do not compare transformed Hardcore output with an exact 7-Zip result as if they were the same promise.
+Benchmark outputs are development evidence, not part of the archive format.
+Keep important reports and manifests, but remove reproducible temporary archives
+after verification when they are no longer needed.
 ## Development map
 
 The shell entrypoint is intentionally thin. Modules own separate boundaries:

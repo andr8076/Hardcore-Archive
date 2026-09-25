@@ -1,34 +1,11 @@
-# Hardcore Archive benchmark corpus
+# Hardcore Archive benchmarks
 
-The benchmark suite has two complementary layers:
+The benchmark suite has two useful layers:
 
-1. a small deterministic byte-preserving corpus for direct Hardcore-vs-7-Zip
-   compression comparisons; and
-2. real-world workload profiles that exercise Hardcore Archive's complete
-   routing, image, video, nested-container, verification, and resource-scheduler
-   pipeline.
-
-For comparisons against more archive engines on an existing folder, use the
-Compression Judge:
-
-```bash
-python3 benchmarks/compression-judge.py "/path/to/work tools" \
-  --hardcore "$PWD" \
-  --output-dir "/path/to/benchmark-results"
-```
-
-It runs Hardcore Archive in both full transform-capable mode and strict
-byte-preserving mode, then compares those results with Base9, 7-Zip, Zstandard,
-XZ, gzip, bzip2, LZ4 and Brotli when installed. Generic stream compressors all
-receive the same canonical TAR. Every restored tree is checked against a
-SHA-256 manifest; a transformed Hardcore result is reported separately and
-cannot win the exact-lossless ranking.
-
-Long runs write `run-status.json` every minute. Check the latest run with:
-
-```bash
-python3 benchmarks/check-compression-judge.py "/path/to/benchmark-results"
-```
+1. a deterministic byte-preserving corpus for direct Hardcore-vs-7-Zip
+   comparisons; and
+2. real-world workload profiles for images, video, nested archives, containers,
+   verification, and resource scheduling.
 
 ## Byte-preserving baseline
 
