@@ -31,6 +31,7 @@ jobs:
           PATH="$(dirname "$(command -v "$BASH_BIN")"):$PATH" \
             python3 tests/restore-destination-race.py
           "$BASH_BIN" tests/resource-pool.sh
+          "$BASH_BIN" tests/cancellation-cleanup.sh
           "$BASH_BIN" tests/nested-parallel.sh
           "$BASH_BIN" tests/nested-output-paths.sh
           "$BASH_BIN" tests/archive-dictionary-policy.sh

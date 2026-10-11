@@ -14,6 +14,7 @@ done
 hardcore_runtime_cleanup() {
     local exit_status=$?
     trap - EXIT HUP INT TERM
+    hardcore_process_cancel_all
     hardcore_reporting_finish "$exit_status"
     return "$exit_status"
 }

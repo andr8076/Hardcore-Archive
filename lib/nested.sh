@@ -5,6 +5,8 @@
 [[ ${HARDCORE_NESTED_SH_LOADED:-0} == 1 ]] && return 0
 HARDCORE_NESTED_SH_LOADED=1
 
+source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
+
 hardcore_nested_runtime_ready() { return 0; }
 
 choose_nested_work_root() {
@@ -255,7 +257,7 @@ prepare_and_add_nested_archives() {
     local total=$index max_dispatch=$nested_cpu_total
     (( max_dispatch > total )) && max_dispatch=$total
     (( max_dispatch < 1 )) && max_dispatch=1
-    local active=0 active_disk=0 next_idx pid i rc
+    local active=0 active_disk=0 next_idx pid i rc worker_pid worker_group
     local -a pids=() pid_indexes=()
 
     _hardcore_nested_reap_one() {
@@ -270,6 +272,7 @@ prepare_and_add_nested_archives() {
         pid=${pids[chosen]}
         done_idx=${pid_indexes[chosen]}
         set +e; wait "$pid"; rc=$?; set -e
+        hardcore_process_unregister "$pid"
         worker_rc[done_idx]=$rc
         active_disk=$((active_disk - work_estimates[done_idx]))
         (( active_disk < 0 )) && active_disk=0
@@ -288,37 +291,71 @@ prepare_and_add_nested_archives() {
 
         printf 'Launching nested worker: %s | RAM claim %s MiB | disk estimate %s\n' \
             "${relatives[next_idx]}" "${ram_claims[next_idx]}" "$(human_bytes "$work_estimate")"
-        env HARDCORE_ARCHIVE_PARENT_GPU_LOCK="$gpu_lock" \
-            python3 "$RESOURCE_POOL_RUNNER" run \
-                --pool "$nested_pool_dir" \
-                --cpu-min 1 \
-                --cpu-max "$nested_cpu_max" \
-                --ram-mib "${ram_claims[next_idx]}" \
-                --label nested-archive \
-                --priority normal \
-                -- bash "$helper" \
-                    --source-parent "$SOURCE_PARENT" \
-                    --relative "${relatives[next_idx]}" \
-                    --output-rel "${outputs[next_idx]}" \
-                    --stage-parent "$NESTED_STAGE_PARENT" \
-                    --task-dir "${task_dirs[next_idx]}" \
-                    --result "${result_files[next_idx]}" \
-                    --log "${log_files[next_idx]}" \
-                    --seven-zip "$SEVEN_ZIP" \
-                    --script "$script_path" \
-                    --depth "$depth" \
-                    --max-depth "$NESTED_MAX_DEPTH" \
-                    --dictionary-mib "${dictionary_mibs[next_idx]}" \
-                    --video-transcode "$video_transcode_flag" \
-                    --video-encoder "${VIDEO_ENCODER:-}" \
-                    --calibration-namespace "${calibrations[next_idx]}" \
-                    --gpu-lock "$gpu_lock" \
-                    --diagnostics-dir "${diagnostics[next_idx]}" \
-                    -- "${inherited[@]}" &
-        pids+=("$!"); pid_indexes+=("$next_idx")
+        if command -v setsid >/dev/null 2>&1; then
+            setsid env HARDCORE_ARCHIVE_PARENT_GPU_LOCK="$gpu_lock" \
+                python3 "$RESOURCE_POOL_RUNNER" run \
+                    --pool "$nested_pool_dir" \
+                    --cpu-min 1 \
+                    --cpu-max "$nested_cpu_max" \
+                    --ram-mib "${ram_claims[next_idx]}" \
+                    --label nested-archive \
+                    --priority normal \
+                    -- bash "$helper" \
+                        --source-parent "$SOURCE_PARENT" \
+                        --relative "${relatives[next_idx]}" \
+                        --output-rel "${outputs[next_idx]}" \
+                        --stage-parent "$NESTED_STAGE_PARENT" \
+                        --task-dir "${task_dirs[next_idx]}" \
+                        --result "${result_files[next_idx]}" \
+                        --log "${log_files[next_idx]}" \
+                        --seven-zip "$SEVEN_ZIP" \
+                        --script "$script_path" \
+                        --depth "$depth" \
+                        --max-depth "$NESTED_MAX_DEPTH" \
+                        --dictionary-mib "${dictionary_mibs[next_idx]}" \
+                        --video-transcode "$video_transcode_flag" \
+                        --video-encoder "${VIDEO_ENCODER:-}" \
+                        --calibration-namespace "${calibrations[next_idx]}" \
+                        --gpu-lock "$gpu_lock" \
+                        --diagnostics-dir "${diagnostics[next_idx]}" \
+                        -- "${inherited[@]}" &
+            worker_group=true
+        else
+            env HARDCORE_ARCHIVE_PARENT_GPU_LOCK="$gpu_lock" \
+                python3 "$RESOURCE_POOL_RUNNER" run \
+                    --pool "$nested_pool_dir" \
+                    --cpu-min 1 \
+                    --cpu-max "$nested_cpu_max" \
+                    --ram-mib "${ram_claims[next_idx]}" \
+                    --label nested-archive \
+                    --priority normal \
+                    -- bash "$helper" \
+                        --source-parent "$SOURCE_PARENT" \
+                        --relative "${relatives[next_idx]}" \
+                        --output-rel "${outputs[next_idx]}" \
+                        --stage-parent "$NESTED_STAGE_PARENT" \
+                        --task-dir "${task_dirs[next_idx]}" \
+                        --result "${result_files[next_idx]}" \
+                        --log "${log_files[next_idx]}" \
+                        --seven-zip "$SEVEN_ZIP" \
+                        --script "$script_path" \
+                        --depth "$depth" \
+                        --max-depth "$NESTED_MAX_DEPTH" \
+                        --dictionary-mib "${dictionary_mibs[next_idx]}" \
+                        --video-transcode "$video_transcode_flag" \
+                        --video-encoder "${VIDEO_ENCODER:-}" \
+                        --calibration-namespace "${calibrations[next_idx]}" \
+                        --gpu-lock "$gpu_lock" \
+                        --diagnostics-dir "${diagnostics[next_idx]}" \
+                        -- "${inherited[@]}" &
+            worker_group=false
+        fi
+        worker_pid=$!
+        hardcore_process_register "$worker_pid" "$worker_group" "nested archive worker"
+        pids+=("$worker_pid"); pid_indexes+=("$next_idx")
         active=$((active + 1)); active_disk=$((active_disk + work_estimate))
         hardcore_visual_open_log "Hardcore Archive - Nested: ${relatives[next_idx]}" \
-            "${log_files[next_idx]}" pid "$!"
+            "${log_files[next_idx]}" pid "$worker_pid"
     done
     while (( active > 0 )); do _hardcore_nested_reap_one; done
     unset -f _hardcore_nested_reap_one

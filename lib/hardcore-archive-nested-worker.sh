@@ -2,11 +2,15 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
+source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
+
 source_parent=''; relative=''; output_rel=''; stage_parent=''; task_dir=''
 result_file=''; log_file=''; seven_zip=''; script_path=''
 depth=0; max_depth=0; dictionary_mib=4
 video_transcode=false; video_encoder=''; calibration_namespace=''; gpu_lock=''; diagnostics_dir=''
 declare -a inherited=()
+child_pid=''
+child_group=false
 
 while (( $# > 0 )); do
     case "$1" in
@@ -65,10 +69,17 @@ lzma_threads=$grant_cpu
 image_jobs=1
 
 cleanup() {
+    local exit_status=$?
+    trap - EXIT HUP INT TERM
+    hardcore_process_cancel_all 2>/dev/null || true
     rm -rf --one-file-system -- "$extracted" "$normalized" "$child_work" 2>/dev/null || true
     rm -f -- "$child_archive" 2>/dev/null || true
+    return "$exit_status"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 write_result() {
     local action=$1 archived=$2 candidate_size=$3 archived_size=$4 reason=$5
@@ -158,10 +169,30 @@ child_command=(
 
 if [[ $video_transcode == true && ${HARDCORE_ARCHIVE_VIDEO_ENCODER_CLASS:-hardware} == hardware && -n $gpu_lock ]] && contains_direct_video; then
     mkdir -p -- "$(dirname -- "$gpu_lock")"
-    flock "$gpu_lock" "${child_command[@]}" >>"$log_file" 2>&1 || child_rc=$?
+    if command -v setsid >/dev/null 2>&1; then
+        setsid flock "$gpu_lock" "${child_command[@]}" >>"$log_file" 2>&1 &
+        child_group=true
+    else
+        flock "$gpu_lock" "${child_command[@]}" >>"$log_file" 2>&1 &
+        child_group=false
+    fi
 else
-    "${child_command[@]}" >>"$log_file" 2>&1 || child_rc=$?
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "${child_command[@]}" >>"$log_file" 2>&1 &
+        child_group=true
+    else
+        "${child_command[@]}" >>"$log_file" 2>&1 &
+        child_group=false
+    fi
 fi
+child_pid=$!
+hardcore_process_register "$child_pid" "$child_group" "recursive archive child"
+set +e
+wait "$child_pid"
+child_rc=$?
+set -e
+hardcore_process_unregister "$child_pid"
+child_pid=''
 
 printf '\nRecursive child exit status: %s\n' "$child_rc" >> "$log_file"
 if (( child_rc != 0 )); then

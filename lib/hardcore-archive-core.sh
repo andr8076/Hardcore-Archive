@@ -19,6 +19,10 @@ fi
 set -Eeuo pipefail
 IFS=$'\n\t'
 
+# The core is normally sourced by the policy runner in a fresh Bash process,
+# so load the cancellation/process registry here as well as in the launcher.
+source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
+
 PLATFORM_KERNEL=$(uname -s 2>/dev/null || printf unknown)
 case $PLATFORM_KERNEL in
     Linux)
@@ -1339,7 +1343,7 @@ run_logged_stage() {
     local logfile=$2
     shift 2
     local started=$SECONDS
-    local job_pid heartbeat_pid='' rc
+    local job_pid heartbeat_pid='' rc job_group=false
     local timing_started timing_phase=archive_write
     timing_started=$(hardcore_timing_now 2>/dev/null) || timing_started=0
     [[ $stage == 'archive integrity test' ]] && timing_phase=archive_verification
@@ -1347,23 +1351,37 @@ run_logged_stage() {
     : > "$logfile"
 
     set +e
-    (
-        set -o pipefail
-        "$@" 2>&1 | tee "$logfile"
-    ) &
+    if command -v setsid >/dev/null 2>&1; then
+        setsid bash -c '
+            logfile=$1
+            shift
+            set -o pipefail
+            "$@" 2>&1 | tee "$logfile"
+        ' _ "$logfile" "$@" &
+        job_group=true
+    else
+        (
+            set -o pipefail
+            "$@" 2>&1 | tee "$logfile"
+        ) &
+    fi
     job_pid=$!
+    hardcore_process_register "$job_pid" "$job_group" "$stage"
 
     if (( PROGRESS_INTERVAL > 0 )); then
         heartbeat "$stage" "$job_pid" "$started" &
         heartbeat_pid=$!
+        hardcore_process_register "$heartbeat_pid" false "$stage heartbeat"
     fi
 
     wait "$job_pid"
     rc=$?
+    hardcore_process_unregister "$job_pid"
 
     if [[ -n $heartbeat_pid ]]; then
         kill "$heartbeat_pid" 2>/dev/null || true
         wait "$heartbeat_pid" 2>/dev/null || true
+        hardcore_process_unregister "$heartbeat_pid"
     fi
     set -e
 
@@ -2344,7 +2362,7 @@ build_batch_child_arguments() {
 
 run_batch_mode() {
     local parent_input=${POSITIONAL[0]} output_input=${POSITIONAL[1]:-}
-    local parent output_dir script_path child child_name archive rc
+    local parent output_dir script_path child child_name archive rc child_pid child_group
     local loose_files=0 total=0 succeeded=0 failed=0 skipped=0 analyzed=0
     local started=$SECONDS batch_elapsed parent_name root_stage_parent='' root_stage='' root_snapshot_before='' root_snapshot_after=''
     local jobs=1 active=0 batch_lock_file batch_lock_fd state_status
@@ -2735,6 +2753,9 @@ printf 'Dependency preflight:    %s\n' "$DEPENDENCY_PREFLIGHT_SUMMARY"
         wait "$pid"
         item_rc=$?
         set -e
+        if declare -F hardcore_process_unregister >/dev/null 2>&1; then
+            hardcore_process_unregister "$pid"
+        fi
         printf '\nExit status: %s\n' "$item_rc" >> "${pid_logs[chosen]}"
         finish_item "$item_rc" "${pid_names[chosen]}" "${pid_sources[chosen]}"             "${pid_archives[chosen]}" "${pid_kinds[chosen]}" "${pid_logs[chosen]}"
         release_index_resources "$idx"
@@ -2814,11 +2835,23 @@ printf 'Dependency preflight:    %s\n' "$DEPENDENCY_PREFLIGHT_SUMMARY"
             done
             printf 'Launching with pinned resources: dictionary=%s MiB, RAM=%s MiB, CPU=%s, GPU=%s\n' \
                 "${plan_dict[index]}" "${plan_ram[index]}" "${plan_cpu[index]}" "${plan_gpu[index]}"
-            env HARDCORE_ARCHIVE_INHIBITED="${HARDCORE_ARCHIVE_INHIBITED:-0}" HARDCORE_ARCHIVE_DEPENDENCIES_APPROVED=1 \
-                HARDCORE_ARCHIVE_DIAGNOSTIC_DIR="$item_diagnostics" HARDCORE_ARCHIVE_LIVE_LOG="$item_log" \
-                bash "$script_path" "${item_args[@]}" "$child" "$archive" >"$item_log" 2>&1 &
-            pids+=("$!")
-            BATCH_CHILD_PIDS+=("$!")
+            if command -v setsid >/dev/null 2>&1; then
+                setsid env HARDCORE_ARCHIVE_INHIBITED="${HARDCORE_ARCHIVE_INHIBITED:-0}" HARDCORE_ARCHIVE_DEPENDENCIES_APPROVED=1 \
+                    HARDCORE_ARCHIVE_DIAGNOSTIC_DIR="$item_diagnostics" HARDCORE_ARCHIVE_LIVE_LOG="$item_log" \
+                    bash "$script_path" "${item_args[@]}" "$child" "$archive" >"$item_log" 2>&1 &
+                child_group=true
+            else
+                env HARDCORE_ARCHIVE_INHIBITED="${HARDCORE_ARCHIVE_INHIBITED:-0}" HARDCORE_ARCHIVE_DEPENDENCIES_APPROVED=1 \
+                    HARDCORE_ARCHIVE_DIAGNOSTIC_DIR="$item_diagnostics" HARDCORE_ARCHIVE_LIVE_LOG="$item_log" \
+                    bash "$script_path" "${item_args[@]}" "$child" "$archive" >"$item_log" 2>&1 &
+                child_group=false
+            fi
+            child_pid=$!
+            if declare -F hardcore_process_register >/dev/null 2>&1; then
+                hardcore_process_register "$child_pid" "$child_group" "batch child: $child_name"
+            fi
+            pids+=("$child_pid")
+            BATCH_CHILD_PIDS+=("$child_pid")
             pid_names+=("$child_name")
             pid_sources+=("$child")
             pid_archives+=("$archive")
@@ -3058,6 +3091,12 @@ preserve_failed_archive() {
 cleanup() {
     local exit_status=$?
     set +e
+    trap - EXIT HUP INT TERM
+
+    # Stop every registered job before touching any staging directory.  This
+    # covers batch children, nested workers, archive/verification stages, and
+    # the media pipelines in one bounded cancellation path.
+    hardcore_process_cancel_all 2>/dev/null || true
 
     if [[ -n ${VIDEO_PIPELINE_PID:-} ]] && kill -0 "$VIDEO_PIPELINE_PID" 2>/dev/null; then
         if $VIDEO_PIPELINE_GROUP; then
@@ -3160,6 +3199,7 @@ cleanup() {
     return "$exit_status"
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -4660,6 +4700,7 @@ start_video_pipeline() {
         VIDEO_PIPELINE_GROUP=false
     fi
     VIDEO_PIPELINE_PID=$!
+    hardcore_process_register "$VIDEO_PIPELINE_PID" "$VIDEO_PIPELINE_GROUP" "video pipeline"
     hardcore_visual_open_log "Hardcore Archive - Video / FFmpeg" "$VIDEO_LOG" pid "$VIDEO_PIPELINE_PID"
 }
 
@@ -4675,6 +4716,7 @@ wait_for_video_pipeline() {
         if (( PROGRESS_INTERVAL > 0 )); then
             heartbeat "video transcoding" "$VIDEO_PIPELINE_PID" "$started" &
             heartbeat_pid=$!
+            hardcore_process_register "$heartbeat_pid" false "video heartbeat"
         fi
     else
         printf '\nStage 5/8: Video process has already finished.\n'
@@ -4683,12 +4725,14 @@ wait_for_video_pipeline() {
     set +e
     wait "$VIDEO_PIPELINE_PID"
     rc=$?
+    hardcore_process_unregister "$VIDEO_PIPELINE_PID"
     set -e
     VIDEO_PIPELINE_PID=""
 
     if [[ -n $heartbeat_pid ]]; then
         kill "$heartbeat_pid" 2>/dev/null || true
         wait "$heartbeat_pid" 2>/dev/null || true
+        hardcore_process_unregister "$heartbeat_pid"
     fi
 
     if (( rc != 0 )); then
@@ -4776,6 +4820,7 @@ start_image_pipeline() {
         IMAGE_PIPELINE_GROUP=false
     fi
     IMAGE_PIPELINE_PID=$!
+    hardcore_process_register "$IMAGE_PIPELINE_PID" "$IMAGE_PIPELINE_GROUP" "image pipeline"
     hardcore_visual_open_log "Hardcore Archive - Images" "$IMAGE_LOG" pid "$IMAGE_PIPELINE_PID" "$IMAGE_RESULT_MANIFEST"
 }
 
@@ -4790,11 +4835,13 @@ wait_for_image_pipeline() {
     set +e
     wait "$IMAGE_PIPELINE_PID"
     rc=$?
+    hardcore_process_unregister "$IMAGE_PIPELINE_PID"
     set -e
     IMAGE_PIPELINE_PID=""
     if [[ -n $heartbeat_pid ]]; then
         kill "$heartbeat_pid" 2>/dev/null || true
         wait "$heartbeat_pid" 2>/dev/null || true
+        hardcore_process_unregister "$heartbeat_pid"
     fi
     if (( rc != 0 )); then
         warn "The image optimizer returned exit code $rc. Missing results will fall back to originals."

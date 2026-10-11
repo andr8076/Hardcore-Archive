@@ -237,6 +237,12 @@ For video behavior, read [`docs/video-quality-validation.md`](docs/video-quality
 
 ## If something goes wrong
 
+Ctrl+C, HUP, and TERM cancel the complete run. Hardcore Archive stops and
+reaps active archive stages, batch children, media workers, nested workers, and
+resource-pool commands before removing temporary staging. The source folder is
+kept, diagnostics remain available, and any partial archive is preserved using
+the normal failure-report path.
+
 1. Keep the source folder.
 2. Keep the run log and failure report.
 3. Run `--inspect` on the archive.

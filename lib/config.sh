@@ -7,7 +7,10 @@ HARDCORE_CONFIG_SH_LOADED=1
 HARDCORE_MERGED_CONFIG=''
 
 hardcore_config_cleanup() {
+    local exit_status=$?
+    hardcore_process_cancel_all 2>/dev/null || true
     [[ -n ${HARDCORE_MERGED_CONFIG:-} ]] && rm -f -- "$HARDCORE_MERGED_CONFIG" 2>/dev/null || true
+    return "$exit_status"
 }
 
 hardcore_trim_config_value() {
@@ -164,10 +167,13 @@ hardcore_config_main() {
         return 2
     fi
 
-    hardcore_config_cleanup
+    hardcore_config_cleanup || true
     umask 077
     HARDCORE_MERGED_CONFIG=$(mktemp "${TMPDIR:-/tmp}/hardcore-archive-config.XXXXXX")
-    trap hardcore_config_cleanup EXIT HUP INT TERM
+    trap hardcore_config_cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
     hardcore_append_config "$shipped_config" 'shipped defaults'
     if ! $ignore_external_config; then
@@ -246,8 +252,7 @@ hardcore_config_main() {
 
     set +e
     HARDCORE_ARCHIVE_POWER_OFF_REQUESTED=$([[ $power_off_enabled == true ]] && printf 1 || printf 0) \
-        bash -c 'runner=$1; shift; source "$runner"' "$program_name" "$runner" \
-            --config "$HARDCORE_MERGED_CONFIG" "${forwarded[@]}"
+        hardcore_run_sourced "$runner" --config "$HARDCORE_MERGED_CONFIG" "${forwarded[@]}"
     rc=$?
     set -e
 
@@ -268,7 +273,7 @@ EOF_HELP
     (( rc == 0 )) || return "$rc"
 
     if [[ $power_off_enabled == true ]]; then
-        hardcore_config_cleanup
+        hardcore_config_cleanup || true
         HARDCORE_MERGED_CONFIG=''
         trap - EXIT HUP INT TERM
         command -v sync >/dev/null 2>&1 && sync
@@ -283,7 +288,7 @@ EOF_HELP
         fi
     fi
 
-    hardcore_config_cleanup
+    hardcore_config_cleanup || true
     HARDCORE_MERGED_CONFIG=''
     trap - EXIT HUP INT TERM
     return 0
